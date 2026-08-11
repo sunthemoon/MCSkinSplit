@@ -1,0 +1,23 @@
+{
+  "name": "mc-skin-split",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.13.1",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=10.13.1 <11"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @mc-skin-split/web dev",
+    "build": "pnpm --filter @mc-skin-split/web build",
+    "typecheck": "pnpm --filter @mc-skin-split/web typecheck",
+    "test": "pnpm --filter @mc-skin-split/web test",
+    "fixtures:generate": "node scripts/generate-fixtures.mjs",
+    "fixtures:check": "node scripts/generate-fixtures.mjs --check",
+    "verify": "pnpm fixtures:check && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "pngjs": "7.0.0"
+  }
+}

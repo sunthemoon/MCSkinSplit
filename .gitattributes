@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+*.png binary
+*.webp binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md -whitespace
