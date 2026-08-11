@@ -57,13 +57,35 @@ The detailed coordinate and inference contract is in [`uv-layout.md`](uv-layout.
 - `skinview3d` is dynamically imported. The Studio/Atlas bundle can render before the WebGL dependency finishes loading or if it fails.
 - Viewer dimensions follow observed content size and are written in a scheduled animation frame. CSS size and WebGL backing-buffer size remain separate through device pixel ratio handling.
 
+## M4 decisions
+
+- `packages/skin-core` owns the fixed semantic taxonomy, masks, spans, palettes,
+  manual operations, part extraction, and deterministic single-part conflict
+  analysis. These functions remain framework-independent.
+- Every valid, non-transparent UV pixel belongs to exactly one confirmed component
+  or `unknown`. Masks are authoritative; spans and palettes are validated derived
+  data.
+- Brush gestures are disposable browser drafts. Only a confirmed semantic
+  operation creates a Revision, and only the Branch HEAD can be edited directly.
+- Revision snapshots add dynamically named component mask PNGs to the same hash and
+  asset verification boundary as the core files. Older snapshots are upgraded only
+  when producing a new Revision.
+- Exported parts are immutable five-file assets. Export does not mutate the source
+  Revision; application always previews first and requires an explicit conflict
+  strategy before it creates an `apply_part` Revision.
+- M4 conflict reports share the M6 report shape. Layer and unknown conflicts remain
+  zero for single-part application and will be populated by the compositor.
+
+The detailed contract is in
+[`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).
+
 ## Planned package boundaries
 
 ```text
-apps/web                 UI and 2D/3D adapters (M0-M3)
+apps/web                 UI, semantic editor, and 2D/3D adapters (M0-M4)
 apps/api                 HTTP API and revision orchestration
 apps/ai-worker           isolated analysis jobs
-packages/skin-core       PNG, UV, pixels, and render helpers (M1)
+packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M4)
 packages/skin-schema     JSON schemas and shared types
 packages/skin-revision   immutable snapshots and branching (M2)
 packages/skin-compositor part application and conflict detection

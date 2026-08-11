@@ -13,6 +13,12 @@ const REAL_SKIN_PATH = fileURLToPath(
     import.meta.url,
   ),
 );
+const TARGET_SKIN_PATH = fileURLToPath(
+  new URL(
+    "../../../tests/fixtures/skins/354359a2c2f33777.png",
+    import.meta.url,
+  ),
+);
 
 const resources: Array<{
   readonly app: FastifyInstance;
@@ -94,7 +100,7 @@ describe("revision API", () => {
         sequence: 1,
         operationType: "import",
       },
-      assets: [{}, {}, {}],
+      assets: [{}, {}, {}, {}],
     });
 
     const skin = await app.inject({
@@ -195,6 +201,114 @@ describe("revision API", () => {
         name: "project-route-branch",
         baseRevisionId: imported.revisionId,
       },
+    });
+  });
+
+  it("supports semantic edit, part export, conflict preview, and explicit apply", async () => {
+    const { app } = await createApi();
+    const sourceProject = await createProject(app, "Semantic API source");
+    const sourceImport = await importSkin(app, sourceProject.projectId);
+    const edited = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceImport.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        summary: "标记来源头发",
+        target: {
+          instanceId: "hair.main",
+          displayName: "主头发",
+          category: "hair",
+        },
+        spans: [
+          { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+        ],
+      },
+    });
+    expect(edited.statusCode).toBe(201);
+    const editedRevisionId = edited.json<MutationResponse>().revision.id;
+
+    const exported = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${editedRevisionId}/components/hair.main/export-part`,
+      payload: { name: "API 头发" },
+    });
+    expect(exported.statusCode).toBe(201);
+    const part = exported.json<{ part: { id: string } }>().part;
+
+    const listed = await app.inject({ method: "GET", url: "/api/parts?category=hair" });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      parts: [{ id: part.id, name: "API 头发", category: "hair" }],
+    });
+    const texture = await app.inject({
+      method: "GET",
+      url: `/api/parts/${part.id}/texture.png`,
+    });
+    expect(texture.statusCode).toBe(200);
+    expect(texture.headers["content-type"]).toContain("image/png");
+    expect(decodeSkinPng(texture.rawPayload)).toMatchObject({
+      width: 64,
+      height: 64,
+    });
+
+    const targetProject = await createProject(app, "Semantic API target");
+    const targetImport = await importSkinFromPath(
+      app,
+      targetProject.projectId,
+      TARGET_SKIN_PATH,
+    );
+    const preview = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${targetImport.revisionId}/apply-part`,
+      payload: { partId: part.id },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      committed: false,
+      revisionId: targetImport.revisionId,
+      report: { compatible: true, writePixelCount: 2 },
+    });
+    const beforeCommit = await app.inject({
+      method: "GET",
+      url: `/api/projects/${targetProject.projectId}/revisions`,
+    });
+    expect(beforeCommit.json<{ revisions: unknown[] }>().revisions).toHaveLength(1);
+
+    const applied = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${targetImport.revisionId}/apply-part`,
+      payload: {
+        partId: part.id,
+        strategy: "use_part",
+        summary: "API 混搭头发",
+      },
+    });
+    expect(applied.statusCode).toBe(201);
+    expect(applied.json()).toMatchObject({
+      committed: true,
+      revision: {
+        parentRevisionId: targetImport.revisionId,
+        operationType: "apply_part",
+        summary: "API 混搭头发",
+      },
+    });
+
+    const invalidOperation = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${editedRevisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "bad",
+          displayName: "Bad",
+          category: "hair",
+        },
+        spans: [{ surface: "invalid", y: 0, x0: 0, x1: 0 }],
+      },
+    });
+    expect(invalidOperation.statusCode).toBe(400);
+    expect(invalidOperation.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
     });
   });
 
@@ -305,6 +419,21 @@ async function importSkin(
     url: `/api/projects/${projectId}/import`,
     headers: { "content-type": "image/png" },
     payload: await readFile(REAL_SKIN_PATH),
+  });
+  expect(response.statusCode).toBe(201);
+  return response.json<ImportResponse>();
+}
+
+async function importSkinFromPath(
+  app: FastifyInstance,
+  projectId: string,
+  path: string,
+): Promise<ImportResponse> {
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${projectId}/import`,
+    headers: { "content-type": "image/png" },
+    payload: await readFile(path),
   });
   expect(response.statusCode).toBe(201);
   return response.json<ImportResponse>();

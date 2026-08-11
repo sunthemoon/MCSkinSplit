@@ -6,18 +6,18 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson, sha256 } from "./hash";
 import { RevisionStoreError, snapshotCorrupt } from "./errors";
 import type { SnapshotChecksum } from "./types";
 
-const SNAPSHOT_FILES = [
+const CORE_SNAPSHOT_FILES = [
   "skin.png",
   "segmentation.json",
   "operation.json",
 ] as const;
 
-type SnapshotFileName = (typeof SNAPSHOT_FILES)[number];
+type CoreSnapshotFileName = (typeof CORE_SNAPSHOT_FILES)[number];
 
 export interface SnapshotInput {
   readonly projectId: string;
@@ -25,18 +25,22 @@ export interface SnapshotInput {
   readonly skinPng: Uint8Array;
   readonly segmentationJson: string;
   readonly operationJson: string;
+  readonly additionalFiles?: Readonly<Record<string, Uint8Array>>;
 }
 
 export interface SnapshotFile {
-  readonly name: SnapshotFileName;
+  readonly name: string;
   readonly storagePath: string;
   readonly bytes: Uint8Array;
   readonly sha256: string;
 }
 
+export type SnapshotFiles = Readonly<Record<string, SnapshotFile>> &
+  Readonly<Record<CoreSnapshotFileName, SnapshotFile>>;
+
 export interface VerifiedSnapshot {
   readonly directory: string;
-  readonly files: Readonly<Record<SnapshotFileName, SnapshotFile>>;
+  readonly files: SnapshotFiles;
   readonly checksum: SnapshotChecksum;
 }
 
@@ -77,17 +81,30 @@ export class SnapshotStorage {
     let finalized = false;
 
     try {
-      const fileInputs: Readonly<Record<SnapshotFileName, Uint8Array>> = {
+      const fileInputs: Record<string, Uint8Array> = {
         "skin.png": input.skinPng,
         "segmentation.json": Buffer.from(input.segmentationJson, "utf8"),
         "operation.json": Buffer.from(input.operationJson, "utf8"),
       };
-      const fileHashes = {} as Record<SnapshotFileName, string>;
+      for (const [fileName, bytes] of Object.entries(input.additionalFiles ?? {})) {
+        assertAdditionalSnapshotFile(fileName);
+        if (fileName in fileInputs) {
+          throw new TypeError(`Duplicate snapshot file: ${fileName}`);
+        }
+        fileInputs[fileName] = bytes;
+      }
+      const fileNames = [
+        ...CORE_SNAPSHOT_FILES,
+        ...Object.keys(input.additionalFiles ?? {}).sort(),
+      ];
+      const fileHashes: Record<string, string> = {};
 
-      for (const fileName of SNAPSHOT_FILES) {
-        const bytes = fileInputs[fileName];
+      for (const fileName of fileNames) {
+        const bytes = fileInputs[fileName]!;
+        const path = resolveWithin(temporaryDirectory, fileName);
+        await mkdir(dirname(path), { recursive: true });
         await writeDurableFile(
-          resolveWithin(temporaryDirectory, fileName),
+          path,
           bytes,
         );
         fileHashes[fileName] = sha256(bytes);
@@ -123,9 +140,9 @@ export class SnapshotStorage {
     try {
       const checksumBytes = await readFile(resolveWithin(directory, "checksum.json"));
       const checksum = parseChecksum(checksumBytes, revisionId);
-      const files = {} as Record<SnapshotFileName, SnapshotFile>;
+      const files: Record<string, SnapshotFile> = {};
 
-      for (const fileName of SNAPSHOT_FILES) {
+      for (const fileName of Object.keys(checksum.files).sort()) {
         const bytes = new Uint8Array(
           await readFile(resolveWithin(directory, fileName)),
         );
@@ -145,7 +162,7 @@ export class SnapshotStorage {
         };
       }
 
-      return { directory, files, checksum };
+      return { directory, files: files as SnapshotFiles, checksum };
     } catch (error) {
       if (error instanceof RevisionStoreError) {
         throw error;
@@ -177,11 +194,22 @@ function parseChecksum(bytes: Uint8Array, revisionId: string): SnapshotChecksum 
   }
 
   const fileNames = Object.keys(parsed.files).sort();
-  if (fileNames.join("\0") !== [...SNAPSHOT_FILES].sort().join("\0")) {
-    throw snapshotCorrupt(revisionId, "checksum.json 文件清单不完整");
+  for (const coreFile of CORE_SNAPSHOT_FILES) {
+    if (!fileNames.includes(coreFile)) {
+      throw snapshotCorrupt(revisionId, `checksum.json 缺少 ${coreFile}`);
+    }
   }
 
-  for (const fileName of SNAPSHOT_FILES) {
+  for (const fileName of fileNames) {
+    if (!CORE_SNAPSHOT_FILES.includes(fileName as CoreSnapshotFileName)) {
+      try {
+        assertAdditionalSnapshotFile(fileName);
+      } catch (error) {
+        throw snapshotCorrupt(revisionId, `checksum.json 包含非法文件 ${fileName}`, {
+          cause: error,
+        });
+      }
+    }
     const hash = parsed.files[fileName];
     if (typeof hash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(hash)) {
       throw snapshotCorrupt(revisionId, `${fileName} checksum 无效`);
@@ -204,9 +232,15 @@ async function writeDurableFile(path: string, data: Uint8Array): Promise<void> {
 function storagePath(
   projectId: string,
   revisionId: string,
-  fileName: SnapshotFileName,
+  fileName: string,
 ): string {
   return `projects/${projectId}/revisions/${revisionId}/${fileName}`;
+}
+
+function assertAdditionalSnapshotFile(fileName: string): void {
+  if (!/^components\/[a-z][a-z0-9._-]{0,100}\.mask\.png$/.test(fileName)) {
+    throw new TypeError(`Unsupported snapshot file: ${fileName}`);
+  }
 }
 
 function assertSafeId(kind: string, value: string): void {

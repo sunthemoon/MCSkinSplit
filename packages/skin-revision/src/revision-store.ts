@@ -2,10 +2,27 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  SemanticEditError,
+  analyzePartApplication,
+  applyManualSemanticOperation,
+  applyPartPixels,
   assessArmType,
+  createInitialSemanticState,
   decodeSkinPng,
   encodeSkinPng,
-  type ArmType,
+  exportSemanticPart,
+  getSkinLayout,
+  isSemanticCategory,
+  maskToRgbaImage,
+  maskToPixelIds,
+  pixelIdsToSpans,
+  rgbaImageToMask,
+  rebaseSemanticStateImage,
+  validateSemanticState,
+  type ManualSemanticOperation,
+  type PartManifest,
+  type SegmentationDocument,
+  type SemanticState,
 } from "@mc-skin-split/skin-core";
 import type Database from "better-sqlite3";
 import { openRevisionDatabase } from "./database";
@@ -18,19 +35,31 @@ import {
 } from "./errors";
 import { canonicalJson, sha256 } from "./hash";
 import {
+  PART_FILE_NAMES,
+  PartStorage,
+  type PartFileName,
+  type VerifiedPartStorage,
+} from "./part-storage";
+import {
   SnapshotStorage,
   type VerifiedSnapshot,
 } from "./snapshot-storage";
 import {
   OPERATION_TYPES,
   type ActorType,
+  type ApplyPartInput,
+  type ApplyPartResult,
   type BranchFromRevisionInput,
   type CreateProjectInput,
   type CreateProjectResult,
+  type ExportPartInput,
   type ImportProjectInput,
   type ImportProjectResult,
   type ImportSkinInput,
+  type ManualRevisionOperationInput,
   type OperationSnapshot,
+  type PartApplicationPreview,
+  type PartFileAsset,
   type RevisionDiff,
   type RevisionIdKind,
   type RevisionMutationResult,
@@ -41,6 +70,7 @@ import {
   type SkinAsset,
   type SkinBranch,
   type SkinProject,
+  type SkinPart,
   type SkinRevision,
 } from "./types";
 
@@ -105,6 +135,45 @@ interface RevisionIds {
   readonly operationId: string;
 }
 
+interface PartRow {
+  readonly id: string;
+  readonly source_project_id: string;
+  readonly source_revision_id: string;
+  readonly source_component_id: string;
+  readonly name: string;
+  readonly category: string;
+  readonly subtype: string | null;
+  readonly arm_type: string;
+  readonly created_at: string;
+  readonly manifest_json: string;
+  readonly metadata_json: string;
+  readonly texture_id: string;
+  readonly texture_storage_path: string;
+  readonly texture_mime_type: string;
+  readonly texture_byte_size: number;
+  readonly texture_sha256: string;
+  readonly mask_id: string;
+  readonly mask_storage_path: string;
+  readonly mask_mime_type: string;
+  readonly mask_byte_size: number;
+  readonly mask_sha256: string;
+  readonly manifest_id: string;
+  readonly manifest_storage_path: string;
+  readonly manifest_mime_type: string;
+  readonly manifest_byte_size: number;
+  readonly manifest_sha256: string;
+  readonly preview_id: string;
+  readonly preview_storage_path: string;
+  readonly preview_mime_type: string;
+  readonly preview_byte_size: number;
+  readonly preview_sha256: string;
+  readonly source_id: string;
+  readonly source_storage_path: string;
+  readonly source_mime_type: string;
+  readonly source_byte_size: number;
+  readonly source_sha256: string;
+}
+
 const REVISION_SELECT = `
   SELECT
     revision.*,
@@ -114,9 +183,46 @@ const REVISION_SELECT = `
   JOIN skin_branch AS branch ON branch.id = revision.branch_id
 `;
 
+const PART_SELECT = `
+  SELECT
+    part.*,
+    texture.id AS texture_id,
+    texture.storage_path AS texture_storage_path,
+    texture.mime_type AS texture_mime_type,
+    texture.byte_size AS texture_byte_size,
+    texture.sha256 AS texture_sha256,
+    mask.id AS mask_id,
+    mask.storage_path AS mask_storage_path,
+    mask.mime_type AS mask_mime_type,
+    mask.byte_size AS mask_byte_size,
+    mask.sha256 AS mask_sha256,
+    manifest.id AS manifest_id,
+    manifest.storage_path AS manifest_storage_path,
+    manifest.mime_type AS manifest_mime_type,
+    manifest.byte_size AS manifest_byte_size,
+    manifest.sha256 AS manifest_sha256,
+    preview.id AS preview_id,
+    preview.storage_path AS preview_storage_path,
+    preview.mime_type AS preview_mime_type,
+    preview.byte_size AS preview_byte_size,
+    preview.sha256 AS preview_sha256,
+    source.id AS source_id,
+    source.storage_path AS source_storage_path,
+    source.mime_type AS source_mime_type,
+    source.byte_size AS source_byte_size,
+    source.sha256 AS source_sha256
+  FROM part_asset AS part
+  JOIN part_file_asset AS texture ON texture.id = part.texture_asset_id
+  JOIN part_file_asset AS mask ON mask.id = part.mask_asset_id
+  JOIN part_file_asset AS manifest ON manifest.id = part.manifest_asset_id
+  JOIN part_file_asset AS preview ON preview.id = part.preview_asset_id
+  JOIN part_file_asset AS source ON source.id = part.source_asset_id
+`;
+
 export class RevisionStore {
   readonly dataDirectory: string;
   readonly storage: SnapshotStorage;
+  readonly partStorage: PartStorage;
   private readonly database: Database.Database;
   private readonly nowProvider: () => Date | string;
   private readonly idProvider: (kind: RevisionIdKind) => string;
@@ -130,6 +236,7 @@ export class RevisionStore {
     this.dataDirectory = resolve(options.dataDirectory);
     mkdirSync(this.dataDirectory, { recursive: true });
     this.storage = new SnapshotStorage(this.dataDirectory);
+    this.partStorage = new PartStorage(this.dataDirectory);
     this.database = openRevisionDatabase(
       options.databasePath ?? resolve(this.dataDirectory, "mcskinsplit.sqlite"),
     );
@@ -214,6 +321,32 @@ export class RevisionStore {
     return rows.map(mapAsset);
   }
 
+  listParts(category?: string): SkinPart[] {
+    if (category !== undefined && !isSemanticCategory(category)) {
+      throw invalidInput(`未知部件分类：${category}`);
+    }
+    const rows = (category === undefined
+      ? this.database
+          .prepare(`${PART_SELECT} ORDER BY part.created_at, part.id`)
+          .all()
+      : this.database
+          .prepare(
+            `${PART_SELECT} WHERE part.category = ? ORDER BY part.created_at, part.id`,
+          )
+          .all(category)) as PartRow[];
+    return rows.map(mapPart);
+  }
+
+  getPart(partId: string): SkinPart {
+    const row = this.database
+      .prepare(`${PART_SELECT} WHERE part.id = ?`)
+      .get(partId) as PartRow | undefined;
+    if (!row) {
+      throw notFound("Part", partId);
+    }
+    return mapPart(row);
+  }
+
   async createProject(input: CreateProjectInput): Promise<CreateProjectResult> {
     return this.withWriteLock(() => this.createProjectUnlocked(input));
   }
@@ -249,6 +382,110 @@ export class RevisionStore {
     );
   }
 
+  async applyManualOperation(
+    sourceRevisionId: string,
+    input: ManualRevisionOperationInput,
+  ): Promise<RevisionMutationResult> {
+    return this.withWriteLock(() =>
+      this.applyManualOperationUnlocked(sourceRevisionId, input),
+    );
+  }
+
+  async exportPart(
+    revisionId: string,
+    componentId: string,
+    input: ExportPartInput = {},
+  ): Promise<SkinPart> {
+    return this.withWriteLock(() =>
+      this.exportPartUnlocked(revisionId, componentId, input),
+    );
+  }
+
+  async applyPart(
+    revisionId: string,
+    input: ApplyPartInput,
+  ): Promise<ApplyPartResult> {
+    return this.withWriteLock(() => this.applyPartUnlocked(revisionId, input));
+  }
+
+  async verifyPartStorage(partId: string): Promise<VerifiedPartStorage> {
+    const part = this.getPart(partId);
+    let stored: VerifiedPartStorage;
+    try {
+      stored = await this.partStorage.readPart(part.id);
+    } catch (error) {
+      throw partCorrupt(part.id, "文件缺失", error);
+    }
+    const expected: Readonly<Record<PartFileName, PartFileAsset>> = {
+      "texture.png": part.texture,
+      "write-mask.png": part.writeMask,
+      "manifest.json": part.manifestFile,
+      "preview.png": part.preview,
+      "source.json": part.source,
+    };
+    for (const fileName of PART_FILE_NAMES) {
+      const file = stored.files[fileName];
+      const asset = expected[fileName];
+      if (
+        file.storagePath !== asset.storagePath ||
+        file.sha256 !== asset.sha256 ||
+        file.bytes.byteLength !== asset.byteSize
+      ) {
+        throw partCorrupt(part.id, `${fileName} 与数据库资产不一致`);
+      }
+    }
+    const storedManifest = parsePartManifest(
+      Buffer.from(stored.files["manifest.json"].bytes).toString("utf8"),
+      part.id,
+    );
+    if (canonicalJson(storedManifest) !== canonicalJson(part.manifest)) {
+      throw partCorrupt(part.id, "manifest.json 与数据库不一致");
+    }
+    return stored;
+  }
+
+  async readPartTexturePng(partId: string): Promise<Uint8Array> {
+    const stored = await this.verifyPartStorage(partId);
+    return stored.files["texture.png"].bytes.slice();
+  }
+
+  async readPartPreviewPng(partId: string): Promise<Uint8Array> {
+    const stored = await this.verifyPartStorage(partId);
+    return stored.files["preview.png"].bytes.slice();
+  }
+
+  async previewPartApplication(
+    revisionId: string,
+    partId: string,
+  ): Promise<PartApplicationPreview> {
+    const revision = this.getRevision(revisionId);
+    const part = this.getPart(partId);
+    const [snapshot, storedPart] = await Promise.all([
+      this.verifyRevisionSnapshot(revision.id),
+      this.verifyPartStorage(part.id),
+    ]);
+    const image = decodeSkinPng(snapshot.files["skin.png"].bytes);
+    const texture = decodeSkinPng(storedPart.files["texture.png"].bytes);
+    const writeMask = rgbaImageToMask(
+      decodeSkinPng(storedPart.files["write-mask.png"].bytes),
+    );
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      revision.id,
+    );
+    return {
+      revisionId: revision.id,
+      part,
+      report: analyzePartApplication(
+        image,
+        texture,
+        writeMask,
+        part.manifest,
+        segmentation.source.armType,
+      ),
+    };
+  }
+
   async verifyRevisionSnapshot(revisionId: string): Promise<VerifiedSnapshot> {
     const revision = this.getRevision(revisionId);
     const snapshot = await this.storage.verifySnapshot(
@@ -256,48 +493,50 @@ export class RevisionStore {
       revision.id,
     );
     const assets = this.getRevisionAssets(revision.id);
-    const expectedAssets = new Map<SkinAsset["assetType"], {
-      readonly file: VerifiedSnapshot["files"][keyof VerifiedSnapshot["files"]];
-      readonly id: string;
-      readonly mimeType: string;
-    }>([
-      [
-        "revision_skin",
-        {
-          file: snapshot.files["skin.png"],
+    const expectedAssets = Object.values(snapshot.files).map((file) => {
+      if (file.name === "skin.png") {
+        return {
+          file,
           id: revision.skinAssetId,
+          assetType: "revision_skin" as const,
           mimeType: "image/png",
-        },
-      ],
-      [
-        "segmentation_json",
-        {
-          file: snapshot.files["segmentation.json"],
+        };
+      }
+      if (file.name === "segmentation.json") {
+        return {
+          file,
           id: revision.segmentationAssetId,
+          assetType: "segmentation_json" as const,
           mimeType: "application/json",
-        },
-      ],
-      [
-        "operation_json",
-        {
-          file: snapshot.files["operation.json"],
+        };
+      }
+      if (file.name === "operation.json") {
+        return {
+          file,
           id: revision.operationAssetId,
+          assetType: "operation_json" as const,
           mimeType: "application/json",
-        },
-      ],
-    ]);
+        };
+      }
+      return {
+        file,
+        id: null,
+        assetType: "component_mask" as const,
+        mimeType: "image/png",
+      };
+    });
 
-    if (assets.length !== expectedAssets.size) {
+    if (assets.length !== expectedAssets.length) {
       throw snapshotCorrupt(revision.id, "数据库资产数量不正确");
     }
 
-    const seenAssetTypes = new Set<SkinAsset["assetType"]>();
-    for (const asset of assets) {
-      const expected = expectedAssets.get(asset.assetType);
+    const assetsByPath = new Map(assets.map((asset) => [asset.storagePath, asset]));
+    for (const expected of expectedAssets) {
+      const asset = assetsByPath.get(expected.file.storagePath);
       if (
-        !expected ||
-        seenAssetTypes.has(asset.assetType) ||
-        asset.id !== expected.id ||
+        !asset ||
+        (expected.id !== null && asset.id !== expected.id) ||
+        asset.assetType !== expected.assetType ||
         asset.projectId !== revision.projectId ||
         asset.revisionId !== revision.id ||
         asset.storagePath !== expected.file.storagePath ||
@@ -307,10 +546,9 @@ export class RevisionStore {
       ) {
         throw snapshotCorrupt(
           revision.id,
-          `数据库资产 ${asset.id} 与快照不一致`,
+          `数据库资产 ${asset?.id ?? expected.file.name} 与快照不一致`,
         );
       }
-      seenAssetTypes.add(asset.assetType);
     }
 
     const segmentation = parseSegmentation(
@@ -341,6 +579,7 @@ export class RevisionStore {
     if (resultHash !== revision.resultHash) {
       throw snapshotCorrupt(revision.id, "resultHash 与快照状态不一致");
     }
+    semanticStateFromSnapshot(snapshot, segmentation, revision.id);
 
     return snapshot;
   }
@@ -355,6 +594,15 @@ export class RevisionStore {
   ): Promise<SegmentationSnapshot> {
     const snapshot = await this.verifyRevisionSnapshot(revisionId);
     return parseSegmentation(snapshot.files["segmentation.json"].bytes, revisionId);
+  }
+
+  async readRevisionSemanticState(revisionId: string): Promise<SemanticState> {
+    const snapshot = await this.verifyRevisionSnapshot(revisionId);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      revisionId,
+    );
+    return semanticStateFromSnapshot(snapshot, segmentation, revisionId);
   }
 
   async readRevisionOperation(revisionId: string): Promise<OperationSnapshot> {
@@ -491,11 +739,13 @@ export class RevisionStore {
       input.summary ?? `导入 ${fileName ?? "64×64 皮肤"}`,
       300,
     );
-    const segmentation = createEmptySegmentation(
-      ids.revisionId,
+    const semanticState = createInitialSemanticState({
+      revisionId: ids.revisionId,
       armType,
-      canonicalSkinHash,
-    );
+      sourceHash: canonicalSkinHash,
+      image,
+    });
+    const segmentation = semanticState.document;
     const resultHash = computeResultHash(canonicalSkinPng, segmentation);
     const metadata = {
       armType,
@@ -520,6 +770,7 @@ export class RevisionStore {
       skinPng: canonicalSkinPng,
       segmentationJson: canonicalJson(segmentation),
       operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(semanticState),
     });
 
     try {
@@ -530,7 +781,7 @@ export class RevisionStore {
         if (!currentBranch || currentBranch.head_revision_id) {
           throw conflict("Project 已经完成首次导入", { projectId });
         }
-        this.insertAssets(project.id, ids, snapshot, createdAt);
+        const assetIds = this.insertAssets(project.id, ids, snapshot, createdAt);
         this.insertRevision({
           ids,
           projectId: project.id,
@@ -546,7 +797,7 @@ export class RevisionStore {
           createdAt,
           metadata,
         });
-        this.attachAssetsToRevision(ids);
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
         this.insertOperation(project.id, ids, "import", summary, createdAt);
         this.database
           .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
@@ -605,11 +856,13 @@ export class RevisionStore {
       input.summary ?? `导入 ${fileName ?? "64×64 皮肤"}`,
       300,
     );
-    const segmentation = createEmptySegmentation(
-      ids.revisionId,
+    const semanticState = createInitialSemanticState({
+      revisionId: ids.revisionId,
       armType,
-      canonicalSkinHash,
-    );
+      sourceHash: canonicalSkinHash,
+      image,
+    });
+    const segmentation = semanticState.document;
     const resultHash = computeResultHash(canonicalSkinPng, segmentation);
     const metadata = {
       armType,
@@ -635,6 +888,7 @@ export class RevisionStore {
       skinPng: canonicalSkinPng,
       segmentationJson: canonicalJson(segmentation),
       operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(semanticState),
     });
 
     try {
@@ -660,7 +914,7 @@ export class RevisionStore {
             ) VALUES (?, ?, 'main', NULL, NULL, ?)
           `)
           .run(branchId, projectId, createdAt);
-        this.insertAssets(projectId, ids, snapshot, createdAt);
+        const assetIds = this.insertAssets(projectId, ids, snapshot, createdAt);
         this.insertRevision({
           ids,
           projectId,
@@ -676,7 +930,7 @@ export class RevisionStore {
           createdAt,
           metadata,
         });
-        this.attachAssetsToRevision(ids);
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
         this.insertOperation(projectId, ids, "import", summary, createdAt);
         this.database
           .prepare(
@@ -703,6 +957,488 @@ export class RevisionStore {
       revision: this.getRevision(ids.revisionId),
       armType,
       warnings,
+    };
+  }
+
+  private async applyPartUnlocked(
+    sourceRevisionId: string,
+    input: ApplyPartInput,
+  ): Promise<ApplyPartResult> {
+    const sourceRevision = this.getRevision(sourceRevisionId);
+    const project = this.getProject(sourceRevision.projectId);
+    const branch = this.getBranch(input.branchId ?? sourceRevision.branchId);
+    if (branch.projectId !== project.id) {
+      throw invalidInput("目标 Revision 与 Branch 不属于同一 Project");
+    }
+    if (branch.headRevisionId !== sourceRevision.id) {
+      throw conflict("应用部件只能基于所选 Branch 的最新 Revision", {
+        sourceRevisionId,
+        branchId: branch.id,
+        branchHeadRevisionId: branch.headRevisionId,
+      });
+    }
+
+    const part = this.getPart(input.partId);
+    const [snapshot, storedPart] = await Promise.all([
+      this.verifyRevisionSnapshot(sourceRevision.id),
+      this.verifyPartStorage(part.id),
+    ]);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    const sourceState = semanticStateFromSnapshot(
+      snapshot,
+      segmentation,
+      sourceRevision.id,
+    );
+    const sourceImage = decodeSkinPng(snapshot.files["skin.png"].bytes);
+    const partTexture = decodeSkinPng(storedPart.files["texture.png"].bytes);
+    const writeMask = rgbaImageToMask(
+      decodeSkinPng(storedPart.files["write-mask.png"].bytes),
+    );
+    const report = analyzePartApplication(
+      sourceImage,
+      partTexture,
+      writeMask,
+      part.manifest,
+      segmentation.source.armType,
+    );
+    if (report.modelConflict) {
+      throw conflict("部件手臂模型与目标 Revision 不兼容", {
+        partId: part.id,
+        sourceArmType: part.armType,
+        targetArmType: segmentation.source.armType,
+      });
+    }
+
+    const appliedPixelIds = maskToPixelIds(writeMask).filter((pixelId) => {
+      if (input.strategy === "use_part") {
+        return true;
+      }
+      return sourceImage.data[pixelId * 4 + 3] === 0;
+    });
+    if (appliedPixelIds.length === 0) {
+      throw invalidInput("所选冲突策略没有可写入像素", {
+        partId: part.id,
+        strategy: input.strategy,
+      });
+    }
+    const resultImage = applyPartPixels(
+      sourceImage,
+      partTexture,
+      writeMask,
+      input.strategy,
+    );
+    const skinPng = encodeSkinPng(resultImage);
+    const rebasedState = rebaseSemanticStateImage({
+      state: sourceState,
+      sourceImage,
+      resultImage,
+      sourceHash: sha256(skinPng),
+    });
+    const affectedSpans = pixelIdsToSpans(
+      appliedPixelIds,
+      getSkinLayout(segmentation.source.armType),
+    );
+    const componentId = appliedPartComponentId(part.id);
+    const assignedState = applyManualSemanticOperation(
+      rebasedState,
+      {
+        type: "assign_pixels",
+        target: {
+          instanceId: componentId,
+          displayName: part.name,
+          category: part.category,
+          ...(part.subtype ? { subtype: part.subtype } : {}),
+        },
+        spans: affectedSpans,
+      },
+      resultImage,
+    );
+    const ids = this.revisionIds();
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const summary = validateText(
+      "Revision 摘要",
+      input.summary ?? `应用部件 ${part.name}`,
+      300,
+    );
+    const state: SemanticState = {
+      ...assignedState,
+      document: { ...assignedState.document, revisionId: ids.revisionId },
+    };
+    const resultHash = computeResultHash(skinPng, state.document);
+    const metadata = {
+      partId: part.id,
+      strategy: input.strategy,
+      conflictSummary: {
+        hardConflictCount: report.hardConflictCount,
+        sameColorOverlapCount: report.sameColorOverlapCount,
+        layerConflictCount: report.layerConflictCount,
+        unknownConflictCount: report.unknownConflictCount,
+      },
+    };
+    const operation = createOperation({
+      type: "apply_part",
+      inputRevisionId: sourceRevision.id,
+      outputRevisionId: ids.revisionId,
+      actorType: "user",
+      actorId,
+      createdAt,
+      summary,
+      beforeHash: sourceRevision.resultHash,
+      afterHash: resultHash,
+      affectedComponents: [componentId],
+      affectedSpans,
+      metadata,
+    });
+    const newSnapshot = await this.storage.writeSnapshot({
+      projectId: project.id,
+      revisionId: ids.revisionId,
+      skinPng,
+      segmentationJson: canonicalJson(state.document),
+      operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(state),
+    });
+
+    try {
+      const commit = this.database.transaction(() => {
+        const currentBranch = this.database
+          .prepare("SELECT head_revision_id FROM skin_branch WHERE id = ?")
+          .get(branch.id) as { head_revision_id: string | null } | undefined;
+        if (currentBranch?.head_revision_id !== sourceRevision.id) {
+          throw conflict("Branch 已产生新的 Revision，请重新载入后再应用部件", {
+            branchId: branch.id,
+          });
+        }
+        const assetIds = this.insertAssets(
+          project.id,
+          ids,
+          newSnapshot,
+          createdAt,
+        );
+        this.insertRevision({
+          ids,
+          projectId: project.id,
+          branchId: branch.id,
+          parentRevisionId: sourceRevision.id,
+          sequence: sourceRevision.sequence + 1,
+          operationType: "apply_part",
+          actorType: "user",
+          actorId,
+          summary,
+          sourceHash: sourceRevision.resultHash,
+          resultHash,
+          createdAt,
+          metadata,
+        });
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
+        this.insertOperation(project.id, ids, "apply_part", summary, createdAt);
+        this.database
+          .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
+          .run(ids.revisionId, branch.id);
+        if (branch.id === project.defaultBranchId) {
+          this.database
+            .prepare(`
+              UPDATE skin_project
+              SET head_revision_id = ?, updated_at = ?
+              WHERE id = ?
+            `)
+            .run(ids.revisionId, createdAt, project.id);
+        } else {
+          this.database
+            .prepare("UPDATE skin_project SET updated_at = ? WHERE id = ?")
+            .run(createdAt, project.id);
+        }
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.storage.removeNewSnapshot(project.id, ids.revisionId);
+      throw error;
+    }
+
+    return {
+      project: this.getProject(project.id),
+      branch: this.getBranch(branch.id),
+      revision: this.getRevision(ids.revisionId),
+      part,
+      report,
+    };
+  }
+
+  private async exportPartUnlocked(
+    revisionId: string,
+    componentId: string,
+    input: ExportPartInput,
+  ): Promise<SkinPart> {
+    const revision = this.getRevision(revisionId);
+    const snapshot = await this.verifyRevisionSnapshot(revision.id);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      revision.id,
+    );
+    const state = semanticStateFromSnapshot(snapshot, segmentation, revision.id);
+    const component = state.document.components.find(
+      (candidate) => candidate.instanceId === componentId,
+    );
+    if (!component) {
+      throw notFound("Component", componentId);
+    }
+    const name =
+      input.name === undefined
+        ? component.displayName
+        : validateText("部件名称", input.name, 120);
+    const partId = this.id("part");
+    const createdAt = this.now();
+    const image = decodeSkinPng(snapshot.files["skin.png"].bytes);
+    const exported = exportSemanticPart({
+      id: partId,
+      name,
+      projectId: revision.projectId,
+      revisionId: revision.id,
+      armType: segmentation.source.armType,
+      createdAt,
+      image,
+      component,
+      componentMask: state.masks[component.instanceId]!,
+    });
+    const manifestJson = canonicalJson(exported.manifest);
+    const sourceJson = canonicalJson({
+      schemaVersion: "1.0",
+      projectId: revision.projectId,
+      revisionId: revision.id,
+      componentInstanceId: component.instanceId,
+      component,
+    });
+    const stored = await this.partStorage.writePart({
+      partId,
+      files: {
+        "texture.png": encodeSkinPng(exported.texture),
+        "write-mask.png": encodeSkinPng(maskToRgbaImage(exported.writeMask)),
+        "manifest.json": Buffer.from(manifestJson, "utf8"),
+        "preview.png": encodeSkinPng(exported.preview),
+        "source.json": Buffer.from(sourceJson, "utf8"),
+      },
+    });
+    const fileIds = Object.fromEntries(
+      PART_FILE_NAMES.map((fileName) => [fileName, this.id("asset")]),
+    ) as Record<PartFileName, string>;
+
+    try {
+      const commit = this.database.transaction(() => {
+        const insertFile = this.database.prepare(`
+          INSERT INTO part_file_asset (
+            id, part_id, file_role, storage_path, mime_type,
+            byte_size, sha256, created_at
+          ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+        `);
+        const roles: Readonly<Record<PartFileName, string>> = {
+          "texture.png": "texture",
+          "write-mask.png": "write_mask",
+          "manifest.json": "manifest",
+          "preview.png": "preview",
+          "source.json": "source",
+        };
+        for (const fileName of PART_FILE_NAMES) {
+          const file = stored.files[fileName];
+          insertFile.run(
+            fileIds[fileName],
+            roles[fileName],
+            file.storagePath,
+            fileName.endsWith(".png") ? "image/png" : "application/json",
+            file.bytes.byteLength,
+            file.sha256,
+            createdAt,
+          );
+        }
+        this.database
+          .prepare(`
+            INSERT INTO part_asset (
+              id, source_project_id, source_revision_id, source_component_id,
+              name, category, subtype, arm_type, texture_asset_id,
+              mask_asset_id, manifest_asset_id, preview_asset_id,
+              source_asset_id, created_at, manifest_json, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            partId,
+            revision.projectId,
+            revision.id,
+            component.instanceId,
+            exported.manifest.name,
+            exported.manifest.category,
+            exported.manifest.subtype ?? null,
+            segmentation.source.armType,
+            fileIds["texture.png"],
+            fileIds["write-mask.png"],
+            fileIds["manifest.json"],
+            fileIds["preview.png"],
+            fileIds["source.json"],
+            createdAt,
+            manifestJson.trim(),
+            canonicalJson({ maskMode: exported.manifest.maskMode }).trim(),
+          );
+        const attach = this.database.prepare(
+          "UPDATE part_file_asset SET part_id = ? WHERE id = ?",
+        );
+        for (const fileName of PART_FILE_NAMES) {
+          attach.run(partId, fileIds[fileName]);
+        }
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.partStorage.removeNewPart(partId);
+      throw error;
+    }
+    return this.getPart(partId);
+  }
+
+  private async applyManualOperationUnlocked(
+    sourceRevisionId: string,
+    input: ManualRevisionOperationInput,
+  ): Promise<RevisionMutationResult> {
+    const sourceRevision = this.getRevision(sourceRevisionId);
+    const project = this.getProject(sourceRevision.projectId);
+    const branch = this.getBranch(input.branchId ?? sourceRevision.branchId);
+    if (branch.projectId !== project.id) {
+      throw invalidInput("目标 Revision 与 Branch 不属于同一 Project");
+    }
+    if (branch.headRevisionId !== sourceRevision.id) {
+      throw conflict("人工编辑只能基于所选 Branch 的最新 Revision", {
+        sourceRevisionId,
+        branchId: branch.id,
+        branchHeadRevisionId: branch.headRevisionId,
+      });
+    }
+
+    const sourceSnapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
+    const sourceSegmentation = parseSegmentation(
+      sourceSnapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    const sourceState = semanticStateFromSnapshot(
+      sourceSnapshot,
+      sourceSegmentation,
+      sourceRevision.id,
+    );
+    const image = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    let editedState: SemanticState;
+    try {
+      editedState = applyManualSemanticOperation(
+        sourceState,
+        input.operation,
+        image,
+      );
+    } catch (error) {
+      if (error instanceof SemanticEditError || error instanceof RangeError) {
+        throw invalidInput(error.message, {
+          ...(error instanceof SemanticEditError
+            ? { semanticCode: error.code }
+            : {}),
+        });
+      }
+      throw error;
+    }
+
+    const ids = this.revisionIds();
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const operationType = manualRevisionOperationType(input.operation.type);
+    const summary = validateText(
+      "Revision 摘要",
+      input.summary ?? manualOperationSummary(input.operation.type),
+      300,
+    );
+    const state: SemanticState = {
+      ...editedState,
+      document: { ...editedState.document, revisionId: ids.revisionId },
+    };
+    const segmentation = state.document;
+    const skinPng = sourceSnapshot.files["skin.png"].bytes;
+    const resultHash = computeResultHash(skinPng, segmentation);
+    const affectedComponents = manualAffectedComponents(input.operation);
+    const affectedSpans =
+      "spans" in input.operation ? input.operation.spans : [];
+    const metadata = { operation: input.operation };
+    const operation = createOperation({
+      type: operationType,
+      inputRevisionId: sourceRevision.id,
+      outputRevisionId: ids.revisionId,
+      actorType: "user",
+      actorId,
+      createdAt,
+      summary,
+      beforeHash: sourceRevision.resultHash,
+      afterHash: resultHash,
+      affectedComponents,
+      affectedSpans,
+      metadata,
+    });
+    const snapshot = await this.storage.writeSnapshot({
+      projectId: project.id,
+      revisionId: ids.revisionId,
+      skinPng,
+      segmentationJson: canonicalJson(segmentation),
+      operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(state),
+    });
+
+    try {
+      const commit = this.database.transaction(() => {
+        const currentBranch = this.database
+          .prepare("SELECT head_revision_id FROM skin_branch WHERE id = ?")
+          .get(branch.id) as { head_revision_id: string | null } | undefined;
+        if (currentBranch?.head_revision_id !== sourceRevision.id) {
+          throw conflict("Branch 已产生新的 Revision，请重新载入后再编辑", {
+            branchId: branch.id,
+          });
+        }
+        const assetIds = this.insertAssets(project.id, ids, snapshot, createdAt);
+        this.insertRevision({
+          ids,
+          projectId: project.id,
+          branchId: branch.id,
+          parentRevisionId: sourceRevision.id,
+          sequence: sourceRevision.sequence + 1,
+          operationType,
+          actorType: "user",
+          actorId,
+          summary,
+          sourceHash: sourceRevision.resultHash,
+          resultHash,
+          createdAt,
+          metadata,
+        });
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
+        this.insertOperation(project.id, ids, operationType, summary, createdAt);
+        this.database
+          .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
+          .run(ids.revisionId, branch.id);
+        if (branch.id === project.defaultBranchId) {
+          this.database
+            .prepare(`
+              UPDATE skin_project
+              SET head_revision_id = ?, updated_at = ?
+              WHERE id = ?
+            `)
+            .run(ids.revisionId, createdAt, project.id);
+        } else {
+          this.database
+            .prepare("UPDATE skin_project SET updated_at = ? WHERE id = ?")
+            .run(createdAt, project.id);
+        }
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.storage.removeNewSnapshot(project.id, ids.revisionId);
+      throw error;
+    }
+
+    return {
+      project: this.getProject(project.id),
+      branch: this.getBranch(branch.id),
+      revision: this.getRevision(ids.revisionId),
     };
   }
 
@@ -761,11 +1497,12 @@ export class RevisionStore {
       skinPng,
       segmentationJson: canonicalJson(segmentation),
       operationJson: canonicalJson(operation),
+      additionalFiles: snapshotAdditionalFiles(targetSnapshot),
     });
 
     try {
       const commit = this.database.transaction(() => {
-        this.insertAssets(project.id, ids, snapshot, createdAt);
+        const assetIds = this.insertAssets(project.id, ids, snapshot, createdAt);
         this.insertRevision({
           ids,
           projectId: project.id,
@@ -781,7 +1518,7 @@ export class RevisionStore {
           createdAt,
           metadata: { targetRevisionId: target.id },
         });
-        this.attachAssetsToRevision(ids);
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
         this.insertOperation(project.id, ids, "revert", summary, createdAt);
         this.database
           .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
@@ -871,6 +1608,7 @@ export class RevisionStore {
       skinPng,
       segmentationJson: canonicalJson(segmentation),
       operationJson: canonicalJson(operation),
+      additionalFiles: snapshotAdditionalFiles(targetSnapshot),
     });
 
     try {
@@ -882,7 +1620,7 @@ export class RevisionStore {
             ) VALUES (?, ?, ?, ?, NULL, ?)
           `)
           .run(branchId, project.id, branchName, target.id, createdAt);
-        this.insertAssets(project.id, ids, snapshot, createdAt);
+        const assetIds = this.insertAssets(project.id, ids, snapshot, createdAt);
         this.insertRevision({
           ids,
           projectId: project.id,
@@ -898,7 +1636,7 @@ export class RevisionStore {
           createdAt,
           metadata: { baseRevisionId: target.id, branchName },
         });
-        this.attachAssetsToRevision(ids);
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
         this.insertOperation(project.id, ids, "branch", summary, createdAt);
         this.database
           .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
@@ -928,14 +1666,19 @@ export class RevisionStore {
     ids: RevisionIds,
     snapshot: VerifiedSnapshot,
     createdAt: string,
-  ): void {
+  ): string[] {
     const insert = this.database.prepare(`
       INSERT INTO skin_asset (
         id, project_id, revision_id, asset_type, storage_path,
         mime_type, byte_size, sha256, created_at
       ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
     `);
-    const assets = [
+    const assets: Array<{
+      readonly id: string;
+      readonly type: SkinAsset["assetType"];
+      readonly mimeType: string;
+      readonly file: VerifiedSnapshot["files"][string];
+    }> = [
       {
         id: ids.skinAssetId,
         type: "revision_skin",
@@ -954,7 +1697,17 @@ export class RevisionStore {
         mimeType: "application/json",
         file: snapshot.files["operation.json"],
       },
-    ] as const;
+    ];
+    for (const file of Object.values(snapshot.files)) {
+      if (file.name.startsWith("components/")) {
+        assets.push({
+          id: this.id("asset"),
+          type: "component_mask",
+          mimeType: "image/png",
+          file,
+        });
+      }
+    }
 
     for (const asset of assets) {
       insert.run(
@@ -968,6 +1721,7 @@ export class RevisionStore {
         createdAt,
       );
     }
+    return assets.map((asset) => asset.id);
   }
 
   private insertRevision(input: {
@@ -1014,18 +1768,16 @@ export class RevisionStore {
       );
   }
 
-  private attachAssetsToRevision(ids: RevisionIds): void {
-    this.database
-      .prepare(`
-        UPDATE skin_asset SET revision_id = ?
-        WHERE id IN (?, ?, ?)
-      `)
-      .run(
-        ids.revisionId,
-        ids.skinAssetId,
-        ids.segmentationAssetId,
-        ids.operationAssetId,
-      );
+  private attachAssetsToRevision(
+    revisionId: string,
+    assetIds: readonly string[],
+  ): void {
+    const update = this.database.prepare(
+      "UPDATE skin_asset SET revision_id = ? WHERE id = ?",
+    );
+    for (const assetId of assetIds) {
+      update.run(revisionId, assetId);
+    }
   }
 
   private insertOperation(
@@ -1088,6 +1840,125 @@ export class RevisionStore {
     );
     return run;
   }
+}
+
+function mapPart(row: PartRow): SkinPart {
+  if (!isSemanticCategory(row.category) || !["wide", "slim"].includes(row.arm_type)) {
+    throw partCorrupt(row.id, "数据库枚举值无效");
+  }
+  const manifest = parsePartManifest(row.manifest_json, row.id);
+  if (
+    manifest.source.projectId !== row.source_project_id ||
+    manifest.source.revisionId !== row.source_revision_id ||
+    manifest.source.componentInstanceId !== row.source_component_id ||
+    manifest.name !== row.name ||
+    manifest.category !== row.category
+  ) {
+    throw partCorrupt(row.id, "manifest 与数据库元数据不一致");
+  }
+  return {
+    id: row.id,
+    sourceProjectId: row.source_project_id,
+    sourceRevisionId: row.source_revision_id,
+    sourceComponentId: row.source_component_id,
+    name: row.name,
+    category: row.category,
+    ...(row.subtype ? { subtype: row.subtype } : {}),
+    armType: row.arm_type as "wide" | "slim",
+    manifest,
+    texture: mapPartFile(
+      row.texture_id,
+      row.texture_storage_path,
+      row.texture_mime_type,
+      row.texture_byte_size,
+      row.texture_sha256,
+    ),
+    writeMask: mapPartFile(
+      row.mask_id,
+      row.mask_storage_path,
+      row.mask_mime_type,
+      row.mask_byte_size,
+      row.mask_sha256,
+    ),
+    manifestFile: mapPartFile(
+      row.manifest_id,
+      row.manifest_storage_path,
+      row.manifest_mime_type,
+      row.manifest_byte_size,
+      row.manifest_sha256,
+    ),
+    preview: mapPartFile(
+      row.preview_id,
+      row.preview_storage_path,
+      row.preview_mime_type,
+      row.preview_byte_size,
+      row.preview_sha256,
+    ),
+    source: mapPartFile(
+      row.source_id,
+      row.source_storage_path,
+      row.source_mime_type,
+      row.source_byte_size,
+      row.source_sha256,
+    ),
+    createdAt: row.created_at,
+    metadata: parseObjectJson(row.metadata_json, `Part ${row.id} metadata`),
+  };
+}
+
+function mapPartFile(
+  id: string,
+  storagePath: string,
+  mimeType: string,
+  byteSize: number,
+  hash: string,
+): PartFileAsset {
+  return { id, storagePath, mimeType, byteSize, sha256: hash };
+}
+
+function parsePartManifest(source: string, partId: string): PartManifest {
+  try {
+    const value = JSON.parse(source) as Partial<PartManifest>;
+    if (
+      value.schemaVersion !== "1.0" ||
+      value.id !== partId ||
+      typeof value.name !== "string" ||
+      value.name.length === 0 ||
+      !isSemanticCategory(value.category) ||
+      value.source === undefined ||
+      typeof value.source.projectId !== "string" ||
+      typeof value.source.revisionId !== "string" ||
+      typeof value.source.componentInstanceId !== "string" ||
+      value.compatibility?.resolution !== "64x64" ||
+      !Array.isArray(value.compatibility.armTypes) ||
+      value.compatibility.armTypes.some(
+        (armType) => !["wide", "slim"].includes(armType),
+      ) ||
+      !Array.isArray(value.placement?.preferredLayers) ||
+      !Array.isArray(value.placement.surfaces) ||
+      value.maskMode !== "write-colored-pixels-only" ||
+      typeof value.createdAt !== "string"
+    ) {
+      throw new TypeError("manifest 结构无效");
+    }
+    return value as PartManifest;
+  } catch (error) {
+    throw partCorrupt(partId, "manifest.json 无效", error);
+  }
+}
+
+function partCorrupt(
+  partId: string,
+  message: string,
+  cause?: unknown,
+): RevisionStoreError {
+  return new RevisionStoreError(
+    "SNAPSHOT_CORRUPT",
+    `Part ${partId} 资产损坏：${message}`,
+    409,
+    { partId },
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 function mapProject(row: ProjectRow): SkinProject {
@@ -1153,7 +2024,12 @@ function mapRevision(row: RevisionRow): SkinRevision {
 function mapAsset(row: AssetRow): SkinAsset {
   if (
     !row.revision_id ||
-    !["revision_skin", "segmentation_json", "operation_json"].includes(
+    ![
+      "revision_skin",
+      "segmentation_json",
+      "component_mask",
+      "operation_json",
+    ].includes(
       row.asset_type,
     )
   ) {
@@ -1172,24 +2048,99 @@ function mapAsset(row: AssetRow): SkinAsset {
   };
 }
 
-function createEmptySegmentation(
-  revisionId: string,
-  armType: ArmType,
-  canonicalSkinHash: string,
-): SegmentationSnapshot {
-  return {
-    schemaVersion: "1.0",
-    revisionId,
-    source: {
-      width: 64,
-      height: 64,
-      armType,
-      coordinateOrigin: "top-left",
-      sourceHash: canonicalSkinHash,
-    },
-    components: [],
-    unknown: { maskFile: null, pixelCount: 0 },
+function semanticMaskFiles(
+  state: SemanticState,
+): Readonly<Record<string, Uint8Array>> {
+  const files: Record<string, Uint8Array> = {
+    [state.document.unknown.maskFile]: encodeSkinPng(
+      maskToRgbaImage(state.unknownMask),
+    ),
   };
+  for (const component of state.document.components) {
+    files[component.maskFile] = encodeSkinPng(
+      maskToRgbaImage(state.masks[component.instanceId]!),
+    );
+  }
+  return files;
+}
+
+function snapshotAdditionalFiles(
+  snapshot: VerifiedSnapshot,
+): Readonly<Record<string, Uint8Array>> {
+  return Object.fromEntries(
+    Object.values(snapshot.files)
+      .filter((file) => file.name.startsWith("components/"))
+      .map((file) => [file.name, file.bytes]),
+  );
+}
+
+function semanticStateFromSnapshot(
+  snapshot: VerifiedSnapshot,
+  segmentation: SegmentationSnapshot,
+  revisionId: string,
+): SemanticState {
+  const image = decodeSkinPng(snapshot.files["skin.png"].bytes);
+  if (segmentation.unknown.maskFile === null) {
+    const additionalFiles = Object.values(snapshot.files).filter((file) =>
+      file.name.startsWith("components/"),
+    );
+    if (segmentation.components.length > 0 || additionalFiles.length > 0) {
+      throw snapshotCorrupt(
+        revisionId,
+        "legacy segmentation 缺少组件遮罩",
+      );
+    }
+    return createInitialSemanticState({
+      revisionId,
+      armType: segmentation.source.armType,
+      sourceHash: segmentation.source.sourceHash,
+      image,
+    });
+  }
+
+  try {
+    const expectedMaskFiles = new Set<string>([segmentation.unknown.maskFile]);
+    const masks: Record<string, Uint8Array> = {};
+    for (const component of segmentation.components) {
+      if (expectedMaskFiles.has(component.maskFile)) {
+        throw new TypeError(`重复组件遮罩路径：${component.maskFile}`);
+      }
+      expectedMaskFiles.add(component.maskFile);
+      const file = snapshot.files[component.maskFile];
+      if (!file) {
+        throw new TypeError(`缺少组件遮罩：${component.maskFile}`);
+      }
+      masks[component.instanceId] = rgbaImageToMask(decodeSkinPng(file.bytes));
+    }
+    const unknownFile = snapshot.files[segmentation.unknown.maskFile];
+    if (!unknownFile) {
+      throw new TypeError(`缺少 unknown 遮罩：${segmentation.unknown.maskFile}`);
+    }
+    const actualMaskFiles = Object.values(snapshot.files)
+      .filter((file) => file.name.startsWith("components/"))
+      .map((file) => file.name)
+      .sort();
+    if (
+      JSON.stringify(actualMaskFiles) !==
+      JSON.stringify([...expectedMaskFiles].sort())
+    ) {
+      throw new TypeError("组件遮罩文件集合与 segmentation.json 不一致");
+    }
+    const state: SemanticState = {
+      document: segmentation as SegmentationDocument,
+      masks,
+      unknownMask: rgbaImageToMask(decodeSkinPng(unknownFile.bytes)),
+    };
+    validateSemanticState(state, image);
+    return state;
+  } catch (error) {
+    if (error instanceof RevisionStoreError) {
+      throw error;
+    }
+    throw snapshotCorrupt(revisionId, "语义遮罩与 segmentation.json 不一致", {
+      cause: error,
+    });
+  }
 }
 
 function createOperation(input: {
@@ -1202,6 +2153,8 @@ function createOperation(input: {
   readonly summary: string;
   readonly beforeHash: string | null;
   readonly afterHash: string;
+  readonly affectedComponents?: readonly string[];
+  readonly affectedSpans?: readonly unknown[];
   readonly metadata: Readonly<Record<string, unknown>>;
 }): OperationSnapshot {
   return {
@@ -1215,12 +2168,67 @@ function createOperation(input: {
     },
     createdAt: input.createdAt,
     summary: input.summary,
-    affectedComponents: [],
-    affectedSpans: [],
+    affectedComponents: input.affectedComponents ?? [],
+    affectedSpans: input.affectedSpans ?? [],
     beforeHash: input.beforeHash,
     afterHash: input.afterHash,
     metadata: input.metadata,
   };
+}
+
+function manualRevisionOperationType(
+  operationType: ManualSemanticOperation["type"],
+): RevisionOperationType {
+  switch (operationType) {
+    case "assign_pixels":
+      return "manual_edit";
+    case "unassign_pixels":
+      return "manual_edit";
+    case "merge_components":
+      return "merge_components";
+    case "split_component":
+      return "split_component";
+    case "reclassify_component":
+      return "reclassify_component";
+  }
+}
+
+function manualOperationSummary(
+  operationType: ManualSemanticOperation["type"],
+): string {
+  switch (operationType) {
+    case "assign_pixels":
+      return "确认语义像素分类";
+    case "unassign_pixels":
+      return "将语义像素标记为 unknown";
+    case "merge_components":
+      return "合并语义组件";
+    case "split_component":
+      return "拆分语义组件";
+    case "reclassify_component":
+      return "修改组件分类";
+  }
+}
+
+function manualAffectedComponents(
+  operation: ManualSemanticOperation,
+): readonly string[] {
+  switch (operation.type) {
+    case "assign_pixels":
+      return [operation.target.instanceId];
+    case "unassign_pixels":
+      return [];
+    case "merge_components":
+      return [...new Set([...operation.componentIds, operation.target.instanceId])];
+    case "split_component":
+      return [operation.sourceComponentId, operation.target.instanceId];
+    case "reclassify_component":
+      return [operation.componentId];
+  }
+}
+
+function appliedPartComponentId(partId: string): string {
+  return `applied.${partId.slice(0, 90)}`;
 }
 
 function computeResultHash(
@@ -1254,7 +2262,13 @@ function parseSegmentation(
       value.source.coordinateOrigin !== "top-left" ||
       !/^sha256:[0-9a-f]{64}$/.test(value.source.sourceHash) ||
       !Array.isArray(value.components) ||
-      value.unknown?.maskFile !== null ||
+      !(
+        value.unknown?.maskFile === null ||
+        (typeof value.unknown?.maskFile === "string" &&
+          /^components\/[a-z][a-z0-9._-]{0,100}\.mask\.png$/.test(
+            value.unknown.maskFile,
+          ))
+      ) ||
       !Number.isInteger(value.unknown.pixelCount) ||
       value.unknown.pixelCount < 0
     ) {
@@ -1334,6 +2348,7 @@ function defaultId(kind: RevisionIdKind): string {
     revision: "rev",
     asset: "asset",
     operation: "op",
+    part: "part",
   };
   return `${prefix[kind]}_${randomUUID().replaceAll("-", "")}`;
 }

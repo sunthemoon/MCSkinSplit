@@ -10,7 +10,7 @@ Last updated: 2026-08-11
 | M1 deterministic pixel core | Complete | Lossless RGBA and UV round trips for Wide/Slim fixtures |
 | M2 immutable revisions | Complete | SQLite, snapshots, revert, branch, hash checks |
 | M3 revision-aware 3D preview | Complete | One viewer instance tracks selected revisions |
-| M4 manual semantic editor and parts | Not started | Manual segmentation and lossless part reuse |
+| M4 manual semantic editor and parts | Complete | Manual segmentation and lossless part reuse |
 | M5 AI Skill and worker | Not started | Schema-valid proposals create revisions only after validation |
 | M6 compositor | Not started | Explicit conflicts and deterministic composition |
 
@@ -117,3 +117,58 @@ Last updated: 2026-08-11
 - The WebGL chunk remains above Vite's default 500 kB warning threshold even though it is lazy. Further Three.js/skinview3d reduction is a performance task, not a Viewer correctness blocker.
 - Skin loading cannot abort an in-flight `skinview3d.loadSkin` call. The adapter serializes requests to guarantee final ordering; a permanently hung upstream texture load would delay later requests.
 - M3 previews whole Revision skins. Neutral-base component previews and component visibility controls belong to M4.
+
+## M4 deliverables
+
+- Added a fixed 23-category semantic taxonomy, complete 64x64 masks, canonical
+  surface spans, deterministic palettes, and strict ownership validation to
+  `packages/skin-core`.
+- New imports place every valid non-transparent UV pixel in an independent
+  `unknown` mask. Legacy mask-free snapshots stay readable and are upgraded only
+  through a new Revision.
+- Added deterministic assign, unassign, merge, split, and reclassify operations.
+  Every confirmed operation creates a child Revision; browser brush drafts do not.
+- Extended snapshot hashing and SQLite asset verification to dynamically named
+  component masks without changing historical M2/M3 files.
+- Added atomic five-file part assets containing texture, write mask, manifest,
+  preview, and source provenance, with database-backed integrity checks.
+- Added read-only conflict preview and explicit `use_part`/`keep_base` strategies.
+  Only the explicit application creates an `apply_part` Revision.
+- Added a responsive semantic editor, component tree, taxonomy form, part library,
+  conflict report, and Revision-aware result loading.
+- Documented the stable behavior in
+  [`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).
+
+## M4 verification evidence
+
+- `pnpm verify` passes fixture drift detection, all TypeScript projects, 96
+  Vitest cases, and every production build.
+- Core semantic tests cover taxonomy, pixel/mask/span round trips, all five manual
+  operations, image rebasing, part extraction, conflict reports, and exact
+  reapplication.
+- Revision tests cover complete mask snapshots, legacy compatibility, immutable
+  editing, part-file integrity, read-only previews, explicit application, and a
+  real-skin cross-project export/apply flow.
+- API tests cover semantic operation schemas, component export, part reads,
+  conflict preview, explicit application, and stable invalid-operation errors.
+- Web tests cover semantic Canvas coordinates, API request/response handling, and
+  existing import/model/Revision behavior.
+- Browser real-skin pass: two exact pixels from `ab87de696cfca859.png` were assigned
+  to `hair.main`, exported as a part, previewed against
+  `354359a2c2f33777.png` with two hard conflicts and no Revision side effect, then
+  applied with `use_part` as `main #2`. The Atlas, semantic Canvas, timeline, and
+  3D avatar all showed the committed state.
+- Browser visual inspection found no clipping, overlap, or layout break in the
+  desktop semantic workspace. Logs after the schema fix contained no application
+  error or new 5xx response.
+
+## M4 known boundaries
+
+- M4 is a manual editor. AI proposals, provider isolation, and confidence/review
+  workflows arrive in M5.
+- Single-part application reports hard and same-color overlap. Layer-to-layer and
+  unknown-to-unknown conflicts are reserved for M6 multi-part composition.
+- Part export creates an immutable library asset but intentionally does not create
+  a skin Revision because source skin state is unchanged.
+- The lazy `skinview3d` chunk remains about 525 kB before gzip and retains Vite's
+  non-blocking chunk-size warning.

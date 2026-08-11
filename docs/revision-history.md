@@ -6,7 +6,7 @@ MCSkinSplit treats SQLite metadata and complete Revision snapshots as the author
 
 1. A confirmed mutation creates a new Revision ID and a new snapshot directory.
 2. Existing Revision files and rows are never updated in place.
-3. Every Revision independently contains the skin, segmentation state, operation record, and checksum manifest needed to load it.
+3. Every Revision independently contains the skin, segmentation state, operation record, checksum manifest, and any semantic masks needed to load it.
 4. A Revert Revision copies the selected historical state but uses the current target Branch HEAD as its parent.
 5. A Branch Revision uses the selected historical Revision as its parent and does not move the source Branch HEAD.
 6. Snapshot reads fail with `SNAPSHOT_CORRUPT` when a file, checksum, asset record, or result hash disagrees.
@@ -20,12 +20,15 @@ data/
     ├── skin.png
     ├── segmentation.json
     ├── operation.json
-    └── checksum.json
+    ├── checksum.json
+    └── components/
+        ├── unknown.mask.png
+        └── <component-instance-id>.mask.png
 ```
 
-`skin.png` is a canonical 64×64 RGBA PNG. JSON files use recursively sorted keys and a trailing newline. Hash strings use the `sha256:<hex>` form.
+`skin.png` and component masks are canonical 64×64 RGBA PNGs. JSON files use recursively sorted keys and a trailing newline. Hash strings use the `sha256:<hex>` form. M2/M3 snapshots without component masks remain valid historical inputs; the first later semantic edit writes a complete M4 snapshot.
 
-Snapshot creation writes all four files into a private sibling temporary directory, synchronizes each file, and atomically renames the directory. SQLite assets are then attached to the new Revision in one immediate transaction. A failed metadata transaction removes only that new snapshot.
+Snapshot creation writes every core and mask file into a private sibling temporary directory, synchronizes each file, and atomically renames the directory. SQLite assets are then attached to the new Revision in one immediate transaction. A failed metadata transaction removes only that new snapshot.
 
 ## Local API
 
@@ -47,10 +50,20 @@ GET    /api/revisions/:revisionId/segmentation
 GET    /api/revisions/:revisionId/diff/:otherRevisionId
 POST   /api/revisions/:revisionId/revert
 POST   /api/revisions/:revisionId/branch
+POST   /api/revisions/:revisionId/operations
+POST   /api/revisions/:revisionId/components/:componentId/export-part
+GET    /api/parts
+GET    /api/parts/:partId
+GET    /api/parts/:partId/texture.png
+GET    /api/parts/:partId/preview.png
+POST   /api/revisions/:revisionId/apply-part
 ```
 
 Create a Project with JSON `{ "name": "Example" }`, then send the skin bytes to its import endpoint with `Content-Type: image/png`. Optional `fileName` and `armType=wide|slim` query parameters preserve import context or apply an explicit model override. The body limit is 1 MiB.
 
 ## Hash model
 
-`checksum.json` records hashes for the PNG, segmentation, and operation files. SQLite also records each asset path, byte size, and file hash. `resultHash` is computed from the skin bytes and semantic state while excluding the Revision-specific ID, so Revert and Branch copies retain the same state identity without sharing mutable files.
+`checksum.json` records hashes for the PNG, segmentation, operation, and dynamic mask files. SQLite also records each asset path, byte size, and file hash. `resultHash` is computed from the skin bytes and semantic state while excluding the Revision-specific ID, so Revert and Branch copies retain the same state identity without sharing mutable files.
+
+The M4 operation and part contracts are documented in
+[`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).

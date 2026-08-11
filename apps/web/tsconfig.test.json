@@ -12,6 +12,7 @@
     "src/**/*.test.ts",
     "src/lib/mcSkinPreview.ts",
     "src/lib/revisionApi.ts",
+    "src/lib/semanticCanvasCoordinates.ts",
     "src/lib/skinFile.ts"
   ]
 }

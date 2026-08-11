@@ -1,9 +1,14 @@
 import {
+  SEMANTIC_CATEGORIES,
+  SEMANTIC_CATEGORY_LABELS,
   encodeSkinPng,
   getSkinLayout,
+  pixelIdsToSpans,
   type ArmType,
   type ArmTypeAssessment,
+  type ManualSemanticOperation,
   type RgbaImage,
+  type SemanticCategory,
 } from "@mc-skin-split/skin-core";
 import {
   type ChangeEvent,
@@ -17,24 +22,34 @@ import {
 } from "react";
 import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
 import { SkinPreview, type PreviewState } from "./components/SkinPreview";
+import { SemanticEditorCanvas } from "./components/SemanticEditorCanvas";
 import {
   decodeMinecraftSkinBytes,
   decodeMinecraftSkinFile,
 } from "./lib/skinFile";
 import {
   branchRevision,
+  applySemanticOperation,
+  commitRevisionPart,
   createProject,
+  exportRevisionPart,
   getProject,
   importProjectSkin,
   listBranches,
+  listParts,
   listProjects,
   listRevisions,
   loadRevisionSegmentation,
   loadRevisionSkin,
+  partPreviewUrl,
+  previewRevisionPart,
   revertRevision,
   type ApiBranch,
   type ApiProject,
+  type ApiPart,
+  type ApiPartPreview,
   type ApiRevision,
+  type ApiSegmentation,
 } from "./lib/revisionApi";
 
 type ModelChoice = "auto" | ArmType;
@@ -164,6 +179,19 @@ export function App() {
   const [branchName, setBranchName] = useState("experiment-slim");
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [segmentation, setSegmentation] = useState<ApiSegmentation | null>(null);
+  const [draftPixelIds, setDraftPixelIds] = useState<readonly number[]>([]);
+  const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
+  const [checkedComponentIds, setCheckedComponentIds] = useState<readonly string[]>([]);
+  const [componentId, setComponentId] = useState("hair.main");
+  const [componentName, setComponentName] = useState("主头发");
+  const [componentCategory, setComponentCategory] =
+    useState<SemanticCategory>("hair");
+  const [componentSubtype, setComponentSubtype] = useState("");
+  const [semanticBusy, setSemanticBusy] = useState(false);
+  const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
 
@@ -201,6 +229,11 @@ export function App() {
           url: fixture.url,
         });
         setSelectedRevisionId(null);
+        setSegmentation(null);
+        setDraftPixelIds([]);
+        setActiveComponentId(null);
+        setCheckedComponentIds([]);
+        setPartPreview(null);
         setNotice(
           `RGBA 解码通过 · 自动识别 ${armLabels[decoded.assessment.armType]}`,
         );
@@ -250,6 +283,23 @@ export function App() {
           source: "revision",
           url: nextUrl,
         });
+        setSegmentation(segmentation);
+        setDraftPixelIds([]);
+        setActiveComponentId((current) =>
+          segmentation.components.some(
+            (component) => component.instanceId === current,
+          )
+            ? current
+            : null,
+        );
+        setCheckedComponentIds((current) =>
+          current.filter((componentId) =>
+            segmentation.components.some(
+              (component) => component.instanceId === componentId,
+            ),
+          ),
+        );
+        setPartPreview(null);
         setSelectedRevisionId(null);
         setSelectedRevisionId(revision.id);
         setBranchFilter(revision.branchId);
@@ -335,11 +385,13 @@ export function App() {
     void (async () => {
       await activateFixture(DEFAULT_FIXTURE);
       try {
-        const projects = await listProjects();
+        const [projects, parts] = await Promise.all([listProjects(), listParts()]);
         if (cancelled) {
           return;
         }
         setHistoryProjects(projects);
+        setPartLibrary(parts);
+        setSelectedPartId((current) => current ?? parts[0]?.id ?? null);
         const storedProjectId = window.localStorage.getItem(HISTORY_PROJECT_KEY);
         const storedProject = projects.find(
           (project) => project.id === storedProjectId,
@@ -416,6 +468,13 @@ export function App() {
   const skinName = activeSkin?.name ?? DEFAULT_FIXTURE.name;
   const selectedRevision = historyRevisions.find(
     (revision) => revision.id === selectedRevisionId,
+  );
+  const activeComponent = segmentation?.components.find(
+    (component) => component.instanceId === activeComponentId,
+  );
+  const selectedPart = partLibrary.find((part) => part.id === selectedPartId);
+  const canEditSemantic = Boolean(
+    selectedRevision?.isBranchHead && segmentation && activeSkin,
   );
   const visibleRevisions = historyRevisions
     .filter(
@@ -535,6 +594,234 @@ export function App() {
     }
   };
 
+  const semanticTarget = () => {
+    const instanceId = componentId.trim();
+    const displayName = componentName.trim();
+    if (!instanceId || !displayName) {
+      throw new Error("组件 ID 与名称不能为空");
+    }
+    return {
+      instanceId,
+      displayName,
+      category: componentCategory,
+      ...(componentSubtype.trim()
+        ? { subtype: componentSubtype.trim() }
+        : {}),
+    } as const;
+  };
+
+  const commitSemanticOperation = async (
+    operation: ManualSemanticOperation,
+    successMessage: string,
+  ) => {
+    if (!selectedRevision) {
+      return;
+    }
+    setSemanticBusy(true);
+    setHistoryError(null);
+    try {
+      const result = await applySemanticOperation(
+        selectedRevision.id,
+        operation,
+        { branchId: selectedRevision.branchId, summary: successMessage },
+      );
+      setDraftPixelIds([]);
+      setCheckedComponentIds([]);
+      await refreshHistory(result.project.id, result.revision.id);
+      setNotice(
+        `${successMessage} · 已创建 ${result.branch.name} #${result.revision.sequence}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`语义编辑失败：${message}`);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
+  const assignDraftPixels = () => {
+    if (draftPixelIds.length === 0) {
+      setNotice("先在语义 Atlas 上选择至少 1 个有效像素");
+      return;
+    }
+    try {
+      void commitSemanticOperation(
+        {
+          type: "assign_pixels",
+          target: semanticTarget(),
+          spans: pixelIdsToSpans(draftPixelIds, layout),
+        },
+        `分类 ${draftPixelIds.length} 个像素`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const unassignDraftPixels = () => {
+    if (draftPixelIds.length === 0) {
+      setNotice("先选择要退回 unknown 的已分类像素");
+      return;
+    }
+    void commitSemanticOperation(
+      {
+        type: "unassign_pixels",
+        spans: pixelIdsToSpans(draftPixelIds, layout),
+      },
+      `标记 ${draftPixelIds.length} 个像素为 unknown`,
+    );
+  };
+
+  const splitActiveComponent = () => {
+    if (!activeComponent || draftPixelIds.length === 0) {
+      setNotice("拆分需要先选中来源组件，并在 Atlas 选择其部分像素");
+      return;
+    }
+    try {
+      void commitSemanticOperation(
+        {
+          type: "split_component",
+          sourceComponentId: activeComponent.instanceId,
+          target: semanticTarget(),
+          spans: pixelIdsToSpans(draftPixelIds, layout),
+        },
+        `从 ${activeComponent.displayName} 拆分新组件`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const mergeCheckedComponents = () => {
+    if (checkedComponentIds.length < 2) {
+      setNotice("合并至少需要勾选 2 个组件");
+      return;
+    }
+    try {
+      void commitSemanticOperation(
+        {
+          type: "merge_components",
+          componentIds: checkedComponentIds,
+          target: semanticTarget(),
+        },
+        `合并 ${checkedComponentIds.length} 个组件`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const reclassifyActiveComponent = () => {
+    if (!activeComponent) {
+      setNotice("先在组件树中选择要改分类的组件");
+      return;
+    }
+    void commitSemanticOperation(
+      {
+        type: "reclassify_component",
+        componentId: activeComponent.instanceId,
+        category: componentCategory,
+        ...(componentSubtype.trim()
+          ? { subtype: componentSubtype.trim() }
+          : {}),
+      },
+      `重分类 ${activeComponent.displayName}`,
+    );
+  };
+
+  const chooseComponent = (instanceId: string) => {
+    const component = segmentation?.components.find(
+      (candidate) => candidate.instanceId === instanceId,
+    );
+    if (!component) {
+      return;
+    }
+    setActiveComponentId(component.instanceId);
+    setComponentId(component.instanceId);
+    setComponentName(component.displayName);
+    setComponentCategory(component.category);
+    setComponentSubtype(component.subtype ?? "");
+  };
+
+  const exportActiveComponent = async () => {
+    if (!selectedRevision || !activeComponent) {
+      return;
+    }
+    setSemanticBusy(true);
+    setHistoryError(null);
+    try {
+      const part = await exportRevisionPart(
+        selectedRevision.id,
+        activeComponent.instanceId,
+        activeComponent.displayName,
+      );
+      const parts = await listParts();
+      setPartLibrary(parts);
+      setSelectedPartId(part.id);
+      setPartPreview(null);
+      setNotice(`已保存部件 ${part.name} · 64×64 texture + write mask`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`部件导出失败：${message}`);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
+  const previewSelectedPart = async () => {
+    if (!selectedRevision || !selectedPart) {
+      return;
+    }
+    setSemanticBusy(true);
+    setHistoryError(null);
+    try {
+      const preview = await previewRevisionPart(
+        selectedRevision.id,
+        selectedPart.id,
+      );
+      setPartPreview(preview);
+      setNotice(
+        `冲突预览：${preview.report.hardConflictCount} 个硬冲突，尚未创建 Revision`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`部件冲突分析失败：${message}`);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
+  const commitSelectedPart = async (
+    strategy: "use_part" | "keep_base",
+  ) => {
+    if (!selectedRevision || !selectedPart || !partPreview) {
+      return;
+    }
+    setSemanticBusy(true);
+    setHistoryError(null);
+    try {
+      const result = await commitRevisionPart(
+        selectedRevision.id,
+        selectedPart.id,
+        strategy,
+      );
+      setPartPreview(null);
+      await refreshHistory(result.project.id, result.revision.id);
+      setNotice(
+        `已应用 ${selectedPart.name} · ${result.branch.name} #${result.revision.sequence}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`部件应用失败：${message}`);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
   const downloadActiveSkin = () => {
     if (!activeSkin) {
       return;
@@ -561,17 +848,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">REVISION-AWARE AVATAR / M3</p>
+          <p className="eyebrow">SEMANTIC PART STUDIO / M4</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            在不可变 64×64 快照之间切换，2D Atlas 与唯一的 3D Viewer 始终显示同一 Revision。
+            逐像素建立语义组件，确认后创建不可变 Revision；组件可导出为完整 64×64 部件并复写到其他真实皮肤。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M3 Revision 三维预览">
-          <strong>M3</strong>
-          <span>VIEWER</span>
+        <div className="baseline-stamp" aria-label="M4 语义部件工作室">
+          <strong>M4</strong>
+          <span>PARTS</span>
         </div>
       </header>
 
@@ -880,10 +1167,297 @@ export function App() {
         </section>
       </section>
 
+      <section className="semantic-workspace" aria-label="人工语义编辑与部件库">
+        <section className="semantic-panel semantic-editor-panel">
+          <div className="panel-heading">
+            <span>04</span>
+            <div>
+              <p>SEMANTIC BRUSH</p>
+              <h2>64×64 像素草稿</h2>
+            </div>
+          </div>
+          <div className="semantic-canvas-frame">
+            {activeSkin && segmentation ? (
+              <SemanticEditorCanvas
+                activeComponentId={activeComponentId ?? undefined}
+                armType={segmentation.source.armType}
+                components={segmentation.components}
+                disabled={!canEditSemantic || semanticBusy}
+                image={activeSkin.image}
+                selectedPixelIds={draftPixelIds}
+                onSelectionChange={setDraftPixelIds}
+              />
+            ) : (
+              <p>选择一个 Revision 后启用语义画笔</p>
+            )}
+          </div>
+          <div className="semantic-draft-toolbar">
+            <span>
+              DRAFT <strong>{draftPixelIds.length}</strong> PX
+            </span>
+            <button
+              type="button"
+              disabled={draftPixelIds.length === 0 || semanticBusy}
+              onClick={() => setDraftPixelIds([])}
+            >
+              清空草稿
+            </button>
+            <button
+              type="button"
+              disabled={!canEditSemantic || draftPixelIds.length === 0 || semanticBusy}
+              onClick={unassignDraftPixels}
+            >
+              标记 unknown
+            </button>
+          </div>
+          <p className="semantic-help">
+            单击或拖动选择有效非透明 UV 像素；再次划过可擦除草稿。画笔过程不写快照，只有右侧确认操作才创建 Revision。
+          </p>
+        </section>
+
+        <section className="semantic-panel component-panel">
+          <div className="panel-heading semantic-heading-split">
+            <span>05</span>
+            <div>
+              <p>COMPONENT TREE</p>
+              <h2>组件与分类</h2>
+            </div>
+            <strong>{segmentation?.components.length ?? 0}</strong>
+          </div>
+
+          <div className="component-tree" aria-label="语义组件树">
+            <div className="component-row unknown-row">
+              <span aria-hidden="true">?</span>
+              <div>
+                <strong>unknown</strong>
+                <small>{segmentation?.unknown.pixelCount ?? 0} px 待分类</small>
+              </div>
+            </div>
+            {segmentation?.components.map((component) => (
+              <div
+                key={component.instanceId}
+                className="component-row"
+                data-active={component.instanceId === activeComponentId}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`合并选择 ${component.displayName}`}
+                  checked={checkedComponentIds.includes(component.instanceId)}
+                  disabled={semanticBusy}
+                  onChange={(event) =>
+                    setCheckedComponentIds((current) =>
+                      event.target.checked
+                        ? [...new Set([...current, component.instanceId])]
+                        : current.filter((id) => id !== component.instanceId),
+                    )
+                  }
+                />
+                <button
+                  type="button"
+                  disabled={semanticBusy}
+                  onClick={() => chooseComponent(component.instanceId)}
+                >
+                  <strong>{component.displayName}</strong>
+                  <small>
+                    {SEMANTIC_CATEGORY_LABELS[component.category]} · {component.spans.reduce(
+                      (total, span) => total + span.x1 - span.x0 + 1,
+                      0,
+                    )} px
+                  </small>
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="semantic-form">
+            <label>
+              <span>INSTANCE ID</span>
+              <input
+                value={componentId}
+                maxLength={100}
+                disabled={semanticBusy}
+                onChange={(event) => setComponentId(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>显示名称</span>
+              <input
+                value={componentName}
+                maxLength={80}
+                disabled={semanticBusy}
+                onChange={(event) => setComponentName(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>分类</span>
+              <select
+                value={componentCategory}
+                disabled={semanticBusy}
+                onChange={(event) =>
+                  setComponentCategory(event.target.value as SemanticCategory)
+                }
+              >
+                {SEMANTIC_CATEGORIES.map((category) => (
+                  <option key={category} value={category}>
+                    {SEMANTIC_CATEGORY_LABELS[category]} / {category}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>SUBTYPE（可选）</span>
+              <input
+                value={componentSubtype}
+                maxLength={80}
+                disabled={semanticBusy}
+                onChange={(event) => setComponentSubtype(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="semantic-actions">
+            <button
+              type="button"
+              disabled={!canEditSemantic || draftPixelIds.length === 0 || semanticBusy}
+              onClick={assignDraftPixels}
+            >
+              确认像素分类
+            </button>
+            <button
+              type="button"
+              disabled={!canEditSemantic || !activeComponent || draftPixelIds.length === 0 || semanticBusy}
+              onClick={splitActiveComponent}
+            >
+              拆分为新组件
+            </button>
+            <button
+              type="button"
+              disabled={!canEditSemantic || !activeComponent || semanticBusy}
+              onClick={reclassifyActiveComponent}
+            >
+              修改所选分类
+            </button>
+            <button
+              type="button"
+              disabled={!canEditSemantic || checkedComponentIds.length < 2 || semanticBusy}
+              onClick={mergeCheckedComponents}
+            >
+              合并勾选组件
+            </button>
+          </div>
+          <button
+            className="export-part-button"
+            type="button"
+            disabled={!activeComponent || semanticBusy}
+            onClick={() => void exportActiveComponent()}
+          >
+            所选组件 → 保存为 64×64 部件
+          </button>
+        </section>
+
+        <section className="semantic-panel parts-panel">
+          <div className="panel-heading semantic-heading-split">
+            <span>06</span>
+            <div>
+              <p>PART LIBRARY</p>
+              <h2>复用与冲突</h2>
+            </div>
+            <strong>{partLibrary.length}</strong>
+          </div>
+
+          <div className="part-library" data-empty={partLibrary.length === 0}>
+            {partLibrary.length === 0 ? (
+              <p>从组件树保存头发、衣服、手套或鞋后，部件会出现在这里。</p>
+            ) : (
+              partLibrary.map((part) => (
+                <button
+                  key={part.id}
+                  className="part-card"
+                  type="button"
+                  data-active={part.id === selectedPartId}
+                  disabled={semanticBusy}
+                  onClick={() => {
+                    setSelectedPartId(part.id);
+                    setPartPreview(null);
+                  }}
+                >
+                  <img src={partPreviewUrl(part.id)} alt="" />
+                  <span>
+                    <strong>{part.name}</strong>
+                    <small>
+                      {SEMANTIC_CATEGORY_LABELS[part.category]} · {part.manifest.compatibility.armTypes.join("/")}
+                    </small>
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+
+          {selectedPart && (
+            <div className="part-selection">
+              <div>
+                <strong>{selectedPart.name}</strong>
+                <span>{selectedPart.manifest.placement.surfaces.length} surfaces</span>
+              </div>
+              <button
+                type="button"
+                disabled={!selectedRevision || semanticBusy}
+                onClick={() => void previewSelectedPart()}
+              >
+                先分析冲突
+              </button>
+            </div>
+          )}
+
+          {partPreview && (
+            <div className="conflict-report" aria-label="部件冲突报告">
+              <p>
+                <strong>{partPreview.report.hardConflictCount}</strong> 硬冲突
+                <span>{partPreview.report.sameColorOverlapCount} 同色重叠</span>
+              </p>
+              <dl>
+                <div>
+                  <dt>写入</dt>
+                  <dd>{partPreview.report.writePixelCount} px</dd>
+                </div>
+                <div>
+                  <dt>模型</dt>
+                  <dd>{partPreview.report.modelConflict ? "不兼容" : "兼容"}</dd>
+                </div>
+              </dl>
+              <small>预览阶段没有创建 Revision。请选择明确的像素处理策略。</small>
+              <div>
+                <button
+                  type="button"
+                  disabled={!canEditSemantic || partPreview.report.modelConflict || semanticBusy}
+                  onClick={() => void commitSelectedPart("use_part")}
+                >
+                  冲突处使用部件
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    !canEditSemantic ||
+                    partPreview.report.modelConflict ||
+                    partPreview.report.writePixelCount <=
+                      partPreview.report.hardConflictCount +
+                        partPreview.report.sameColorOverlapCount ||
+                    semanticBusy
+                  }
+                  onClick={() => void commitSelectedPart("keep_base")}
+                >
+                  冲突处保留基础
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      </section>
+
       <footer className="status-bar" role="status" aria-live="polite">
         <span>STATUS</span>
         <p>{notice}</p>
-        <code>one viewer · lazy texture · {layout.id}</code>
+        <code>immutable edits · 64×64 parts · {layout.id}</code>
       </footer>
     </main>
   );

@@ -1,6 +1,11 @@
 import { Buffer } from "node:buffer";
 import { resolve } from "node:path";
-import { SkinPngError, type ArmType } from "@mc-skin-split/skin-core";
+import {
+  SEMANTIC_CATEGORIES,
+  SkinPngError,
+  type ArmType,
+  type ManualSemanticOperation,
+} from "@mc-skin-split/skin-core";
 import {
   RevisionStore,
   RevisionStoreError,
@@ -33,6 +38,14 @@ interface DiffParams extends RevisionParams {
   readonly otherRevisionId: string;
 }
 
+interface ComponentParams extends RevisionParams {
+  readonly componentId: string;
+}
+
+interface PartParams {
+  readonly partId: string;
+}
+
 interface CreateProjectBody {
   readonly name: string;
 }
@@ -48,6 +61,28 @@ interface RevisionsQuery {
 
 interface BranchBody extends BranchFromRevisionInput {
   readonly revisionId?: string;
+}
+
+type ManualOperationBody = ManualSemanticOperation & {
+  readonly branchId?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+};
+
+interface ExportPartBody {
+  readonly name?: string;
+}
+
+interface PartsQuery {
+  readonly category?: string;
+}
+
+interface ApplyPartBody {
+  readonly partId: string;
+  readonly strategy?: "use_part" | "keep_base";
+  readonly branchId?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
 }
 
 export function buildApi(options: ApiOptions = {}): FastifyInstance {
@@ -295,6 +330,105 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.post<{ Params: RevisionParams; Body: ManualOperationBody }>(
+    "/api/revisions/:revisionId/operations",
+    { schema: { body: manualOperationSchema } },
+    async (request, reply) => {
+      const { branchId, actorId, summary, ...operation } = request.body;
+      const result = await store.applyManualOperation(
+        request.params.revisionId,
+        {
+          operation: operation as ManualSemanticOperation,
+          ...(branchId ? { branchId } : {}),
+          ...(actorId ? { actorId } : {}),
+          ...(summary ? { summary } : {}),
+        },
+      );
+      return reply.status(201).send(result);
+    },
+  );
+
+  app.post<{ Params: ComponentParams; Body: ExportPartBody }>(
+    "/api/revisions/:revisionId/components/:componentId/export-part",
+    { schema: { body: exportPartSchema } },
+    async (request, reply) => {
+      const part = await store.exportPart(
+        request.params.revisionId,
+        request.params.componentId,
+        request.body,
+      );
+      return reply.status(201).send({ part });
+    },
+  );
+
+  app.get<{ Querystring: PartsQuery }>(
+    "/api/parts",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            category: { type: "string", enum: SEMANTIC_CATEGORIES },
+          },
+        },
+      },
+    },
+    async (request) => ({ parts: store.listParts(request.query.category) }),
+  );
+
+  app.get<{ Params: PartParams }>("/api/parts/:partId", async (request) => ({
+    part: store.getPart(request.params.partId),
+  }));
+
+  app.get<{ Params: PartParams }>(
+    "/api/parts/:partId/texture.png",
+    async (request, reply) => {
+      const part = store.getPart(request.params.partId);
+      const bytes = await store.readPartTexturePng(part.id);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", `\"${part.texture.sha256}\"`)
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.get<{ Params: PartParams }>(
+    "/api/parts/:partId/preview.png",
+    async (request, reply) => {
+      const part = store.getPart(request.params.partId);
+      const bytes = await store.readPartPreviewPng(part.id);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", `\"${part.preview.sha256}\"`)
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.post<{ Params: RevisionParams; Body: ApplyPartBody }>(
+    "/api/revisions/:revisionId/apply-part",
+    { schema: { body: applyPartSchema } },
+    async (request, reply) => {
+      if (!request.body.strategy) {
+        const preview = await store.previewPartApplication(
+          request.params.revisionId,
+          request.body.partId,
+        );
+        return reply.send({ committed: false, ...preview });
+      }
+      const result = await store.applyPart(request.params.revisionId, {
+        partId: request.body.partId,
+        strategy: request.body.strategy,
+        ...(request.body.branchId ? { branchId: request.body.branchId } : {}),
+        ...(request.body.actorId ? { actorId: request.body.actorId } : {}),
+        ...(request.body.summary ? { summary: request.body.summary } : {}),
+      });
+      return reply.status(201).send({ committed: true, ...result });
+    },
+  );
+
   return app;
 }
 
@@ -302,6 +436,129 @@ const revertSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
+    branchId: { type: "string", minLength: 1 },
+    actorId: { type: "string", minLength: 1, maxLength: 120 },
+    summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const spanSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["surface", "y", "x0", "x1"],
+  properties: {
+    surface: {
+      type: "string",
+      pattern:
+        "^(head|torso|rightArm|leftArm|rightLeg|leftLeg)\\.(base|outer)\\.(front|back|left|right|top|bottom)$",
+    },
+    y: { type: "integer", minimum: 0, maximum: 63 },
+    x0: { type: "integer", minimum: 0, maximum: 63 },
+    x1: { type: "integer", minimum: 0, maximum: 63 },
+  },
+} as const;
+
+const componentInputSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["instanceId", "displayName", "category"],
+  properties: {
+    instanceId: {
+      type: "string",
+      minLength: 1,
+      maxLength: 100,
+      pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+    },
+    displayName: { type: "string", minLength: 1, maxLength: 80 },
+    category: { type: "string", enum: SEMANTIC_CATEGORIES },
+    subtype: { type: "string", minLength: 1, maxLength: 80 },
+  },
+} as const;
+
+const operationMetadataProperties = {
+  branchId: { type: "string", minLength: 1 },
+  actorId: { type: "string", minLength: 1, maxLength: 120 },
+  summary: { type: "string", minLength: 1, maxLength: 300 },
+} as const;
+
+const manualOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type"],
+  properties: {
+    type: {
+      type: "string",
+      enum: [
+        "assign_pixels",
+        "unassign_pixels",
+        "merge_components",
+        "split_component",
+        "reclassify_component",
+      ],
+    },
+    target: componentInputSchema,
+    spans: { type: "array", minItems: 1, items: spanSchema },
+    componentIds: {
+      type: "array",
+      minItems: 2,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 100 },
+    },
+    sourceComponentId: { type: "string", minLength: 1, maxLength: 100 },
+    componentId: { type: "string", minLength: 1, maxLength: 100 },
+    category: { type: "string", enum: SEMANTIC_CATEGORIES },
+    subtype: { type: "string", minLength: 1, maxLength: 80 },
+    ...operationMetadataProperties,
+  },
+  oneOf: [
+    {
+      required: ["type", "target", "spans"],
+      properties: {
+        type: { const: "assign_pixels" },
+      },
+    },
+    {
+      required: ["type", "spans"],
+      properties: {
+        type: { const: "unassign_pixels" },
+      },
+    },
+    {
+      required: ["type", "componentIds", "target"],
+      properties: {
+        type: { const: "merge_components" },
+      },
+    },
+    {
+      required: ["type", "sourceComponentId", "target", "spans"],
+      properties: {
+        type: { const: "split_component" },
+      },
+    },
+    {
+      required: ["type", "componentId", "category"],
+      properties: {
+        type: { const: "reclassify_component" },
+      },
+    },
+  ],
+} as const;
+
+const exportPartSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const applyPartSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["partId"],
+  properties: {
+    partId: { type: "string", minLength: 1, maxLength: 100 },
+    strategy: { type: "string", enum: ["use_part", "keep_base"] },
     branchId: { type: "string", minLength: 1 },
     actorId: { type: "string", minLength: 1, maxLength: 120 },
     summary: { type: "string", minLength: 1, maxLength: 300 },

@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, and AI-assisted classification.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, and M3 makes the 3D avatar Revision-aware.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, and M4 adds manual semantic editing plus reusable parts.
 
 The current Studio can:
 
@@ -14,7 +14,11 @@ The current Studio can:
 - preview the effective arm layout through one lazy-loaded `skinview3d` viewer that is reused across Revision switches;
 - create SQLite-backed Projects with a Slim/Alex default and Import Revisions;
 - load any independently verified historical snapshot into the Atlas and 3D avatar together;
-- restore an old state as a new Revision or continue it on a new Branch.
+- restore an old state as a new Revision or continue it on a new Branch;
+- classify exact UV pixels into a fixed semantic taxonomy through a 64×64 draft canvas;
+- merge, split, reclassify, or return component pixels to `unknown` without editing history in place;
+- export a component as a verified five-file 64×64 part asset;
+- preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision.
 
 ## Requirements
 
@@ -54,4 +58,4 @@ scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The manual editor, part library, AI worker, and compositor follow in M4-M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The AI worker and multi-part compositor follow in M5-M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

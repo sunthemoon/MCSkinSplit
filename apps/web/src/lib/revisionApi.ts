@@ -1,4 +1,11 @@
-import type { ArmType } from "@mc-skin-split/skin-core";
+import type {
+  ArmType,
+  ManualSemanticOperation,
+  PartApplicationReport,
+  PartManifest,
+  SemanticComponent,
+  SemanticCategory,
+} from "@mc-skin-split/skin-core";
 
 export interface ApiProject {
   readonly id: string;
@@ -58,6 +65,37 @@ export interface ApiSegmentation {
     readonly coordinateOrigin: "top-left";
     readonly sourceHash: string;
   };
+  readonly components: readonly SemanticComponent[];
+  readonly unknown: {
+    readonly maskFile: string | null;
+    readonly pixelCount: number;
+  };
+}
+
+export interface ApiPart {
+  readonly id: string;
+  readonly sourceProjectId: string;
+  readonly sourceRevisionId: string;
+  readonly sourceComponentId: string;
+  readonly name: string;
+  readonly category: SemanticCategory;
+  readonly subtype?: string;
+  readonly armType: ArmType;
+  readonly manifest: PartManifest;
+  readonly createdAt: string;
+}
+
+export interface ApiPartPreview {
+  readonly committed: false;
+  readonly revisionId: string;
+  readonly part: ApiPart;
+  readonly report: PartApplicationReport;
+}
+
+export interface ApiPartCommit extends ApiMutationResult {
+  readonly committed: true;
+  readonly part: ApiPart;
+  readonly report: PartApplicationReport;
 }
 
 export class RevisionApiError extends Error {
@@ -221,6 +259,96 @@ export async function branchRevision(
     },
     fetcher,
   );
+}
+
+export async function applySemanticOperation(
+  revisionId: string,
+  operation: ManualSemanticOperation,
+  options: {
+    readonly branchId?: string;
+    readonly summary?: string;
+  } = {},
+  fetcher: Fetcher = fetch,
+): Promise<ApiMutationResult> {
+  return requestJson(
+    `/api/revisions/${encodeURIComponent(revisionId)}/operations`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...operation, ...options }),
+    },
+    fetcher,
+  );
+}
+
+export async function exportRevisionPart(
+  revisionId: string,
+  componentId: string,
+  name?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPart> {
+  const body = await requestJson<{ part: ApiPart }>(
+    `/api/revisions/${encodeURIComponent(revisionId)}/components/${encodeURIComponent(componentId)}/export-part`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(name ? { name } : {}),
+    },
+    fetcher,
+  );
+  return body.part;
+}
+
+export async function listParts(
+  category?: SemanticCategory,
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiPart[]> {
+  const query = category
+    ? `?category=${encodeURIComponent(category)}`
+    : "";
+  const body = await requestJson<{ parts: readonly ApiPart[] }>(
+    `/api/parts${query}`,
+    undefined,
+    fetcher,
+  );
+  return body.parts;
+}
+
+export async function previewRevisionPart(
+  revisionId: string,
+  partId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartPreview> {
+  return requestJson(
+    `/api/revisions/${encodeURIComponent(revisionId)}/apply-part`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ partId }),
+    },
+    fetcher,
+  );
+}
+
+export async function commitRevisionPart(
+  revisionId: string,
+  partId: string,
+  strategy: "use_part" | "keep_base",
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartCommit> {
+  return requestJson(
+    `/api/revisions/${encodeURIComponent(revisionId)}/apply-part`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ partId, strategy }),
+    },
+    fetcher,
+  );
+}
+
+export function partPreviewUrl(partId: string): string {
+  return `/api/parts/${encodeURIComponent(partId)}/preview.png`;
 }
 
 async function requestJson<T>(

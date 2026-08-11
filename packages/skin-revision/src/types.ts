@@ -1,4 +1,10 @@
-import type { ArmType } from "@mc-skin-split/skin-core";
+import type {
+  ArmType,
+  ManualSemanticOperation,
+  PartApplicationReport,
+  PartManifest,
+  SemanticComponent,
+} from "@mc-skin-split/skin-core";
 
 export const OPERATION_TYPES = [
   "import",
@@ -62,7 +68,11 @@ export interface SkinAsset {
   readonly id: string;
   readonly projectId: string;
   readonly revisionId: string;
-  readonly assetType: "revision_skin" | "segmentation_json" | "operation_json";
+  readonly assetType:
+    | "revision_skin"
+    | "segmentation_json"
+    | "component_mask"
+    | "operation_json";
   readonly storagePath: string;
   readonly mimeType: string;
   readonly byteSize: number;
@@ -80,9 +90,9 @@ export interface SegmentationSnapshot {
     readonly coordinateOrigin: "top-left";
     readonly sourceHash: string;
   };
-  readonly components: readonly unknown[];
+  readonly components: readonly SemanticComponent[];
   readonly unknown: {
-    readonly maskFile: null;
+    readonly maskFile: string | null;
     readonly pixelCount: number;
   };
 }
@@ -108,7 +118,7 @@ export interface OperationSnapshot {
 export interface SnapshotChecksum {
   readonly schemaVersion: "1.0";
   readonly revisionId: string;
-  readonly files: Readonly<Record<"skin.png" | "segmentation.json" | "operation.json", string>>;
+  readonly files: Readonly<Record<string, string>>;
 }
 
 export interface CreateProjectInput {
@@ -158,6 +168,63 @@ export interface RevisionMutationResult {
   readonly revision: SkinRevision;
 }
 
+export interface ManualRevisionOperationInput {
+  readonly operation: ManualSemanticOperation;
+  readonly branchId?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface ExportPartInput {
+  readonly name?: string;
+}
+
+export interface PartFileAsset {
+  readonly id: string;
+  readonly storagePath: string;
+  readonly mimeType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+}
+
+export interface SkinPart {
+  readonly id: string;
+  readonly sourceProjectId: string;
+  readonly sourceRevisionId: string;
+  readonly sourceComponentId: string;
+  readonly name: string;
+  readonly category: PartManifest["category"];
+  readonly subtype?: string;
+  readonly armType: ArmType;
+  readonly manifest: PartManifest;
+  readonly texture: PartFileAsset;
+  readonly writeMask: PartFileAsset;
+  readonly manifestFile: PartFileAsset;
+  readonly preview: PartFileAsset;
+  readonly source: PartFileAsset;
+  readonly createdAt: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface PartApplicationPreview {
+  readonly revisionId: string;
+  readonly part: SkinPart;
+  readonly report: PartApplicationReport;
+}
+
+export interface ApplyPartInput {
+  readonly partId: string;
+  readonly strategy: "use_part" | "keep_base";
+  readonly branchId?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface ApplyPartResult extends RevisionMutationResult {
+  readonly part: SkinPart;
+  readonly report: PartApplicationReport;
+}
+
 export interface RevisionDiff {
   readonly fromRevisionId: string;
   readonly toRevisionId: string;
@@ -176,7 +243,8 @@ export type RevisionIdKind =
   | "branch"
   | "revision"
   | "asset"
-  | "operation";
+  | "operation"
+  | "part";
 
 export interface RevisionStoreOptions {
   readonly dataDirectory: string;

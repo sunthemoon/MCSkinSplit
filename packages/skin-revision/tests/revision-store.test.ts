@@ -2,6 +2,12 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  decodeSkinPng,
+  getPixel,
+  maskToPixelIds,
+  rgbaImageToMask,
+} from "@mc-skin-split/skin-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   RevisionStore,
@@ -12,6 +18,12 @@ import {
 const REAL_SKIN_PATH = fileURLToPath(
   new URL(
     "../../../tests/fixtures/skins/ab87de696cfca859.png",
+    import.meta.url,
+  ),
+);
+const TARGET_SKIN_PATH = fileURLToPath(
+  new URL(
+    "../../../tests/fixtures/skins/354359a2c2f33777.png",
     import.meta.url,
   ),
 );
@@ -99,6 +111,7 @@ describe("RevisionStore", () => {
       );
       expect((await readdir(revisionDirectory)).sort()).toEqual([
         "checksum.json",
+        "components",
         "operation.json",
         "segmentation.json",
         "skin.png",
@@ -107,11 +120,12 @@ describe("RevisionStore", () => {
       const snapshot = await store.verifyRevisionSnapshot(result.revision.id);
       expect(snapshot.checksum.revisionId).toBe(result.revision.id);
       expect(Object.keys(snapshot.checksum.files).sort()).toEqual([
+        "components/unknown.mask.png",
         "operation.json",
         "segmentation.json",
         "skin.png",
       ]);
-      expect(store.getRevisionAssets(result.revision.id)).toHaveLength(3);
+      expect(store.getRevisionAssets(result.revision.id)).toHaveLength(4);
 
       const segmentation = await store.readRevisionSegmentation(
         result.revision.id,
@@ -125,7 +139,15 @@ describe("RevisionStore", () => {
           armType: "slim",
         },
         components: [],
+        unknown: {
+          maskFile: "components/unknown.mask.png",
+        },
       });
+      const semanticState = await store.readRevisionSemanticState(
+        result.revision.id,
+      );
+      expect(semanticState.masks).toEqual({});
+      expect(semanticState.document.unknown.pixelCount).toBeGreaterThan(0);
       const operation = await store.readRevisionOperation(result.revision.id);
       expect(operation).toMatchObject({
         schemaVersion: "1.0",
@@ -161,6 +183,217 @@ describe("RevisionStore", () => {
       expect(await store.readRevisionSegmentation(result.revision.id)).toMatchObject(
         { source: { armType: "wide" } },
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("commits a confirmed semantic edit as a new immutable revision", async () => {
+    const { store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      const edited = await store.applyManualOperation(imported.revision.id, {
+        summary: "标记头发测试区域",
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+          },
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      });
+
+      expect(edited.revision).toMatchObject({
+        parentRevisionId: imported.revision.id,
+        sequence: 2,
+        operationType: "manual_edit",
+        summary: "标记头发测试区域",
+      });
+      expect(store.getRevisionAssets(edited.revision.id)).toHaveLength(5);
+      const state = await store.readRevisionSemanticState(edited.revision.id);
+      expect(state.document.components).toMatchObject([
+        {
+          instanceId: "hair.main",
+          category: "hair",
+          maskFile: "components/hair.main.mask.png",
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      ]);
+      expect(state.document.unknown.pixelCount).toBeGreaterThan(0);
+      const operation = await store.readRevisionOperation(edited.revision.id);
+      expect(operation).toMatchObject({
+        type: "manual_edit",
+        inputRevisionId: imported.revision.id,
+        affectedComponents: ["hair.main"],
+      });
+
+      await expect(
+        store.applyManualOperation(imported.revision.id, {
+          operation: {
+            type: "reclassify_component",
+            componentId: "hair.main",
+            category: "head_accessory",
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("exports and reloads a reusable 64x64 semantic part", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      const edited = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+          },
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      });
+      const part = await store.exportPart(
+        edited.revision.id,
+        "hair.main",
+        { name: "可复用头发" },
+      );
+
+      expect(part).toMatchObject({
+        sourceProjectId: imported.project.id,
+        sourceRevisionId: edited.revision.id,
+        sourceComponentId: "hair.main",
+        name: "可复用头发",
+        category: "hair",
+        armType: "slim",
+        manifest: {
+          compatibility: { armTypes: ["wide", "slim"] },
+          maskMode: "write-colored-pixels-only",
+        },
+      });
+      expect(store.listParts()).toEqual([part]);
+      expect(store.listParts("hair")).toEqual([part]);
+      expect(store.listParts("shoe")).toEqual([]);
+      expect((await readdir(join(directory, "parts", part.id))).sort()).toEqual([
+        "manifest.json",
+        "preview.png",
+        "source.json",
+        "texture.png",
+        "write-mask.png",
+      ]);
+
+      const texture = decodeSkinPng(await store.readPartTexturePng(part.id));
+      const writeMask = rgbaImageToMask(
+        decodeSkinPng(
+          (await store.verifyPartStorage(part.id)).files["write-mask.png"].bytes,
+        ),
+      );
+      const sourceSkin = decodeSkinPng(
+        await store.readRevisionSkinPng(edited.revision.id),
+      );
+      expect(maskToPixelIds(writeMask)).toEqual([8 * 64 + 8, 8 * 64 + 9]);
+      expect(getPixel(texture, 8, 8)).toEqual(getPixel(sourceSkin, 8, 8));
+      expect(getPixel(texture, 10, 8)).toEqual([0, 0, 0, 0]);
+
+      const preview = await store.previewPartApplication(
+        edited.revision.id,
+        part.id,
+      );
+      expect(preview.report).toMatchObject({
+        compatible: true,
+        hardConflictCount: 0,
+        sameColorOverlapCount: 2,
+        writePixelCount: 2,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("previews conflicts before applying a part to a new skin revision", async () => {
+    const { store } = await createStore();
+
+    try {
+      const source = await importRealSkin(store);
+      const segmented = await store.applyManualOperation(source.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+          },
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      });
+      const part = await store.exportPart(segmented.revision.id, "hair.main");
+      const target = await store.importProject({
+        name: "Part target",
+        fileName: "354359a2c2f33777.png",
+        skinPng: await readFile(TARGET_SKIN_PATH),
+      });
+      const targetRevisionCount = store.listRevisions(target.project.id).length;
+
+      const preview = await store.previewPartApplication(
+        target.revision.id,
+        part.id,
+      );
+      expect(preview.report.writePixelCount).toBe(2);
+      expect(
+        preview.report.hardConflictCount +
+          preview.report.sameColorOverlapCount,
+      ).toBe(2);
+      expect(store.listRevisions(target.project.id)).toHaveLength(
+        targetRevisionCount,
+      );
+
+      const applied = await store.applyPart(target.revision.id, {
+        partId: part.id,
+        strategy: "use_part",
+        summary: "混搭来源头发",
+      });
+      expect(applied.revision).toMatchObject({
+        parentRevisionId: target.revision.id,
+        operationType: "apply_part",
+        sequence: 2,
+        summary: "混搭来源头发",
+      });
+      const appliedSkin = decodeSkinPng(
+        await store.readRevisionSkinPng(applied.revision.id),
+      );
+      const partTexture = decodeSkinPng(await store.readPartTexturePng(part.id));
+      expect(getPixel(appliedSkin, 8, 8)).toEqual(getPixel(partTexture, 8, 8));
+      expect(getPixel(appliedSkin, 9, 8)).toEqual(getPixel(partTexture, 9, 8));
+      const appliedState = await store.readRevisionSemanticState(
+        applied.revision.id,
+      );
+      expect(appliedState.document.components).toContainEqual(
+        expect.objectContaining({
+          instanceId: `applied.${part.id}`,
+          category: "hair",
+        }),
+      );
+      expect(
+        await store.diffRevisions(target.revision.id, applied.revision.id),
+      ).toMatchObject({ changedPixelCount: preview.report.hardConflictCount });
+      expect(
+        decodeSkinPng(await store.readRevisionSkinPng(target.revision.id)),
+      ).toEqual(decodeSkinPng(await readFile(TARGET_SKIN_PATH)));
     } finally {
       store.close();
     }
@@ -357,7 +590,7 @@ async function importRealSkin(store: RevisionStore) {
 async function readSnapshotFiles(
   directory: string,
 ): Promise<Readonly<Record<string, Uint8Array>>> {
-  const fileNames = await readdir(directory);
+  const fileNames = await listFiles(directory);
   return Object.fromEntries(
     await Promise.all(
       fileNames.map(async (fileName) => [
@@ -366,4 +599,18 @@ async function readSnapshotFiles(
       ]),
     ),
   );
+}
+
+async function listFiles(directory: string, prefix = ""): Promise<string[]> {
+  const entries = await readdir(join(directory, prefix), { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const relativePath = prefix ? join(prefix, entry.name) : entry.name;
+    if (entry.isDirectory()) {
+      files.push(...(await listFiles(directory, relativePath)));
+    } else {
+      files.push(relativePath);
+    }
+  }
+  return files.sort();
 }
