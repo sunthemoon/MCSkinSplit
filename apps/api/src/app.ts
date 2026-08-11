@@ -1,6 +1,18 @@
 import { Buffer } from "node:buffer";
 import { resolve } from "node:path";
 import {
+  CODEX_CONFIG_DEFAULT_MODEL,
+  CodexExecProvider,
+  type SkinSemanticAiProvider,
+} from "@mc-skin-split/ai-provider";
+import {
+  ANALYSIS_REASONING_EFFORTS,
+  AiJobManager,
+  AiJobStoreError,
+  type AiAnalysisOptions,
+  type AnalysisReasoningEffort,
+} from "@mc-skin-split/ai-worker";
+import {
   SEMANTIC_CATEGORIES,
   SkinPngError,
   type ArmType,
@@ -24,6 +36,8 @@ interface ApiOptions {
   readonly dataDirectory?: string;
   readonly logger?: FastifyServerOptions["logger"];
   readonly revisionStore?: RevisionStore;
+  readonly aiJobManager?: AiJobManager;
+  readonly aiProviders?: readonly SkinSemanticAiProvider[];
 }
 
 interface ProjectParams {
@@ -44,6 +58,10 @@ interface ComponentParams extends RevisionParams {
 
 interface PartParams {
   readonly partId: string;
+}
+
+interface AiJobParams {
+  readonly jobId: string;
 }
 
 interface CreateProjectBody {
@@ -85,10 +103,24 @@ interface ApplyPartBody {
   readonly summary?: string;
 }
 
+interface AiJobsQuery {
+  readonly revisionId?: string;
+}
+
+interface StartAiAnalysisBody extends AiAnalysisOptions {}
+
+interface RetryAiJobBody {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly reasoningEffort?: AnalysisReasoningEffort;
+  readonly createRevisionOnSuccess?: boolean;
+}
+
 export function buildApi(options: ApiOptions = {}): FastifyInstance {
   const app = Fastify({
     bodyLimit: MAX_SKIN_BYTES,
     logger: options.logger ?? false,
+    ajv: { customOptions: { removeAdditional: false } },
   });
   const ownsStore = !options.revisionStore;
   const store =
@@ -98,6 +130,47 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
         options.dataDirectory ?? resolve(process.cwd(), "data"),
       ),
     });
+  const ownsAiJobManager = !options.aiJobManager;
+  const defaultAiReasoningEffort = readReasoningEffort(
+    process.env.AI_REASONING_EFFORT,
+    "medium",
+  );
+  const aiJobManager =
+    options.aiJobManager ??
+    new AiJobManager({
+      revisionStore: store,
+      providers:
+        options.aiProviders ??
+        [
+          new CodexExecProvider({
+            defaultModel:
+              process.env.AI_MODEL?.trim() || CODEX_CONFIG_DEFAULT_MODEL,
+            timeoutMs: readBoundedInteger(
+              process.env.AI_TIMEOUT_SECONDS,
+              600,
+              10,
+              1_800,
+            ) * 1_000,
+            ignoreUserConfig: readBoolean(
+              process.env.AI_IGNORE_USER_CONFIG,
+              false,
+            ),
+            allowSchemaFallback: readBoolean(
+              process.env.AI_ALLOW_SCHEMA_FALLBACK,
+              true,
+            ),
+          }),
+        ],
+      maxRepairAttempts: readBoundedInteger(
+        process.env.AI_MAX_REPAIR_ATTEMPTS,
+        1,
+        0,
+        3,
+      ),
+      ...(process.env.MC_SKIN_AI_SKILL_DIR?.trim()
+        ? { skillDirectory: resolve(process.env.MC_SKIN_AI_SKILL_DIR) }
+        : {}),
+    });
 
   app.addContentTypeParser(
     "image/png",
@@ -106,6 +179,9 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   );
 
   app.addHook("onClose", async () => {
+    if (ownsAiJobManager) {
+      await aiJobManager.close();
+    }
     if (ownsStore) {
       store.close();
     }
@@ -113,6 +189,15 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof RevisionStoreError) {
+      return reply.status(error.statusCode).send({
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details ? { details: error.details } : {}),
+        },
+      });
+    }
+    if (error instanceof AiJobStoreError) {
       return reply.status(error.statusCode).send({
         error: {
           code: error.code,
@@ -150,6 +235,13 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   });
 
   app.get("/api/health", async () => ({ status: "ok" }));
+
+  app.get("/api/ai/providers", async () => ({
+    providers: aiJobManager.listProviders(),
+    defaultModel:
+      process.env.AI_MODEL?.trim() || CODEX_CONFIG_DEFAULT_MODEL,
+    defaultReasoningEffort: defaultAiReasoningEffort,
+  }));
 
   app.get("/api/projects", async () => ({ projects: store.listProjects() }));
 
@@ -429,6 +521,63 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.post<{ Params: RevisionParams; Body: StartAiAnalysisBody }>(
+    "/api/revisions/:revisionId/ai-analysis",
+    { schema: { body: startAiAnalysisSchema } },
+    async (request, reply) => {
+      const job = aiJobManager.startAnalysis(
+        request.params.revisionId,
+        request.body,
+      );
+      return reply.status(202).send({ job });
+    },
+  );
+
+  app.get<{ Querystring: AiJobsQuery }>(
+    "/api/ai-jobs",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            revisionId: { type: "string", minLength: 1, maxLength: 120 },
+          },
+        },
+      },
+    },
+    async (request) => ({
+      jobs: aiJobManager.listJobs(request.query.revisionId),
+    }),
+  );
+
+  app.get<{ Params: AiJobParams }>(
+    "/api/ai-jobs/:jobId",
+    async (request) => aiJobManager.getJobDetail(request.params.jobId),
+  );
+
+  app.get<{ Params: AiJobParams }>(
+    "/api/ai-jobs/:jobId/events",
+    async (request) => {
+      const detail = aiJobManager.getJobDetail(request.params.jobId);
+      return { jobId: detail.job.id, events: detail.events };
+    },
+  );
+
+  app.post<{ Params: AiJobParams }>(
+    "/api/ai-jobs/:jobId/cancel",
+    async (request) => ({ job: aiJobManager.cancelJob(request.params.jobId) }),
+  );
+
+  app.post<{ Params: AiJobParams; Body: RetryAiJobBody }>(
+    "/api/ai-jobs/:jobId/retry",
+    { schema: { body: retryAiJobSchema } },
+    async (request, reply) => {
+      const job = aiJobManager.retryJob(request.params.jobId, request.body);
+      return reply.status(202).send({ job });
+    },
+  );
+
   return app;
 }
 
@@ -565,6 +714,55 @@ const applyPartSchema = {
   },
 } as const;
 
+const startAiAnalysisSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "mode",
+    "provider",
+    "model",
+    "reasoningEffort",
+    "taxonomyLevel",
+    "focus",
+    "createRevisionOnSuccess",
+  ],
+  properties: {
+    mode: { const: "full" },
+    provider: {
+      type: "string",
+      minLength: 1,
+      maxLength: 80,
+      pattern: "^[a-z][a-z0-9-]*$",
+    },
+    model: { type: "string", minLength: 1, maxLength: 120 },
+    reasoningEffort: { type: "string", enum: ANALYSIS_REASONING_EFFORTS },
+    taxonomyLevel: { const: "coarse" },
+    focus: {
+      type: "array",
+      uniqueItems: true,
+      maxItems: SEMANTIC_CATEGORIES.length,
+      items: { type: "string", enum: SEMANTIC_CATEGORIES },
+    },
+    createRevisionOnSuccess: { type: "boolean" },
+  },
+} as const;
+
+const retryAiJobSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    provider: {
+      type: "string",
+      minLength: 1,
+      maxLength: 80,
+      pattern: "^[a-z][a-z0-9-]*$",
+    },
+    model: { type: "string", minLength: 1, maxLength: 120 },
+    reasoningEffort: { type: "string", enum: ANALYSIS_REASONING_EFFORTS },
+    createRevisionOnSuccess: { type: "boolean" },
+  },
+} as const;
+
 function branchSchema(requireRevisionId: boolean) {
   return {
     type: "object",
@@ -618,4 +816,44 @@ function getErrorCode(error: unknown): string {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求无法完成";
+}
+
+function readBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new TypeError(
+      `环境变量必须是 ${minimum}-${maximum} 的整数：${value}`,
+    );
+  }
+  return parsed;
+}
+
+function readBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new TypeError(`环境变量必须是 true 或 false：${value}`);
+}
+
+function readReasoningEffort(
+  value: string | undefined,
+  fallback: AnalysisReasoningEffort,
+): AnalysisReasoningEffort {
+  const normalized = value?.trim() || fallback;
+  if (
+    !ANALYSIS_REASONING_EFFORTS.includes(
+      normalized as AnalysisReasoningEffort,
+    )
+  ) {
+    throw new TypeError(
+      `AI_REASONING_EFFORT 必须是 ${ANALYSIS_REASONING_EFFORTS.join(", ")}：${normalized}`,
+    );
+  }
+  return normalized as AnalysisReasoningEffort;
 }

@@ -4,6 +4,7 @@ import type {
   PartApplicationReport,
   PartManifest,
   SemanticComponent,
+  SemanticState,
 } from "@mc-skin-split/skin-core";
 
 export const OPERATION_TYPES = [
@@ -172,6 +173,17 @@ export interface ManualRevisionOperationInput {
   readonly operation: ManualSemanticOperation;
   readonly branchId?: string;
   readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface AiSegmentationRevisionInput {
+  readonly state: SemanticState;
+  readonly aiJobId: string;
+  readonly aiRunId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly proposalSummary: string;
+  readonly reviewItems: readonly unknown[];
   readonly summary?: string;
 }
 

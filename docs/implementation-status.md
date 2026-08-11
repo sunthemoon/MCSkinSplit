@@ -11,7 +11,7 @@ Last updated: 2026-08-11
 | M2 immutable revisions | Complete | SQLite, snapshots, revert, branch, hash checks |
 | M3 revision-aware 3D preview | Complete | One viewer instance tracks selected revisions |
 | M4 manual semantic editor and parts | Complete | Manual segmentation and lossless part reuse |
-| M5 AI Skill and worker | Not started | Schema-valid proposals create revisions only after validation |
+| M5 AI Skill and worker | Complete | Schema-valid proposals create revisions only after validation |
 | M6 compositor | Not started | Explicit conflicts and deterministic composition |
 
 ## M0 baseline
@@ -172,3 +172,69 @@ Last updated: 2026-08-11
   a skin Revision because source skin state is unchanged.
 - The lazy `skinview3d` chunk remains about 525 kB before gzip and retains Vite's
   non-blocking chunk-size warning.
+
+## M5 deliverables
+
+- Added the versioned repository Skill `.agents/skills/mc-skin-segmenter`, including
+  taxonomy and UV references, proposal schema, inspection helpers, and a compact
+  candidate-first analysis workflow.
+- Added `packages/skin-analysis-pack` to build a private workspace with source and
+  derived views, palette, pixel map, candidate documents, prior segmentation,
+  schema, copied Skill, and integrity hashes.
+- Added deterministic `bounded-color80-surface-cc-v2` candidates. Every visible
+  valid UV pixel belongs to exactly one candidate and no region crosses a canonical
+  surface.
+- Added `packages/ai-provider` with a replaceable provider interface, strict Ajv and
+  pixel validation, safe Windows Codex CLI resolution, cancellation, timeout, log
+  limits, JSONL diagnostics, and structured-output transport fallback.
+- Added `apps/ai-worker` with persistent Job, Run, Asset, and Event records, one
+  bounded repair attempt by default, retry against the original Revision, and
+  complete failure artifacts.
+- Added an AI migration and immutable `ai_segment` commit path. Invalid, failed, or
+  cancelled model output cannot create a Revision; successful classification keeps
+  the input skin PNG byte-identical.
+- Added provider/start/list/detail/event/cancel/retry API routes and a responsive
+  Studio console for provider, model, reasoning, progress, attempts, artifacts,
+  review items, and automatic result loading.
+- Documented the provider boundary, environment, privacy behavior, validation, and
+  audit contract in [`ai-analysis.md`](ai-analysis.md).
+
+## M5 verification evidence
+
+- `pnpm verify` passes fixture drift detection, all TypeScript projects, 113
+  Vitest cases, and every production build.
+- Deterministic analysis-pack tests cover all six pinned real skins. They preserve
+  exact visible-pixel coverage with 163-419 bounded candidates per skin and produce
+  reproducible workspaces without modifying source inputs.
+- Provider tests cover schema/pixel validation, opaque outfit-group identifiers,
+  Windows `.cmd` resolution without a shell, stdin prompt delivery with attached
+  images, structured-output fallback, and diagnostic preservation.
+- Worker and Revision tests cover success, validation failure, one repair attempt,
+  cancellation, provider failure assets, retry provenance, exact skin bytes, and
+  the rule that only a valid Branch HEAD result creates an AI Revision.
+- API and web tests cover strict request bodies, provider defaults, all Job actions,
+  status polling, and result loading into the semantic editor.
+- A real end-to-end Codex run on `ab87de696cfca859.png` used the default Slim/Alex
+  model and medium reasoning. The first proposal was rejected and retained for
+  audit; the automatic repair succeeded with 10 confirmed components covering all
+  1,860 visible pixels and zero `unknown` pixels.
+- The successful Job retained two Runs with five hashed assets each. Its resulting
+  `ai_segment` Revision references the successful Run, preserves the Import PNG's
+  SHA-256, and exposes all components in the browser editor and 3D preview.
+- Browser visual inspection confirmed the AI console, progress/event history,
+  attempt artifacts, Slim avatar, Atlas, and component tree without clipping or
+  layout overlap.
+
+## M5 known boundaries
+
+- Semantic output is a model proposal, not objective ground truth. Confidence and
+  review state remain visible, and the M4 editor is the correction path.
+- Only the bundled local Codex CLI provider is enabled by default. The provider
+  interface is replaceable, but no hosted-provider credential UI is included.
+- Structured-output fallback is limited to transport/schema capability failures;
+  host validation is never skipped.
+- The six real skins exercise deterministic pre-analysis. The recorded full model
+  run covers A1; running every model over every fixture is intentionally not part of
+  deterministic CI.
+- AI workspaces and logs may contain skin imagery and model output. They remain
+  under the configured local data directory and require explicit operator cleanup.

@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcskinsplit.local/schemas/analysis-proposal.schema.json",
+  "title": "MCSkinSplit semantic analysis proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sourceRevisionId",
+    "modelAssessment",
+    "components",
+    "unassignedCandidateRegionIds",
+    "reviewItems",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "sourceRevisionId": { "type": "string", "minLength": 3, "maxLength": 120 },
+    "modelAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["armType", "confidence"],
+      "properties": {
+        "armType": { "type": "string", "enum": ["wide", "slim"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "components": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "unassignedCandidateRegionIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/regionId" }
+    },
+    "reviewItems": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/reviewItem" }
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 500 }
+  },
+  "$defs": {
+    "category": {
+      "type": "string",
+      "enum": [
+        "skin",
+        "face",
+        "eye",
+        "mouth",
+        "face_detail",
+        "hair",
+        "head_accessory",
+        "face_accessory",
+        "upper_clothing",
+        "lower_clothing",
+        "one_piece_clothing",
+        "sleeve",
+        "glove",
+        "legwear",
+        "shoe",
+        "neck_accessory",
+        "body_accessory",
+        "waist_accessory",
+        "arm_accessory",
+        "leg_accessory",
+        "back_accessory",
+        "other_accessory",
+        "unknown"
+      ]
+    },
+    "regionId": {
+      "type": "string",
+      "pattern": "^region_[a-zA-Z0-9._-]{3,160}$"
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["y", "x0", "x1"],
+      "properties": {
+        "y": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "x0": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "x1": { "type": "integer", "minimum": 0, "maximum": 63 }
+      }
+    },
+    "relations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attachedTo", "pairedWith", "sameOutfitGroup"],
+      "properties": {
+        "attachedTo": {
+          "type": ["string", "null"],
+          "maxLength": 100
+        },
+        "pairedWith": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+        },
+        "sameOutfitGroup": {
+          "type": ["string", "null"],
+          "maxLength": 100
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instanceId",
+        "displayName",
+        "category",
+        "subtype",
+        "confidence",
+        "candidateRegionIds",
+        "pixelOverrides",
+        "relations",
+        "notes"
+      ],
+      "properties": {
+        "instanceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+        },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "category": { "$ref": "#/$defs/category" },
+        "subtype": { "type": ["string", "null"], "maxLength": 80 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "candidateRegionIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/regionId" }
+        },
+        "pixelOverrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["add", "remove"],
+          "properties": {
+            "add": { "type": "array", "items": { "$ref": "#/$defs/span" } },
+            "remove": { "type": "array", "items": { "$ref": "#/$defs/span" } }
+          }
+        },
+        "relations": { "$ref": "#/$defs/relations" },
+        "notes": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "reviewItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "candidateRegionIds",
+        "question",
+        "suggestedCategories",
+        "confidence"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ambiguous_region", "low_confidence", "coverage_gap", "model_mismatch"]
+        },
+        "candidateRegionIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/regionId" }
+        },
+        "question": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "suggestedCategories": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/category" }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

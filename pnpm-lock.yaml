@@ -12,8 +12,45 @@ importers:
         specifier: 7.0.0
         version: 7.0.0
 
+  apps/ai-worker:
+    dependencies:
+      '@mc-skin-split/ai-provider':
+        specifier: workspace:*
+        version: link:../../packages/ai-provider
+      '@mc-skin-split/skin-analysis-pack':
+        specifier: workspace:*
+        version: link:../../packages/skin-analysis-pack
+      '@mc-skin-split/skin-core':
+        specifier: workspace:*
+        version: link:../../packages/skin-core
+      '@mc-skin-split/skin-revision':
+        specifier: workspace:*
+        version: link:../../packages/skin-revision
+      better-sqlite3:
+        specifier: 13.0.3
+        version: 13.0.3
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
   apps/api:
     dependencies:
+      '@mc-skin-split/ai-provider':
+        specifier: workspace:*
+        version: link:../../packages/ai-provider
+      '@mc-skin-split/ai-worker':
+        specifier: workspace:*
+        version: link:../ai-worker
       '@mc-skin-split/skin-core':
         specifier: workspace:*
         version: link:../../packages/skin-core
@@ -70,6 +107,44 @@ importers:
       vite:
         specifier: 8.2.1
         version: 8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
+  packages/ai-provider:
+    dependencies:
+      '@mc-skin-split/skin-analysis-pack':
+        specifier: workspace:*
+        version: link:../skin-analysis-pack
+      '@mc-skin-split/skin-core':
+        specifier: workspace:*
+        version: link:../skin-core
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
+  packages/skin-analysis-pack:
+    dependencies:
+      '@mc-skin-split/skin-core':
+        specifier: workspace:*
+        version: link:../skin-core
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
       vitest:
         specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))

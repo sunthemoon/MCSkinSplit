@@ -16,9 +16,9 @@ Deterministic skin core
   -> masks, spans, composition, conflict reports
 
 AI worker
-  -> read-only analysis workspace
+  -> isolated, integrity-checked analysis workspace
   -> replaceable provider
-  -> schema validator
+  -> schema and pixel-ownership validator
   -> proposal returned to revision service
 ```
 
@@ -79,16 +79,41 @@ The detailed coordinate and inference contract is in [`uv-layout.md`](uv-layout.
 The detailed contract is in
 [`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).
 
+## M5 decisions
+
+- `packages/skin-analysis-pack` deterministically renders model-facing views and
+  partitions every visible valid UV pixel into bounded same-surface color
+  candidates. Candidate regions accelerate classification; they are not semantic
+  truth.
+- Every run receives a private workspace containing versioned input, schema, Skill,
+  output, and log directories. Input and Skill hashes are verified after provider
+  execution before any proposal can be accepted.
+- `packages/ai-provider` owns the replaceable model boundary. The default adapter
+  starts `codex exec` without a shell, applies timeout/cancellation/log limits, and
+  captures JSONL diagnostics.
+- The model can write only a JSON proposal. Host-side Ajv and deterministic pixel
+  checks require complete, non-overlapping ownership before the proposal is
+  converted to semantic masks.
+- `apps/ai-worker` persists Job, Run, Asset, and Event records. One repair attempt is
+  allowed by default; every attempt remains independently auditable.
+- Failed and cancelled jobs never create a Revision. A successful job can create an
+  immutable `ai_segment` Revision only when its exact input is still the Branch
+  HEAD. The PNG bytes remain unchanged.
+- Low-confidence components are retained with `needs_review` state instead of being
+  silently promoted to confirmed data.
+
+The detailed contract is in [`ai-analysis.md`](ai-analysis.md).
+
 ## Planned package boundaries
 
 ```text
-apps/web                 UI, semantic editor, and 2D/3D adapters (M0-M4)
+apps/web                 UI, semantic editor, AI console, and preview adapters
 apps/api                 HTTP API and revision orchestration
-apps/ai-worker           isolated analysis jobs
-packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M4)
+apps/ai-worker           persistent isolated analysis jobs (M5)
+packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M5)
 packages/skin-schema     JSON schemas and shared types
-packages/skin-revision   immutable snapshots and branching (M2)
+packages/skin-revision   immutable snapshots, branching, and AI audit tables
 packages/skin-compositor part application and conflict detection
-packages/skin-analysis-pack analysis workspace generation
-packages/ai-provider     replaceable provider contracts
+packages/skin-analysis-pack deterministic analysis workspace generation (M5)
+packages/ai-provider     replaceable provider contracts and validation (M5)
 ```

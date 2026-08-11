@@ -3,6 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeSkinPng } from "@mc-skin-split/skin-core";
+import type {
+  AnalysisProposal,
+  ProviderAnalysisInput,
+  ProviderAnalysisResult,
+  SkinSemanticAiProvider,
+} from "@mc-skin-split/ai-provider";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApi } from "../src/app";
@@ -362,6 +368,117 @@ describe("revision API", () => {
       error: { code: "SNAPSHOT_CORRUPT" },
     });
   });
+
+  it("runs, audits, and retries AI analysis through the HTTP boundary", async () => {
+    const providerA = new ApiAiProvider("provider-a");
+    const providerB = new ApiAiProvider("provider-b");
+    const { app } = await createApi([providerA, providerB]);
+    const project = await createProject(app, "AI API");
+    const imported = await importSkin(app, project.projectId);
+
+    const providers = await app.inject({
+      method: "GET",
+      url: "/api/ai/providers",
+    });
+    expect(providers.statusCode).toBe(200);
+    expect(providers.json()).toMatchObject({
+      providers: ["provider-a", "provider-b"],
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/ai-analysis`,
+      payload: {
+        mode: "full",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair", "face", "upper_clothing", "shoe"],
+        createRevisionOnSuccess: true,
+      },
+    });
+    expect(started.statusCode).toBe(202);
+    const firstJobId = started.json<{ job: { id: string } }>().job.id;
+    const first = await waitForAiJob(app, firstJobId);
+    expect(first.job).toMatchObject({
+      status: "succeeded",
+      provider: "provider-a",
+      model: "model-a",
+      proposalSummary: "API AI 提案",
+    });
+    expect(first.job.resultRevisionId).toEqual(expect.any(String));
+    expect(first.runs).toHaveLength(1);
+    expect(first.runs[0]).toMatchObject({
+      status: "succeeded",
+      assets: [{}, {}, {}, {}, {}],
+    });
+    expect(first.events.some((event) => event.eventType === "validating")).toBe(
+      true,
+    );
+
+    const aiRevision = await app.inject({
+      method: "GET",
+      url: `/api/revisions/${first.job.resultRevisionId}`,
+    });
+    expect(aiRevision.statusCode).toBe(200);
+    expect(aiRevision.json()).toMatchObject({
+      revision: {
+        operationType: "ai_segment",
+        actorType: "ai",
+        parentRevisionId: imported.revisionId,
+      },
+    });
+
+    const eventResponse = await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs/${firstJobId}/events`,
+    });
+    expect(eventResponse.statusCode).toBe(200);
+    expect(eventResponse.json<{ events: unknown[] }>().events.length).toBeGreaterThan(
+      4,
+    );
+
+    const retried = await app.inject({
+      method: "POST",
+      url: `/api/ai-jobs/${firstJobId}/retry`,
+      payload: {
+        provider: "provider-b",
+        model: "model-b",
+        reasoningEffort: "high",
+        createRevisionOnSuccess: false,
+      },
+    });
+    expect(retried.statusCode).toBe(202);
+    const retryJobId = retried.json<{ job: { id: string } }>().job.id;
+    const retry = await waitForAiJob(app, retryJobId);
+    expect(retry.job).toMatchObject({
+      status: "succeeded",
+      resultRevisionId: null,
+      retryOfJobId: firstJobId,
+      provider: "provider-b",
+      model: "model-b",
+    });
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/ai-analysis`,
+      payload: {
+        mode: "full",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: false,
+        extra: true,
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+  });
 });
 
 interface CreatedProject {
@@ -386,11 +503,96 @@ interface MutationResponse {
   };
 }
 
-async function createApi() {
+async function createApi(aiProviders?: readonly SkinSemanticAiProvider[]) {
   const directory = await mkdtemp(join(tmpdir(), "mcskinsplit-api-"));
-  const app = buildApi({ dataDirectory: directory });
+  const app = buildApi({
+    dataDirectory: directory,
+    ...(aiProviders ? { aiProviders } : {}),
+  });
   resources.push({ app, directory });
   return { app, directory };
+}
+
+interface AiJobApiDetail {
+  readonly job: {
+    readonly id: string;
+    readonly status: string;
+    readonly resultRevisionId: string | null;
+    readonly retryOfJobId: string | null;
+    readonly provider: string;
+    readonly model: string;
+    readonly proposalSummary: string | null;
+  };
+  readonly runs: readonly {
+    readonly status: string;
+    readonly assets: readonly unknown[];
+  }[];
+  readonly events: readonly { readonly eventType: string }[];
+}
+
+async function waitForAiJob(
+  app: FastifyInstance,
+  jobId: string,
+): Promise<AiJobApiDetail> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs/${jobId}`,
+    });
+    expect(response.statusCode).toBe(200);
+    const detail = response.json<AiJobApiDetail>();
+    if (["succeeded", "failed", "cancelled"].includes(detail.job.status)) {
+      return detail;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`AI Job did not finish: ${jobId}`);
+}
+
+class ApiAiProvider implements SkinSemanticAiProvider {
+  constructor(readonly providerName: string) {}
+
+  async analyze(input: ProviderAnalysisInput): Promise<ProviderAnalysisResult> {
+    return {
+      proposal: apiProposal(input),
+      rawEvents: `${JSON.stringify({ type: "thread.started", thread_id: `${this.providerName}-thread` })}\n`,
+      stderr: "",
+      threadId: `${this.providerName}-thread`,
+      usage: { input_tokens: 20, output_tokens: 10 },
+    };
+  }
+}
+
+function apiProposal(input: ProviderAnalysisInput): AnalysisProposal {
+  const regions = input.pack.candidateRegions.regions;
+  return {
+    schemaVersion: "1.0",
+    sourceRevisionId: input.pack.job.sourceRevisionId,
+    modelAssessment: {
+      armType: input.pack.job.armType,
+      confidence: 0.95,
+    },
+    components: [
+      {
+        instanceId: "hair.main",
+        displayName: "AI 主头发",
+        category: "hair",
+        subtype: null,
+        confidence: 0.72,
+        candidateRegionIds: [regions[0]!.id],
+        pixelOverrides: { add: [], remove: [] },
+        relations: {
+          attachedTo: null,
+          pairedWith: [],
+          sameOutfitGroup: null,
+        },
+        notes: "",
+      },
+    ],
+    unassignedCandidateRegionIds: regions.slice(1).map((region) => region.id),
+    reviewItems: [],
+    summary: "API AI 提案",
+  };
 }
 
 async function createProject(

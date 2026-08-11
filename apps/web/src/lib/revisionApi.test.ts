@@ -4,9 +4,12 @@ import {
   commitRevisionPart,
   exportRevisionPart,
   importProjectSkin,
+  listAiJobs,
   loadRevisionSegmentation,
   loadRevisionSkin,
+  retryAiJob,
   RevisionApiError,
+  startAiAnalysis,
 } from "./revisionApi";
 
 describe("revisionApi", () => {
@@ -153,6 +156,66 @@ describe("revisionApi", () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
       partId: "part_1",
       strategy: "use_part",
+    });
+  });
+
+  it("starts, lists, and retries AI jobs with explicit provider options", async () => {
+    const job = {
+      id: "job_1",
+      status: "queued",
+      provider: "codex-exec",
+      model: "codex-config-default",
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ job }, 202))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [job] }, 200))
+      .mockResolvedValueOnce(jsonResponse({ job: { ...job, id: "job_2" } }, 202));
+
+    await startAiAnalysis(
+      "rev / 1",
+      {
+        mode: "full",
+        provider: "codex-exec",
+        model: "codex-config-default",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair", "shoe"],
+        createRevisionOnSuccess: true,
+      },
+      fetcher,
+    );
+    await listAiJobs("rev / 1", fetcher);
+    await retryAiJob(
+      "job / 1",
+      {
+        provider: "codex-exec",
+        model: "gpt-5.6",
+        reasoningEffort: "high",
+        createRevisionOnSuccess: false,
+      },
+      fetcher,
+    );
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/revisions/rev%20%2F%201/ai-analysis",
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      provider: "codex-exec",
+      focus: ["hair", "shoe"],
+      createRevisionOnSuccess: true,
+    });
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
+      "/api/ai-jobs?revisionId=rev%20%2F%201",
+    );
+    expect(fetcher.mock.calls[2]?.[0]).toBe(
+      "/api/ai-jobs/job%20%2F%201/retry",
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      provider: "codex-exec",
+      model: "gpt-5.6",
+      reasoningEffort: "high",
+      createRevisionOnSuccess: false,
     });
   });
 });

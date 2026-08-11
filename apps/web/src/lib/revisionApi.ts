@@ -98,6 +98,110 @@ export interface ApiPartCommit extends ApiMutationResult {
   readonly report: PartApplicationReport;
 }
 
+export type ApiAiJobStatus =
+  | "queued"
+  | "preparing"
+  | "running"
+  | "validating"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface ApiAiReviewItem {
+  readonly type:
+    | "ambiguous_region"
+    | "low_confidence"
+    | "coverage_gap"
+    | "model_mismatch";
+  readonly candidateRegionIds: readonly string[];
+  readonly question: string;
+  readonly suggestedCategories: readonly SemanticCategory[];
+  readonly confidence: number;
+}
+
+export interface ApiAiAnalysisOptions {
+  readonly mode: "full";
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly taxonomyLevel: "coarse";
+  readonly focus: readonly SemanticCategory[];
+  readonly createRevisionOnSuccess: boolean;
+}
+
+export interface ApiAiJobError {
+  readonly code: string;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export interface ApiAiJob {
+  readonly id: string;
+  readonly projectId: string;
+  readonly inputRevisionId: string;
+  readonly resultRevisionId: string | null;
+  readonly retryOfJobId: string | null;
+  readonly status: ApiAiJobStatus;
+  readonly provider: string;
+  readonly model: string;
+  readonly skillName: string;
+  readonly skillVersion: string;
+  readonly promptVersion: string;
+  readonly inputHash: string | null;
+  readonly outputHash: string | null;
+  readonly options: ApiAiAnalysisOptions;
+  readonly reviewItems: readonly ApiAiReviewItem[];
+  readonly proposalSummary: string | null;
+  readonly cancelRequested: boolean;
+  readonly createdAt: string;
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
+  readonly error: ApiAiJobError | null;
+}
+
+export interface ApiAiRun {
+  readonly id: string;
+  readonly jobId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly threadId: string | null;
+  readonly attempt: number;
+  readonly status: "running" | "succeeded" | "failed" | "cancelled";
+  readonly workspacePath: string;
+  readonly usage: Readonly<Record<string, unknown>> | null;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+  readonly error: ApiAiJobError | null;
+  readonly assets: readonly {
+    readonly id: string;
+    readonly fileRole:
+      | "input_manifest"
+      | "raw_events"
+      | "raw_output"
+      | "validator_report"
+      | "stderr";
+    readonly mimeType: string;
+    readonly byteSize: number;
+    readonly sha256: string;
+    readonly createdAt: string;
+  }[];
+}
+
+export interface ApiAiJobEvent {
+  readonly id: number;
+  readonly jobId: string;
+  readonly eventType: string;
+  readonly message: string;
+  readonly data: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+export interface ApiAiJobDetail {
+  readonly job: ApiAiJob;
+  readonly runs: readonly ApiAiRun[];
+  readonly events: readonly ApiAiJobEvent[];
+}
+
 export class RevisionApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -349,6 +453,97 @@ export async function commitRevisionPart(
 
 export function partPreviewUrl(partId: string): string {
   return `/api/parts/${encodeURIComponent(partId)}/preview.png`;
+}
+
+export async function listAiProviders(
+  fetcher: Fetcher = fetch,
+): Promise<{
+  readonly providers: readonly string[];
+  readonly defaultModel: string;
+  readonly defaultReasoningEffort: ApiAiAnalysisOptions["reasoningEffort"];
+}> {
+  return await requestJson(
+    "/api/ai/providers",
+    undefined,
+    fetcher,
+  );
+}
+
+export async function startAiAnalysis(
+  revisionId: string,
+  options: ApiAiAnalysisOptions,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJob> {
+  const body = await requestJson<{ job: ApiAiJob }>(
+    `/api/revisions/${encodeURIComponent(revisionId)}/ai-analysis`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    },
+    fetcher,
+  );
+  return body.job;
+}
+
+export async function listAiJobs(
+  revisionId?: string,
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiAiJob[]> {
+  const query = revisionId
+    ? `?revisionId=${encodeURIComponent(revisionId)}`
+    : "";
+  const body = await requestJson<{ jobs: readonly ApiAiJob[] }>(
+    `/api/ai-jobs${query}`,
+    undefined,
+    fetcher,
+  );
+  return body.jobs;
+}
+
+export function loadAiJobDetail(
+  jobId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJobDetail> {
+  return requestJson(
+    `/api/ai-jobs/${encodeURIComponent(jobId)}`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function cancelAiJob(
+  jobId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJob> {
+  const body = await requestJson<{ job: ApiAiJob }>(
+    `/api/ai-jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+    fetcher,
+  );
+  return body.job;
+}
+
+export async function retryAiJob(
+  jobId: string,
+  overrides: {
+    readonly provider?: string;
+    readonly model?: string;
+    readonly reasoningEffort?: ApiAiAnalysisOptions["reasoningEffort"];
+    readonly createRevisionOnSuccess?: boolean;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJob> {
+  const body = await requestJson<{ job: ApiAiJob }>(
+    `/api/ai-jobs/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(overrides),
+    },
+    fetcher,
+  );
+  return body.job;
 }
 
 async function requestJson<T>(

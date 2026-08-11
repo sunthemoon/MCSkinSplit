@@ -18,6 +18,11 @@ const migrations: readonly Migration[] = [
     name: "reusable part assets",
     sql: readFileSync(new URL("./migrations/002_parts.sql", import.meta.url), "utf8"),
   },
+  {
+    version: 3,
+    name: "AI jobs and auditable runs",
+    sql: readFileSync(new URL("./migrations/003_ai_jobs.sql", import.meta.url), "utf8"),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

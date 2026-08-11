@@ -1,0 +1,173 @@
+# AI-assisted semantic analysis
+
+M5 classifies a selected Revision without giving a model authority over skin bytes,
+history, or the SQLite store. The model produces one JSON proposal; deterministic
+code decides whether that proposal is complete and safe enough to become an
+immutable `ai_segment` Revision.
+
+## Execution flow
+
+```text
+selected Branch HEAD Revision
+  -> deterministic analysis workspace
+  -> repository mc-skin-segmenter Skill
+  -> replaceable AI provider (Codex CLI by default)
+  -> JSON Schema and pixel-ownership validation
+  -> optional single repair attempt
+  -> immutable AI Revision or audited failure
+```
+
+The output Revision changes semantic segmentation only. Its `skin.png` is copied
+byte-for-byte from the input Revision.
+
+## Analysis workspace
+
+`packages/skin-analysis-pack` creates one private directory per Run. It contains:
+
+- `job.json` with input Revision, model, reasoning, arm type, and version pins;
+- `input/source.png`, a 16x Atlas, a gridded Atlas, a face Contact Sheet, and
+  front/back/left/right/isometric views;
+- palette, full pixel map, compact candidate summary, complete candidate regions,
+  and previous segmentation documents;
+- a copied `.agents/skills/mc-skin-segmenter` Skill and proposal JSON Schema;
+- isolated `output/` and `logs/` directories.
+
+Candidate algorithm `bounded-color80-surface-cc-v2` groups adjacent pixels only
+within one canonical surface, with exact alpha and a maximum RGB Euclidean distance
+of 80. Every visible valid UV pixel belongs to exactly one candidate. These regions
+are deterministic classification units, not inferred semantic labels.
+
+The compact summary contains every candidate identifier but avoids placing the full
+pixel map in model context. A manifest hashes the source, all derived inputs, the
+schema, and the copied Skill. The worker verifies those hashes after model execution;
+input or Skill mutation invalidates the Run.
+
+## Codex CLI provider
+
+The default provider follows the official Codex non-interactive `codex exec`
+workflow documented in [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+and uses supported options from the [CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+
+The adapter:
+
+- starts the command directly without a shell;
+- uses the Run directory as `--cd` with `--sandbox workspace-write`, `--ephemeral`,
+  `--ignore-rules`, JSONL events, attached analysis images, and a bounded timeout;
+- sends the Skill instruction through stdin so variadic image arguments cannot
+  consume the prompt;
+- resolves the Windows `codex.cmd` shim to the installed Node entry point instead
+  of executing a batch file through a shell;
+- captures thread ID, token usage, stdout events, stderr, and final output with a
+  16 MiB combined log limit;
+- first requests schema-constrained output and, only for a structured-output
+  transport/capability failure, may retry transport without `--output-schema`.
+
+The fallback never weakens host validation. The same Ajv and pixel validator checks
+the final JSON in both paths.
+
+By default the provider retains the user's Codex configuration so existing
+authentication and custom provider settings work. The model value
+`codex-config-default` means “use the model selected by that configuration.” The Run
+still has a private working directory and explicit sandbox. Set
+`AI_IGNORE_USER_CONFIG=true` only when an independently authenticated default Codex
+configuration is available.
+
+## Proposal validation
+
+A proposal is accepted only when all of the following hold:
+
+- JSON matches the repository schema and the source Revision/model metadata;
+- every candidate ID exists and occurs exactly once, either in one component or in
+  the unassigned bucket;
+- component IDs are unique and component references point to existing components;
+- `sameOutfitGroup` is treated as an opaque grouping identifier, not a component
+  reference;
+- pixel additions/removals stay inside visible valid UV coordinates and do not
+  create overlapping ownership;
+- component masks plus `unknown` cover every visible valid UV pixel exactly once;
+- confidence below 0.65 produces `needs_review` rather than a confirmed component.
+
+Validation errors are written to the Run log and can be supplied to one repair
+attempt. A repaired proposal must pass the complete validator again.
+
+## Jobs, Runs, and audit assets
+
+Jobs progress through `queued`, `preparing`, `running`, `validating`, and a terminal
+`succeeded`, `failed`, or `cancelled` state. A Job records the immutable source
+Revision, provider/model/reasoning options, Skill and prompt versions, input/output
+hashes, review items, summary, timestamps, and any structured error.
+
+Each model attempt is a separate Run. Available audit roles are:
+
+- `input_manifest`
+- `raw_events`
+- `raw_output`
+- `validator_report`
+- `stderr`
+
+Failures retain every artifact that was available at failure time. Retrying creates
+a new Job against the same historical input and records the currently installed
+Skill/prompt versions. It does not create a Revision unless requested and validated.
+
+A successful proposal creates a Revision only if the original input is still the
+target Branch HEAD, the source/result hashes match, and the successful Run ID is
+recorded as AI provenance. This prevents a late model response from overwriting newer
+work.
+
+## HTTP API
+
+```text
+GET  /api/ai/providers
+POST /api/revisions/:revisionId/ai-analysis
+GET  /api/ai-jobs?revisionId=:revisionId
+GET  /api/ai-jobs/:jobId
+GET  /api/ai-jobs/:jobId/events
+POST /api/ai-jobs/:jobId/cancel
+POST /api/ai-jobs/:jobId/retry
+```
+
+The start request requires `full` mode, a registered provider, model, reasoning
+effort (`low`, `medium`, `high`, `xhigh`, or `max`), coarse taxonomy, focus category
+list, and `createRevisionOnSuccess` flag. Unknown request fields are rejected.
+
+## Environment
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AI_MODEL` | `codex-config-default` | Codex model override |
+| `AI_REASONING_EFFORT` | `medium` | Studio/provider default reasoning |
+| `AI_TIMEOUT_SECONDS` | `600` | Per-provider time budget, 10-1800 seconds |
+| `AI_MAX_REPAIR_ATTEMPTS` | `1` | Validation repair attempts, 0-3 |
+| `AI_IGNORE_USER_CONFIG` | `false` | Add Codex `--ignore-user-config` |
+| `AI_ALLOW_SCHEMA_FALLBACK` | `true` | Retry only supported schema-transport failures |
+| `MC_SKIN_AI_SKILL_DIR` | repository Skill | Alternate Skill source directory |
+| `MC_SKIN_DATA_DIR` | repository `data/` | SQLite, snapshots, Run workspaces, and audit assets |
+
+## Real-skin verification
+
+All six pinned fixtures decode and resolve to Slim/Alex. Their deterministic
+pre-analysis coverage is:
+
+| Fixture | Candidates | Visible valid pixels |
+|---|---:|---:|
+| `ab87de696cfca859.png` | 245 | 1,860 |
+| `354359a2c2f33777.png` | 163 | 1,913 |
+| `bad5dea368e72b05.png` | 219 | 1,869 |
+| `bc1a12c777b45e7b.png` | 331 | 1,858 |
+| `8d9ecb2e49f9d3df.png` | 223 | 1,909 |
+| `9058f3af3ffb104c.png` | 419 | 1,989 |
+
+The recorded end-to-end A1 Codex run produced 10 components covering all 1,860
+pixels with zero `unknown` pixels. Its first attempt failed validation and remained
+auditable; the bounded repair attempt succeeded and created the AI Revision.
+
+## Privacy and operational boundaries
+
+AI workspaces include the original skin, derived images, candidate data, prompts,
+and model logs. They stay under `MC_SKIN_DATA_DIR`, but attached images can be sent to
+the remote service selected by the user's Codex configuration. Operators should
+treat Run directories as sensitive application data and apply their own retention
+or backup policy.
+
+Semantic labels remain probabilistic. Review low-confidence items and use the manual
+editor for corrections before exporting reusable parts or composing a final skin.

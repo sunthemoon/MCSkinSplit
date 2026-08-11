@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minecraft Skin Segmenter"
+  short_description: "Classify exact Minecraft skin UV regions"
+  default_prompt: "Use $mc-skin-segmenter to analyze this Minecraft skin job and emit a validated semantic proposal."

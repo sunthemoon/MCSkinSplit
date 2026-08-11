@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, and AI-assisted classification.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, and M4 adds manual semantic editing plus reusable parts.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, and M5 adds schema-validated Codex-assisted classification.
 
 The current Studio can:
 
@@ -18,13 +18,18 @@ The current Studio can:
 - classify exact UV pixels into a fixed semantic taxonomy through a 64×64 draft canvas;
 - merge, split, reclassify, or return component pixels to `unknown` without editing history in place;
 - export a component as a verified five-file 64×64 part asset;
-- preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision.
+- preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision;
+- prepare an integrity-checked analysis workspace for every AI run;
+- run the repository `mc-skin-segmenter` Skill through the local Codex CLI;
+- inspect job progress, attempts, validation artifacts, and review items in the Studio;
+- create an `ai_segment` Revision only after strict schema and pixel-ownership validation.
 
 ## Requirements
 
 - Node.js 24
 - pnpm 10.13.1
 - A browser with WebGL support
+- An installed and authenticated Codex CLI for optional AI-assisted analysis
 
 ## Start the Studio
 
@@ -38,6 +43,8 @@ Open `http://127.0.0.1:5173`. The command starts both the Fastify API (`127.0.0.
 
 Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` before starting the API to use another directory.
 
+AI analysis defaults to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. It is optional: deterministic editing, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
+
 ## Verify
 
 ```bash
@@ -50,12 +57,16 @@ This checks that generated fixtures are unchanged, runs TypeScript and unit test
 
 ```text
 apps/api/                 Fastify Project and Revision API
+apps/ai-worker/           Persistent AI jobs, attempts, repair, and audit assets
 apps/web/                 Vite + React browser Studio
+packages/ai-provider/     Replaceable provider contract and Codex CLI adapter
+packages/skin-analysis-pack/ Deterministic isolated analysis-workspace builder
 packages/skin-core/       Framework-independent PNG, layout, UV, and render core
 packages/skin-revision/   SQLite metadata and immutable snapshot service
+.agents/skills/mc-skin-segmenter/ Repository semantic-analysis Skill
 docs/                     Architecture, implementation status, and specification
 scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The AI worker and multi-part compositor follow in M5-M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The multi-part compositor follows in M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

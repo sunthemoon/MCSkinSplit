@@ -47,6 +47,7 @@ import {
 import {
   OPERATION_TYPES,
   type ActorType,
+  type AiSegmentationRevisionInput,
   type ApplyPartInput,
   type ApplyPartResult,
   type BranchFromRevisionInput,
@@ -221,6 +222,7 @@ const PART_SELECT = `
 
 export class RevisionStore {
   readonly dataDirectory: string;
+  readonly databasePath: string;
   readonly storage: SnapshotStorage;
   readonly partStorage: PartStorage;
   private readonly database: Database.Database;
@@ -237,9 +239,10 @@ export class RevisionStore {
     mkdirSync(this.dataDirectory, { recursive: true });
     this.storage = new SnapshotStorage(this.dataDirectory);
     this.partStorage = new PartStorage(this.dataDirectory);
-    this.database = openRevisionDatabase(
+    this.databasePath = resolve(
       options.databasePath ?? resolve(this.dataDirectory, "mcskinsplit.sqlite"),
     );
+    this.database = openRevisionDatabase(this.databasePath);
     this.nowProvider = options.now ?? (() => new Date());
     this.idProvider = options.createId ?? defaultId;
   }
@@ -388,6 +391,15 @@ export class RevisionStore {
   ): Promise<RevisionMutationResult> {
     return this.withWriteLock(() =>
       this.applyManualOperationUnlocked(sourceRevisionId, input),
+    );
+  }
+
+  async commitAiSegmentation(
+    sourceRevisionId: string,
+    input: AiSegmentationRevisionInput,
+  ): Promise<RevisionMutationResult> {
+    return this.withWriteLock(() =>
+      this.commitAiSegmentationUnlocked(sourceRevisionId, input),
     );
   }
 
@@ -1442,6 +1454,178 @@ export class RevisionStore {
     };
   }
 
+  private async commitAiSegmentationUnlocked(
+    sourceRevisionId: string,
+    input: AiSegmentationRevisionInput,
+  ): Promise<RevisionMutationResult> {
+    const sourceRevision = this.getRevision(sourceRevisionId);
+    const project = this.getProject(sourceRevision.projectId);
+    const branch = this.getBranch(sourceRevision.branchId);
+    if (branch.headRevisionId !== sourceRevision.id) {
+      throw conflict("AI 提案只能提交到分析时的 Branch HEAD", {
+        sourceRevisionId,
+        branchId: branch.id,
+        branchHeadRevisionId: branch.headRevisionId,
+      });
+    }
+    assertSafeReferenceId("aiJobId", input.aiJobId);
+    assertSafeReferenceId("aiRunId", input.aiRunId);
+    const provider = validateText("AI Provider", input.provider, 80);
+    const model = validateText("AI Model", input.model, 120);
+    const proposalSummary = validateText(
+      "AI 提案摘要",
+      input.proposalSummary,
+      500,
+    );
+
+    const sourceSnapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
+    const sourceSegmentation = parseSegmentation(
+      sourceSnapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    const image = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    const proposed = input.state;
+    if (
+      proposed.document.revisionId !== sourceRevision.id ||
+      proposed.document.source.armType !== sourceSegmentation.source.armType ||
+      proposed.document.source.sourceHash !== sourceSegmentation.source.sourceHash
+    ) {
+      throw invalidInput("AI 提案来源与待提交 Revision 不一致", {
+        sourceRevisionId,
+      });
+    }
+    for (const component of proposed.document.components) {
+      if (
+        component.provenance.actorType !== "ai" ||
+        component.provenance.aiRunId !== input.aiRunId ||
+        component.provenance.containsGeneratedPixels
+      ) {
+        throw invalidInput(`AI 组件来源信息无效：${component.instanceId}`);
+      }
+    }
+    try {
+      validateSemanticState(
+        proposed,
+        image,
+        getSkinLayout(sourceSegmentation.source.armType),
+      );
+    } catch (error) {
+      throw invalidInput(
+        error instanceof Error ? error.message : "AI 语义状态校验失败",
+      );
+    }
+
+    const ids = this.revisionIds();
+    const createdAt = this.now();
+    const summary = validateText(
+      "Revision 摘要",
+      input.summary ??
+        `AI 语义拆分 · ${proposed.document.components.length} 个组件`,
+      300,
+    );
+    const state: SemanticState = {
+      ...proposed,
+      document: { ...proposed.document, revisionId: ids.revisionId },
+    };
+    const skinPng = sourceSnapshot.files["skin.png"].bytes;
+    const resultHash = computeResultHash(skinPng, state.document);
+    const metadata = {
+      aiJobId: input.aiJobId,
+      aiRunId: input.aiRunId,
+      provider,
+      model,
+      proposalSummary,
+      reviewItems: input.reviewItems,
+    };
+    const operation = createOperation({
+      type: "ai_segment",
+      inputRevisionId: sourceRevision.id,
+      outputRevisionId: ids.revisionId,
+      actorType: "ai",
+      actorId: provider,
+      createdAt,
+      summary,
+      beforeHash: sourceRevision.resultHash,
+      afterHash: resultHash,
+      affectedComponents: state.document.components.map(
+        (component) => component.instanceId,
+      ),
+      metadata,
+    });
+    const snapshot = await this.storage.writeSnapshot({
+      projectId: project.id,
+      revisionId: ids.revisionId,
+      skinPng,
+      segmentationJson: canonicalJson(state.document),
+      operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(state),
+    });
+
+    try {
+      const commit = this.database.transaction(() => {
+        const currentBranch = this.database
+          .prepare("SELECT head_revision_id FROM skin_branch WHERE id = ?")
+          .get(branch.id) as { head_revision_id: string | null } | undefined;
+        if (currentBranch?.head_revision_id !== sourceRevision.id) {
+          throw conflict("AI 分析期间 Branch 已产生新的 Revision", {
+            branchId: branch.id,
+          });
+        }
+        const assetIds = this.insertAssets(project.id, ids, snapshot, createdAt);
+        this.insertRevision({
+          ids,
+          projectId: project.id,
+          branchId: branch.id,
+          parentRevisionId: sourceRevision.id,
+          sequence: sourceRevision.sequence + 1,
+          operationType: "ai_segment",
+          actorType: "ai",
+          actorId: provider,
+          aiRunId: input.aiRunId,
+          summary,
+          sourceHash: sourceRevision.resultHash,
+          resultHash,
+          createdAt,
+          metadata,
+        });
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
+        this.insertOperation(
+          project.id,
+          ids,
+          "ai_segment",
+          summary,
+          createdAt,
+        );
+        this.database
+          .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
+          .run(ids.revisionId, branch.id);
+        if (branch.id === project.defaultBranchId) {
+          this.database
+            .prepare(`
+              UPDATE skin_project
+              SET head_revision_id = ?, updated_at = ?
+              WHERE id = ?
+            `)
+            .run(ids.revisionId, createdAt, project.id);
+        } else {
+          this.database
+            .prepare("UPDATE skin_project SET updated_at = ? WHERE id = ?")
+            .run(createdAt, project.id);
+        }
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.storage.removeNewSnapshot(project.id, ids.revisionId);
+      throw error;
+    }
+
+    return {
+      project: this.getProject(project.id),
+      branch: this.getBranch(branch.id),
+      revision: this.getRevision(ids.revisionId),
+    };
+  }
+
   private async revertRevisionUnlocked(
     targetRevisionId: string,
     input: RevertRevisionInput,
@@ -1733,6 +1917,7 @@ export class RevisionStore {
     readonly operationType: RevisionOperationType;
     readonly actorType: ActorType;
     readonly actorId?: string;
+    readonly aiRunId?: string;
     readonly summary: string;
     readonly sourceHash: string;
     readonly resultHash: string;
@@ -1746,7 +1931,7 @@ export class RevisionStore {
           operation_type, actor_type, actor_id, ai_run_id, summary,
           skin_asset_id, segmentation_asset_id, operation_asset_id,
           source_hash, result_hash, created_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.ids.revisionId,
@@ -1757,6 +1942,7 @@ export class RevisionStore {
         input.operationType,
         input.actorType,
         input.actorId ?? null,
+        input.aiRunId ?? null,
         input.summary,
         input.ids.skinAssetId,
         input.ids.segmentationAssetId,
@@ -2339,6 +2525,12 @@ function validateOptionalText(
   maxLength: number,
 ): string | undefined {
   return value === undefined ? undefined : validateText(label, value, maxLength);
+}
+
+function assertSafeReferenceId(label: string, value: string): void {
+  if (!/^[a-z][a-z0-9_-]{2,100}$/.test(value)) {
+    throw invalidInput(`${label} 不是安全 ID`, { value });
+  }
 }
 
 function defaultId(kind: RevisionIdKind): string {

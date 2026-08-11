@@ -30,20 +30,29 @@ import {
 import {
   branchRevision,
   applySemanticOperation,
+  cancelAiJob,
   commitRevisionPart,
   createProject,
   exportRevisionPart,
   getProject,
   importProjectSkin,
+  listAiJobs,
+  listAiProviders,
   listBranches,
   listParts,
   listProjects,
   listRevisions,
+  loadAiJobDetail,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partPreviewUrl,
   previewRevisionPart,
+  retryAiJob,
   revertRevision,
+  startAiAnalysis,
+  type ApiAiJobDetail,
+  type ApiAiJobStatus,
+  type ApiAiAnalysisOptions,
   type ApiBranch,
   type ApiProject,
   type ApiPart,
@@ -162,6 +171,26 @@ const inferenceLabels: Record<ArmTypeAssessment["reason"], string> = {
   "wide-default": "无 Slim 标记，按 Wide",
 };
 
+const aiStatusLabels: Readonly<Record<ApiAiJobStatus, string>> = {
+  queued: "等待执行",
+  preparing: "生成隔离分析包",
+  running: "Codex 正在识别",
+  validating: "校验结构与像素",
+  succeeded: "识别完成",
+  failed: "识别失败",
+  cancelled: "已取消",
+};
+
+const terminalAiStatuses = new Set<ApiAiJobStatus>([
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
+const aiFocus = SEMANTIC_CATEGORIES.filter(
+  (category) => category !== "unknown",
+);
+
 export function App() {
   const [activeSkin, setActiveSkin] = useState<ActiveSkin | null>(null);
   const [modelChoice, setModelChoice] = useState<ModelChoice>("slim");
@@ -192,8 +221,18 @@ export function App() {
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
+  const [aiProviders, setAiProviders] = useState<readonly string[]>([]);
+  const [aiProvider, setAiProvider] = useState("codex-exec");
+  const [aiModel, setAiModel] = useState("codex-config-default");
+  const [aiReasoningEffort, setAiReasoningEffort] =
+    useState<ApiAiAnalysisOptions["reasoningEffort"]>("medium");
+  const [aiJobDetail, setAiJobDetail] = useState<ApiAiJobDetail | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
+  const aiJobDetailRef = useRef<ApiAiJobDetail | null>(null);
+  const handledAiJobsRef = useRef(new Set<string>());
 
   const releaseObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -379,6 +418,151 @@ export function App() {
     [refreshHistory],
   );
 
+  const synchronizeAiJob = useCallback(
+    async (jobId: string, followSuccessfulRevision: boolean) => {
+      const detail = await loadAiJobDetail(jobId);
+      aiJobDetailRef.current = detail;
+      setAiJobDetail(detail);
+
+      const { job } = detail;
+      if (
+        !followSuccessfulRevision ||
+        !terminalAiStatuses.has(job.status) ||
+        handledAiJobsRef.current.has(job.id)
+      ) {
+        return detail;
+      }
+
+      if (job.status === "succeeded" && job.resultRevisionId) {
+        await refreshHistory(job.projectId, job.resultRevisionId);
+        setNotice(
+          `AI 识别完成 · 已创建 Revision · ${job.reviewItems.length} 项待审核`,
+        );
+      } else if (job.status === "succeeded") {
+        setNotice(`AI 提案验证完成 · ${job.reviewItems.length} 项待审核 · 未创建 Revision`);
+      } else {
+        setNotice(
+          job.error
+            ? `AI ${aiStatusLabels[job.status]}：${job.error.message}`
+            : `AI ${aiStatusLabels[job.status]}`,
+        );
+      }
+      handledAiJobsRef.current.add(job.id);
+      return detail;
+    },
+    [refreshHistory],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void listAiProviders()
+      .then((catalog) => {
+        if (cancelled) {
+          return;
+        }
+        const normalized = Array.isArray(catalog)
+          ? {
+              providers: catalog as readonly string[],
+              defaultModel: "codex-config-default",
+              defaultReasoningEffort: "medium" as const,
+            }
+          : catalog;
+        setAiProviders(normalized.providers);
+        setAiModel(normalized.defaultModel);
+        setAiReasoningEffort(normalized.defaultReasoningEffort);
+        setAiProvider((current) =>
+          normalized.providers.includes(current)
+            ? current
+            : (normalized.providers[0] ?? ""),
+        );
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAiError(
+            `AI Provider 读取失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedRevisionId) {
+      aiJobDetailRef.current = null;
+      setAiJobDetail(null);
+      return;
+    }
+    const current = aiJobDetailRef.current?.job;
+    if (
+      current?.inputRevisionId === selectedRevisionId ||
+      current?.resultRevisionId === selectedRevisionId
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void listAiJobs(selectedRevisionId)
+      .then(async (jobs) => {
+        const latest = jobs.at(-1);
+        if (!latest) {
+          if (!cancelled) {
+            aiJobDetailRef.current = null;
+            setAiJobDetail(null);
+          }
+          return;
+        }
+        const detail = await loadAiJobDetail(latest.id);
+        if (!cancelled) {
+          aiJobDetailRef.current = detail;
+          setAiJobDetail(detail);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAiError(
+            `AI Job 读取失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRevisionId]);
+
+  useEffect(() => {
+    const job = aiJobDetail?.job;
+    if (!job || terminalAiStatuses.has(job.status)) {
+      return;
+    }
+
+    let stopped = false;
+    let polling = false;
+    const poll = () => {
+      if (polling) {
+        return;
+      }
+      polling = true;
+      void synchronizeAiJob(job.id, true)
+        .catch((error: unknown) => {
+          if (!stopped) {
+            setAiError(
+              `AI Job 轮询失败：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        })
+        .finally(() => {
+          polling = false;
+        });
+    };
+    const timer = window.setInterval(poll, 1_500);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [aiJobDetail?.job, synchronizeAiJob]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -481,6 +665,16 @@ export function App() {
       (revision) => branchFilter === "all" || revision.branchId === branchFilter,
     )
     .toReversed();
+  const aiJob = aiJobDetail?.job ?? null;
+  const aiJobRunning = Boolean(
+    aiJob && !terminalAiStatuses.has(aiJob.status),
+  );
+  const aiSourceRevision = historyRevisions.find(
+    (revision) => revision.id === aiJob?.inputRevisionId,
+  );
+  const canStartAi = Boolean(
+    selectedRevision?.isBranchHead && aiProvider && aiModel.trim() && !aiJobRunning,
+  );
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -591,6 +785,84 @@ export function App() {
       setNotice(`恢复 Revision 失败：${message}`);
     } finally {
       setHistoryBusy(false);
+    }
+  };
+
+  const beginAiAnalysis = async () => {
+    if (!selectedRevision || !canStartAi) {
+      return;
+    }
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const job = await startAiAnalysis(selectedRevision.id, {
+        mode: "full",
+        provider: aiProvider,
+        model: aiModel.trim(),
+        reasoningEffort: aiReasoningEffort,
+        taxonomyLevel: "coarse",
+        focus: aiFocus,
+        createRevisionOnSuccess: true,
+      });
+      handledAiJobsRef.current.delete(job.id);
+      await synchronizeAiJob(job.id, true);
+      setNotice(
+        `AI Job 已创建 · ${aiProvider} / ${aiModel.trim()} · 源 Revision 保持只读`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAiError(message);
+      setNotice(`AI 分析启动失败：${message}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const cancelActiveAiJob = async () => {
+    if (!aiJob || !aiJobRunning) {
+      return;
+    }
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      await cancelAiJob(aiJob.id);
+      await synchronizeAiJob(aiJob.id, true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAiError(message);
+      setNotice(`AI Job 取消失败：${message}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const retrySelectedAiJob = async () => {
+    if (!aiJob || aiJobRunning || !aiProvider || !aiModel.trim()) {
+      return;
+    }
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const createRevisionOnSuccess = Boolean(aiSourceRevision?.isBranchHead);
+      const retry = await retryAiJob(aiJob.id, {
+        provider: aiProvider,
+        model: aiModel.trim(),
+        reasoningEffort: aiReasoningEffort,
+        createRevisionOnSuccess,
+      });
+      handledAiJobsRef.current.delete(retry.id);
+      await synchronizeAiJob(retry.id, true);
+      setNotice(
+        createRevisionOnSuccess
+          ? "AI 重试已创建；验证成功后生成新 Revision"
+          : "AI 重试已创建；历史输入只生成可审计提案，不修改 Branch",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAiError(message);
+      setNotice(`AI Job 重试失败：${message}`);
+    } finally {
+      setAiBusy(false);
     }
   };
 
@@ -848,17 +1120,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">SEMANTIC PART STUDIO / M4</p>
+          <p className="eyebrow">AI-ASSISTED SEMANTIC STUDIO / M5</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            逐像素建立语义组件，确认后创建不可变 Revision；组件可导出为完整 64×64 部件并复写到其他真实皮肤。
+            Codex 读取隔离分析包并提出语义分类；Schema 与像素校验通过后才创建不可变 Revision，低置信度区域保留给人工修正。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M4 语义部件工作室">
-          <strong>M4</strong>
-          <span>PARTS</span>
+        <div className="baseline-stamp" aria-label="M5 AI 辅助语义工作室">
+          <strong>M5</strong>
+          <span>AI REVIEW</span>
         </div>
       </header>
 
@@ -993,6 +1265,196 @@ export function App() {
         </div>
 
         {historyError && <p className="history-error">{historyError}</p>}
+      </section>
+
+      <section
+        className="ai-console"
+        data-status={aiJob?.status ?? "idle"}
+        aria-label="AI 语义识别任务"
+      >
+        <div className="ai-console-heading">
+          <div className="panel-heading">
+            <span>AI</span>
+            <div>
+              <p>CODEX SEMANTIC PROPOSAL</p>
+              <h2>隔离识别与人工审核</h2>
+            </div>
+          </div>
+          <p>
+            AI 只提交 JSON 分类提案；源 PNG、候选区域和正式数据库由确定性代码控制。
+          </p>
+        </div>
+
+        <div className="ai-console-grid">
+          <form
+            className="ai-config"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void beginAiAnalysis();
+            }}
+          >
+            <label>
+              <span>PROVIDER</span>
+              <select
+                value={aiProvider}
+                disabled={aiBusy || aiJobRunning || aiProviders.length === 0}
+                onChange={(event) => setAiProvider(event.target.value)}
+              >
+                {aiProviders.length === 0 && <option value="">不可用</option>}
+                {aiProviders.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider === "codex-exec" ? "本地 Codex CLI" : provider}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>MODEL</span>
+              <input
+                value={aiModel}
+                maxLength={120}
+                disabled={aiBusy || aiJobRunning}
+                onChange={(event) => setAiModel(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>REASONING</span>
+              <select
+                value={aiReasoningEffort}
+                disabled={aiBusy || aiJobRunning}
+                onChange={(event) =>
+                  setAiReasoningEffort(
+                    event.target.value as ApiAiAnalysisOptions["reasoningEffort"],
+                  )
+                }
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">XHigh</option>
+                <option value="max">Max</option>
+              </select>
+            </label>
+            <dl className="ai-input-facts">
+              <div>
+                <dt>INPUT</dt>
+                <dd>
+                  {selectedRevision
+                    ? `${selectedRevision.branchName} #${selectedRevision.sequence}`
+                    : "请选择 Revision"}
+                </dd>
+              </div>
+              <div>
+                <dt>MODEL RULE</dt>
+                <dd>{selectedRevision ? armLabels[resolvedArmType] : "—"}</dd>
+              </div>
+              <div>
+                <dt>TAXONOMY</dt>
+                <dd>{aiFocus.length} 类粗粒度识别</dd>
+              </div>
+            </dl>
+            <p className="ai-privacy-note">
+              本地 Codex CLI 在单次任务目录运行；图片可能由当前 Codex 配置的远端模型处理。
+            </p>
+            <div className="ai-controls">
+              <button type="submit" disabled={!canStartAi || aiBusy}>
+                识别所选 HEAD Revision
+              </button>
+              {aiJobRunning ? (
+                <button
+                  className="ai-secondary-button"
+                  type="button"
+                  disabled={aiBusy}
+                  onClick={() => void cancelActiveAiJob()}
+                >
+                  取消任务
+                </button>
+              ) : (
+                <button
+                  className="ai-secondary-button"
+                  type="button"
+                  disabled={!aiJob || aiBusy || !aiProvider || !aiModel.trim()}
+                  onClick={() => void retrySelectedAiJob()}
+                >
+                  {aiSourceRevision?.isBranchHead
+                    ? "以当前配置重试"
+                    : "重跑历史输入（仅提案）"}
+                </button>
+              )}
+            </div>
+          </form>
+
+          <article className="ai-job-card" aria-live="polite">
+            {aiJob ? (
+              <>
+                <div className="ai-job-status">
+                  <span>{aiStatusLabels[aiJob.status]}</span>
+                  <strong>{String(aiJobDetail?.runs.length ?? 0).padStart(2, "0")} RUNS</strong>
+                </div>
+                <div className="ai-progress" aria-label={aiStatusLabels[aiJob.status]}>
+                  <i style={{ width: `${aiProgressPercent(aiJob.status)}%` }} />
+                </div>
+                <div className="ai-job-meta">
+                  <code>{shortIdentifier(aiJob.id)}</code>
+                  <span>{aiJob.provider} / {aiJob.model}</span>
+                  <span>reasoning / {aiJob.options.reasoningEffort}</span>
+                  <span>{aiJob.skillName} {aiJob.skillVersion}</span>
+                </div>
+
+                {aiJob.proposalSummary && (
+                  <p className="ai-proposal-summary">{aiJob.proposalSummary}</p>
+                )}
+
+                {aiJob.error && (
+                  <p className="ai-job-error">
+                    <strong>{aiJob.error.code}</strong>
+                    {aiJob.error.message}
+                  </p>
+                )}
+
+                {aiJob.reviewItems.length > 0 && (
+                  <div className="ai-review-list">
+                    <h3>{aiJob.reviewItems.length} 项需要人工审核</h3>
+                    {aiJob.reviewItems.map((item, index) => (
+                      <div key={`${item.type}-${index}`}>
+                        <span>{Math.round(item.confidence * 100)}%</span>
+                        <p>{item.question}</p>
+                        <small>
+                          {item.suggestedCategories
+                            .map((category) => SEMANTIC_CATEGORY_LABELS[category])
+                            .join(" / ") || "保留 unknown"}
+                        </small>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="ai-run-strip">
+                  {aiJobDetail?.runs.map((run) => (
+                    <span key={run.id} data-status={run.status}>
+                      RUN {run.attempt} · {run.status.toUpperCase()} · {run.assets.length} FILES
+                    </span>
+                  ))}
+                </div>
+
+                <ol className="ai-event-log">
+                  {aiJobDetail?.events.slice(-6).toReversed().map((event) => (
+                    <li key={event.id}>
+                      <time dateTime={event.createdAt}>{formatRevisionTime(event.createdAt)}</time>
+                      <span>{event.message}</span>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            ) : (
+              <div className="ai-empty-state">
+                <strong>NO ANALYSIS JOB</strong>
+                <p>选择 Branch HEAD 后启动识别。生成的组件会直接进入下方人工语义编辑器。</p>
+              </div>
+            )}
+            {aiError && <p className="ai-console-error">{aiError}</p>}
+          </article>
+        </div>
       </section>
 
       <section className="workbench" aria-label="皮肤预览工作台">
@@ -1263,6 +1725,7 @@ export function App() {
                       (total, span) => total + span.x1 - span.x0 + 1,
                       0,
                     )} px
+                    {component.reviewState === "needs_review" ? " · 需审核" : ""}
                   </small>
                 </button>
               </div>
@@ -1466,6 +1929,28 @@ export function App() {
 function projectNameFromFile(fileName: string): string {
   const withoutExtension = fileName.replace(/\.png$/i, "").trim();
   return (withoutExtension || "Minecraft Skin").slice(0, 120);
+}
+
+function aiProgressPercent(status: ApiAiJobStatus): number {
+  switch (status) {
+    case "queued":
+      return 8;
+    case "preparing":
+      return 24;
+    case "running":
+      return 58;
+    case "validating":
+      return 82;
+    case "succeeded":
+      return 100;
+    case "failed":
+    case "cancelled":
+      return 100;
+  }
+}
+
+function shortIdentifier(value: string): string {
+  return value.length > 20 ? `${value.slice(0, 8)}…${value.slice(-8)}` : value;
 }
 
 function formatRevisionTime(value: string): string {
