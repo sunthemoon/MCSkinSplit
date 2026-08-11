@@ -42,15 +42,30 @@ AI worker
 
 The detailed coordinate and inference contract is in [`uv-layout.md`](uv-layout.md).
 
+## M2 decisions
+
+- `packages/skin-revision` owns strict SQLite metadata, complete immutable snapshots, canonical JSON, and hash verification.
+- `apps/api` is the only HTTP boundary. It accepts raw `image/png` imports and returns structured Project/Branch/Revision state.
+- Revert and Branch are append-only graph operations. Neither path edits historical files or moves an unrelated Branch HEAD.
+- The detailed persistence and API contract is in [`revision-history.md`](revision-history.md).
+
+## M3 decisions
+
+- `McSkinPreview` owns one Viewer instance, texture request ordering, animation compatibility, ResizeObserver scheduling, and disposal.
+- React owns only the Canvas mount and current skin/model props. Revision changes call the adapter instead of remounting the Viewer.
+- The installed 3.4.2 branch uses `viewer.animation`; `animations.add` exists only inside the compatibility function for older/custom bundles.
+- `skinview3d` is dynamically imported. The Studio/Atlas bundle can render before the WebGL dependency finishes loading or if it fails.
+- Viewer dimensions follow observed content size and are written in a scheduled animation frame. CSS size and WebGL backing-buffer size remain separate through device pixel ratio handling.
+
 ## Planned package boundaries
 
 ```text
-apps/web                 UI and 2D/3D adapters (M0-M1)
+apps/web                 UI and 2D/3D adapters (M0-M3)
 apps/api                 HTTP API and revision orchestration
 apps/ai-worker           isolated analysis jobs
 packages/skin-core       PNG, UV, pixels, and render helpers (M1)
 packages/skin-schema     JSON schemas and shared types
-packages/skin-revision   immutable snapshots and branching
+packages/skin-revision   immutable snapshots and branching (M2)
 packages/skin-compositor part application and conflict detection
 packages/skin-analysis-pack analysis workspace generation
 packages/ai-provider     replaceable provider contracts

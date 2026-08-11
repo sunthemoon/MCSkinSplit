@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, and AI-assisted classification.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, and M2 adds immutable local history.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, and M3 makes the 3D avatar Revision-aware.
 
 The current Studio can:
 
@@ -11,9 +11,9 @@ The current Studio can:
 - map an Atlas to 72 canonical body surfaces and reconstruct every RGBA pixel;
 - render a true 1024×1024 nearest-neighbor Atlas and a semantic face Contact Sheet;
 - exercise six versioned real-world skins and a deterministic six-source Alex/Slim mix;
-- preview the effective arm layout through one local `skinview3d` viewer;
+- preview the effective arm layout through one lazy-loaded `skinview3d` viewer that is reused across Revision switches;
 - create SQLite-backed Projects with a Slim/Alex default and Import Revisions;
-- load any independently verified historical snapshot;
+- load any independently verified historical snapshot into the Atlas and 3D avatar together;
 - restore an old state as a new Revision or continue it on a new Branch.
 
 ## Requirements
@@ -54,4 +54,4 @@ scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The manual editor, part library, AI worker, and compositor follow in M3-M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The manual editor, part library, AI worker, and compositor follow in M4-M6. The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

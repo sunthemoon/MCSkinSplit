@@ -561,17 +561,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">IMMUTABLE SKIN STUDIO / M2</p>
+          <p className="eyebrow">REVISION-AWARE AVATAR / M3</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            将 64×64 像素确定性映射为 72 个身体表面；每次确认都写入可校验、可分支的完整快照。
+            在不可变 64×64 快照之间切换，2D Atlas 与唯一的 3D Viewer 始终显示同一 Revision。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M2 不可变版本历史">
-          <strong>M2</strong>
-          <span>HISTORY</span>
+        <div className="baseline-stamp" aria-label="M3 Revision 三维预览">
+          <strong>M3</strong>
+          <span>VIEWER</span>
         </div>
       </header>
 
@@ -863,6 +863,11 @@ export function App() {
               <h2>{armLabels[resolvedArmType]}</h2>
             </div>
           </div>
+          <p className="avatar-revision">
+            {selectedRevision
+              ? `REVISION / ${selectedRevision.branchName} #${selectedRevision.sequence}`
+              : `LOCAL / ${skinName}`}
+          </p>
           <SkinPreview
             armType={resolvedArmType}
             skinUrl={skinUrl}
@@ -878,7 +883,7 @@ export function App() {
       <footer className="status-bar" role="status" aria-live="polite">
         <span>STATUS</span>
         <p>{notice}</p>
-        <code>SQLite · SHA-256 · fixed UV · {layout.id}</code>
+        <code>one viewer · lazy texture · {layout.id}</code>
       </footer>
     </main>
   );

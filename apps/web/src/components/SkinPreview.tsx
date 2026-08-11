@@ -1,8 +1,12 @@
-import { useEffect, useRef } from "react";
-import { SkinViewer, WalkingAnimation } from "skinview3d";
 import type { ArmType } from "@mc-skin-split/skin-core";
+import { useEffect, useRef, useState } from "react";
+import {
+  McSkinPreview,
+  type McSkinPreviewState,
+  type McSkinViewer,
+} from "../lib/mcSkinPreview";
 
-export type PreviewState = "loading" | "ready" | "error";
+export type PreviewState = McSkinPreviewState;
 
 interface SkinPreviewProps {
   armType: ArmType;
@@ -13,8 +17,10 @@ interface SkinPreviewProps {
 export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<SkinViewer | null>(null);
+  const previewRef = useRef<McSkinPreview | null>(null);
   const stateCallbackRef = useRef(onStateChange);
+  const latestSkinRef = useRef({ armType, skinUrl });
+  const [previewState, setPreviewState] = useState<PreviewState>("loading");
 
   useEffect(() => {
     stateCallbackRef.current = onStateChange;
@@ -28,64 +34,75 @@ export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProp
       return undefined;
     }
 
-    const viewer = new SkinViewer({
-      canvas,
-      width: Math.max(240, Math.round(stage.clientWidth)),
-      height: Math.max(360, Math.round(stage.clientHeight)),
-    });
-
-    viewer.zoom = 0.82;
-    viewer.autoRotate = true;
-    viewer.animation = new WalkingAnimation();
-    viewer.animation.speed = 0.75;
-    viewerRef.current = viewer;
-
-    const resize = () => {
-      viewer.width = Math.max(240, Math.round(stage.clientWidth));
-      viewer.height = Math.max(360, Math.round(stage.clientHeight));
-    };
-
-    const resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(stage);
-
-    return () => {
-      resizeObserver.disconnect();
-      viewerRef.current = null;
-      viewer.dispose();
-    };
-  }, []);
-
-  useEffect(() => {
-    const viewer = viewerRef.current;
-
-    if (!viewer) {
-      return undefined;
-    }
-
     let cancelled = false;
-    stateCallbackRef.current("loading");
+    let localPreview: McSkinPreview | null = null;
+    const reportState = (state: PreviewState, detail?: string) => {
+      if (!cancelled) {
+        setPreviewState(state);
+        stateCallbackRef.current(state, detail);
+      }
+    };
 
-    void viewer
-      .loadSkin(skinUrl, { model: armType === "wide" ? "default" : "slim" })
-      .then(() => {
-        if (!cancelled) {
-          stateCallbackRef.current("ready");
+    reportState("loading");
+    void import("skinview3d")
+      .then((skinview3d) => {
+        if (cancelled) {
+          return;
         }
+        const compatibleAnimations = skinview3d as typeof skinview3d & {
+          readonly RotatingAnimation?: unknown;
+        };
+        const preview = new McSkinPreview({
+          canvas,
+          stage,
+          createViewer: (options) =>
+            new skinview3d.SkinViewer(options) as unknown as McSkinViewer,
+          animations: {
+            WalkingAnimation: skinview3d.WalkingAnimation,
+            RotatingAnimation: compatibleAnimations.RotatingAnimation,
+          },
+          onStateChange: reportState,
+        });
+        localPreview = preview;
+        previewRef.current = preview;
+        preview.initialize();
+        const latest = latestSkinRef.current;
+        return preview
+          .loadSkin(latest.skinUrl, latest.armType)
+          .catch(() => undefined);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
+          localPreview?.dispose();
+          if (previewRef.current === localPreview) {
+            previewRef.current = null;
+          }
           const detail = error instanceof Error ? error.message : String(error);
-          stateCallbackRef.current("error", detail);
+          reportState("error", detail);
         }
       });
 
     return () => {
       cancelled = true;
+      if (previewRef.current === localPreview) {
+        previewRef.current = null;
+      }
+      localPreview?.dispose();
     };
+  }, []);
+
+  useEffect(() => {
+    latestSkinRef.current = { armType, skinUrl };
+    void previewRef.current?.loadSkin(skinUrl, armType).catch(() => undefined);
   }, [armType, skinUrl]);
 
   return (
-    <div className="skin-stage" ref={stageRef}>
+    <div
+      className="skin-stage"
+      ref={stageRef}
+      data-state={previewState}
+      aria-busy={previewState === "loading"}
+    >
       <canvas ref={canvasRef} aria-label="Minecraft 皮肤三维预览" />
     </div>
   );

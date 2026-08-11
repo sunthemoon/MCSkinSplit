@@ -2,7 +2,7 @@
 
 | 编号 | 状态 | 发现需求 | 标题 | 是否阻塞 | 证据 | 记录 |
 |---|---|---|---|---|---|---|
-| INC-001 | 已复现/待确认是否处理 | M1 固定像素核心 | 3D 预览尺寸监听触发 ResizeObserver loop 报告 | 否 | Vite 客户端日志 | 本文 INC-001 |
+| INC-001 | 已修复/M3 验证通过 | M1 固定像素核心 | 3D 预览尺寸监听触发 ResizeObserver loop 报告 | 否 | Vite 客户端日志 + M3 回归测试 | 本文 INC-001 |
 
 # INC-001 3D 预览尺寸监听触发 ResizeObserver loop 报告
 
@@ -10,7 +10,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | 已复现/待确认是否处理 |
+| 状态 | 已修复/M3 验证通过 |
 | 发现日期 | 2026-08-11 |
 | 发现时所在需求 | `docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md` 的 M1 |
 | 是否阻塞当前需求 | 否；Canvas、Wide/Slim、Contact Sheet 和 3D ready 验收均可完成 |
@@ -21,7 +21,8 @@
 
 - 当前需求范围：固定 PNG RGBA、UV 双向映射、派生像素输出和 Canvas 预览。
 - 该问题在 M0 已存在的 `SkinPreview` 尺寸监听中出现，不属于 M1 像素核心的验收点。
-- 当前处理决定：只记录，不在 M1 中修改；页面功能与像素结果未受阻。
+- M1 处理决定：只记录，不在 M1 中修改；页面功能与像素结果未受阻。
+- M3 处理决定：M3 明确包含 Viewer 尺寸生命周期，因此在该里程碑中修复并补回归测试。
 
 ## 3. 复现入口与步骤
 
@@ -74,3 +75,12 @@
 - 建议优先级：P3。
 - 建议处理方式：单独确认后，复测以 `requestAnimationFrame` 合并尺寸更新或使用 `ResizeObserverEntry` 尺寸，避免在观察回调内形成同步布局反馈。
 - 修复前必须补充的证据：生产构建环境是否同样上报、连续窗口缩放时的触发频率、修复前后观察器调用计数。
+
+## 7. M3 修复与验证
+
+- 修复日期：2026-08-11。
+- `ResizeObserver` 回调只读取 `ResizeObserverEntry.contentRect`，将最新尺寸合并到一个 `requestAnimationFrame` 后再更新 Viewer。
+- 仅在宽高实际变化时写入 Viewer；销毁时断开 Observer，并取消尚未执行的 animation frame。
+- `McSkinPreview` 单元测试验证两次尺寸通知只调度一帧，使用最新尺寸；销毁后待处理帧不会再写尺寸。
+- M3 浏览器测试在 Import、Branch 和历史 Revision 切换后保持单个 Viewer Canvas。Canvas CSS 尺寸为 405×596，缓冲区为 364×536，与测试浏览器的 `devicePixelRatio=0.9` 一致。
+- 浏览器日志中 `ResizeObserver` 报告数为 0，排除浏览器扩展消息通道噪声后应用错误数为 0。

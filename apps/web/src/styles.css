@@ -705,6 +705,7 @@ h1 span {
 }
 
 .avatar-panel .panel-heading,
+.avatar-revision,
 .skin-stage,
 .viewer-status {
   z-index: 1;
@@ -719,7 +720,20 @@ h1 span {
   color: var(--cyan-bright);
 }
 
+.avatar-revision {
+  overflow: hidden;
+  margin: -14px 0 8px;
+  color: rgba(255, 255, 255, 0.48);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .skin-stage {
+  position: relative;
   min-height: 430px;
   flex: 1;
 }
@@ -728,6 +742,40 @@ h1 span {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.skin-stage::after {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 20, 24, 0.58);
+  color: rgba(244, 240, 228, 0.82);
+  content: "";
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.skin-stage[data-state="loading"]::after {
+  content: "VERIFY + LOAD TEXTURE…";
+  opacity: 1;
+}
+
+.skin-stage[data-state="error"]::after {
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(227, 108, 61, 0.14) 0 8px,
+      rgba(12, 20, 24, 0.7) 8px 16px
+    );
+  color: #ffb296;
+  content: "3D TEXTURE UNAVAILABLE";
+  opacity: 1;
 }
 
 .viewer-status {

@@ -9,7 +9,7 @@ Last updated: 2026-08-11
 | M0 repository baseline | Complete | `pnpm verify` and browser smoke test |
 | M1 deterministic pixel core | Complete | Lossless RGBA and UV round trips for Wide/Slim fixtures |
 | M2 immutable revisions | Complete | SQLite, snapshots, revert, branch, hash checks |
-| M3 revision-aware 3D preview | Not started | One viewer instance tracks selected revisions |
+| M3 revision-aware 3D preview | Complete | One viewer instance tracks selected revisions |
 | M4 manual semantic editor and parts | Not started | Manual segmentation and lossless part reuse |
 | M5 AI Skill and worker | Not started | Schema-valid proposals create revisions only after validation |
 | M6 compositor | Not started | Explicit conflicts and deterministic composition |
@@ -89,5 +89,31 @@ Last updated: 2026-08-11
 - SQLite is the supported local single-service store. The in-process write queue serializes mutations; distributed multi-writer deployment is outside M2.
 - Revision state uses complete snapshots rather than binary deltas. This is intentional for 64×64 textures and keeps every node independently recoverable.
 - M2 segmentation snapshots are valid but empty. Semantic components, masks, and confirmed edit transactions arrive in M4.
-- Revision switching currently uses the existing M1 viewer component. M3 will add the dedicated viewer adapter, lazy loading, and focused resize lifecycle work.
-- The eager `skinview3d`/Three.js production bundle remains about 962 kB before gzip and produces Vite's chunk-size warning.
+- Revision switching uses the M3 adapter and the stored segmentation arm model. M4 will add component visibility and part-specific previews.
+- The lazy `skinview3d`/Three.js production chunk remains about 525 kB before gzip and produces Vite's chunk-size warning, but it no longer blocks the initial Studio chunk.
+
+## M3 deliverables
+
+- Added framework-independent `McSkinPreview`, with dependency-injected Viewer, animation, observer, and animation-frame boundaries for deterministic testing.
+- React creates the adapter once per mounted Canvas. Skin URL or arm-model changes call `loadSkin` on that instance instead of constructing another Viewer.
+- Texture requests are serialized and generation-tagged. A stale result cannot report ready after a newer Revision request, and a failed texture can be followed by a successful load without disposing the Viewer.
+- Added a single animation compatibility boundary: installed `skinview3d@3.4.2` uses `viewer.animation` plus `autoRotate`; a legacy `animations.add` implementation receives its own Walking/Rotating registrations instead. The two modes never run together.
+- Replaced synchronous Observer writes with `ResizeObserverEntry.contentRect` reads and one coalesced `requestAnimationFrame` write. Unchanged dimensions are skipped, and disposal cancels pending work.
+- Added loading/error overlays and an explicit `REVISION / branch #sequence` source label while keeping the rest of the Studio usable on a 3D texture error.
+- Changed `skinview3d` to a dynamic import. The initial production JavaScript fell from about 962 kB to 448 kB before gzip; the WebGL viewer is a separate lazy chunk.
+- Revision selection loads the authoritative arm model from `segmentation.json`, so a saved Wide override cannot silently return to inferred Slim after reload.
+- Closed [`INC-001`](mc-skin-ai-assisted-segmentation-versioned-studio-plan_问题记录.md): the prior ResizeObserver loop report is now fixed and verified in M3.
+
+## M3 verification evidence
+
+- `pnpm verify` passes fixture drift detection, all TypeScript projects, 76 Vitest cases, and every production build.
+- Viewer tests: 5 cases cover exactly-once initialization/disposal, modern and legacy animation APIs, serialized latest-Revision loading, failure recovery, and coalesced/cancelled resize work.
+- Browser Revision switch: `main #1 → experiment-slim #1 → main #1` kept the Canvas count at one; the Revision label, Atlas texture, model label, and 3D avatar changed together and returned to ready.
+- Browser sizing: the Viewer Canvas CSS size matched its stage at 405×596; its 364×536 backing buffer matched the test browser's `devicePixelRatio=0.9`.
+- Browser logs contained zero ResizeObserver reports and zero application errors. Browser-extension message-channel errors remained external noise without an application stack.
+
+## M3 known boundaries
+
+- The WebGL chunk remains above Vite's default 500 kB warning threshold even though it is lazy. Further Three.js/skinview3d reduction is a performance task, not a Viewer correctness blocker.
+- Skin loading cannot abort an in-flight `skinview3d.loadSkin` call. The adapter serializes requests to guarantee final ordering; a permanently hung upstream texture load would delay later requests.
+- M3 previews whole Revision skins. Neutral-base component previews and component visibility controls belong to M4.
