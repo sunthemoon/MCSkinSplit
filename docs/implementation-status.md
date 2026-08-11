@@ -12,7 +12,7 @@ Last updated: 2026-08-11
 | M3 revision-aware 3D preview | Complete | One viewer instance tracks selected revisions |
 | M4 manual semantic editor and parts | Complete | Manual segmentation and lossless part reuse |
 | M5 AI Skill and worker | Complete | Schema-valid proposals create revisions only after validation |
-| M6 compositor | Not started | Explicit conflicts and deterministic composition |
+| M6 compositor | Complete | Explicit conflicts and deterministic six-skin composition |
 
 ## M0 baseline
 
@@ -54,7 +54,7 @@ Last updated: 2026-08-11
 - M1 accepts modern 64×64 skins only. Legacy 64×32 conversion is intentionally rejected.
 - Lossless means decoded RGBA equality. PNG compression, chunk ordering, ancillary chunks, and original palette encoding are not retained.
 - Automatic arm inference follows deterministic marker rules but cannot infer artistic intent in every ambiguous file; the UI therefore retains a manual override.
-- The real-skin `MIX` is a deterministic fixture recipe without edit controls or conflict handling; it does not replace the M6 compositor.
+- The real-skin `MIX` began as a deterministic fixture recipe; M6 now rebuilds it through persisted parts and the production compositor.
 - The production web entry remains large because `skinview3d` and Three.js are eager-loaded. M3 will isolate and lazy-load the viewer adapter.
 - M1 fixture/model overrides remain local display choices until the current texture is imported into a Project.
 - A non-blocking pre-existing `ResizeObserver loop` development report is recorded in [`mc-skin-ai-assisted-segmentation-versioned-studio-plan_问题记录.md`](mc-skin-ai-assisted-segmentation-versioned-studio-plan_问题记录.md); M1 does not include an unrelated viewer resize fix.
@@ -166,8 +166,8 @@ Last updated: 2026-08-11
 
 - M4 is a manual editor. AI proposals, provider isolation, and confidence/review
   workflows arrive in M5.
-- Single-part application reports hard and same-color overlap. Layer-to-layer and
-  unknown-to-unknown conflicts are reserved for M6 multi-part composition.
+- Single-part application reports hard and same-color overlap. M6 extends this with
+  ordered layer-to-layer, model, and semantic-boundary conflicts.
 - Part export creates an immutable library asset but intentionally does not create
   a skin Revision because source skin state is unchanged.
 - The lazy `skinview3d` chunk remains about 525 kB before gzip and retains Vite's
@@ -238,3 +238,59 @@ Last updated: 2026-08-11
   deterministic CI.
 - AI workspaces and logs may contain skin imagery and model output. They remain
   under the configured local data directory and require explicit operator cleanup.
+
+## M6 deliverables
+
+- Added framework-independent `packages/skin-compositor` with ordered layers,
+  fixed-base participation, deterministic preview winners, per-pixel decisions,
+  and structured conflict reports.
+- Added explicit handling for hard color conflicts, non-blocking same-color
+  overlaps, incompatible arm models, and writes outside manifest-declared UV
+  surfaces. Model and semantic-boundary violations cannot be dismissed by layer
+  order.
+- Added SQLite `composition_project` and `composition_layer` persistence, including
+  draft/committed state, base Revision and Branch, resolution mode, per-pixel
+  winners, latest report, and resulting Revision.
+- Added draft creation, reload, add/remove/reorder, conflict resolution, PNG preview,
+  and commit methods to the Revision service. Every commit rechecks the Branch HEAD
+  and all source/part assets before creating an immutable `compose` Revision.
+- Added strict API routes for the complete lifecycle plus cache-busted preview PNGs.
+- Added a responsive Studio compositor with a top-to-base stack, real part previews,
+  live pixel metrics, individual winner controls, explicit whole-order confirmation,
+  PNG export, and a server-driven commit gate.
+- Added an end-to-end real-skin recipe that persists six saved parts and recreates
+  `alex-mix-real.png` from A1 head, A4 torso, A3 right arm, A5 left arm, A6 right
+  leg, and A2 left leg. All sources and the result use Slim/Alex.
+- Documented the stable behavior in
+  [`composition-workflow.md`](composition-workflow.md).
+
+## M6 verification evidence
+
+- `pnpm verify` passes fixture drift detection, all TypeScript projects, 120
+  Vitest cases, and every production build.
+- Compositor tests cover explicit per-pixel winners, same-color overlap, model
+  mismatch, and a pixel-exact reconstruction from all six pinned real skins.
+- Revision tests cover persisted resolution, immutable commit behavior, semantic
+  ownership of winning pixels, and preview/committed PNG equality with the
+  checked-in six-source mix.
+- API and web tests cover strict composition request bodies, lifecycle endpoints,
+  encoded client paths, conflict decisions, preview URLs, and commit responses.
+- Browser smoke testing created a Slim/Alex Composition Project on a real skin,
+  added an exported real-skin part, rendered its preview, committed it, and loaded
+  the resulting `COMPOSE` node as `main #3` in the timeline, Atlas, semantic editor,
+  and 3D avatar.
+- Desktop visual inspection confirmed the full layer/preview/conflict layout,
+  disabled-state behavior, and default Slim controls without clipping or overlap.
+
+## M6 known boundaries
+
+- A preview always shows the deterministic current top-layer winner, even before a
+  hard conflict is confirmed. The UI labels preview export separately and keeps
+  commit disabled until the report is committable.
+- Model or semantic-boundary conflicts require removing or repairing the offending
+  part; they intentionally have no force-commit action.
+- Conflict decisions are stored per Atlas pixel. Reordering or changing layers
+  clears them rather than trying to reinterpret stale choices.
+- Composition Projects target one Branch HEAD and do not merge histories. If that
+  Branch advances independently, the draft must be recreated on the new HEAD.
+- The lazy `skinview3d` chunk retains Vite's non-blocking size warning.

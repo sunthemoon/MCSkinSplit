@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  composeSkin,
+  type CompositionLayerInput as PixelCompositionLayer,
+  type CompositionReport,
+  type CompositionResult as PixelCompositionResult,
+} from "@mc-skin-split/skin-compositor";
+import {
   SemanticEditError,
   analyzePartApplication,
   applyManualSemanticOperation,
@@ -48,9 +54,16 @@ import {
   OPERATION_TYPES,
   type ActorType,
   type AiSegmentationRevisionInput,
+  type AddCompositionPartInput,
   type ApplyPartInput,
   type ApplyPartResult,
   type BranchFromRevisionInput,
+  type CommitCompositionInput,
+  type CommitCompositionResult,
+  type CompositionDetail,
+  type CompositionLayer,
+  type CompositionProject,
+  type CreateCompositionInput,
   type CreateProjectInput,
   type CreateProjectResult,
   type ExportPartInput,
@@ -67,6 +80,8 @@ import {
   type RevisionOperationType,
   type RevisionStoreOptions,
   type RevertRevisionInput,
+  type ReorderCompositionLayersInput,
+  type ResolveCompositionConflictInput,
   type SegmentationSnapshot,
   type SkinAsset,
   type SkinBranch,
@@ -173,6 +188,31 @@ interface PartRow {
   readonly source_mime_type: string;
   readonly source_byte_size: number;
   readonly source_sha256: string;
+}
+
+interface CompositionProjectRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly base_revision_id: string;
+  readonly branch_id: string;
+  readonly name: string;
+  readonly arm_type: string;
+  readonly status: string;
+  readonly resolution_mode: string;
+  readonly conflict_winners_json: string;
+  readonly report_json: string;
+  readonly result_revision_id: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly committed_at: string | null;
+}
+
+interface CompositionLayerRow {
+  readonly id: string;
+  readonly composition_id: string;
+  readonly part_id: string;
+  readonly position: number;
+  readonly created_at: string;
 }
 
 const REVISION_SELECT = `
@@ -350,6 +390,37 @@ export class RevisionStore {
     return mapPart(row);
   }
 
+  listCompositions(baseRevisionId?: string): CompositionProject[] {
+    const rows = (baseRevisionId === undefined
+      ? this.database
+          .prepare("SELECT * FROM composition_project ORDER BY created_at, id")
+          .all()
+      : this.database
+          .prepare(
+            "SELECT * FROM composition_project WHERE base_revision_id = ? ORDER BY created_at, id",
+          )
+          .all(baseRevisionId)) as CompositionProjectRow[];
+    return rows.map(mapCompositionProject);
+  }
+
+  getComposition(compositionId: string): CompositionProject {
+    const row = this.database
+      .prepare("SELECT * FROM composition_project WHERE id = ?")
+      .get(compositionId) as CompositionProjectRow | undefined;
+    if (!row) throw notFound("Composition", compositionId);
+    return mapCompositionProject(row);
+  }
+
+  listCompositionLayers(compositionId: string): CompositionLayer[] {
+    this.getComposition(compositionId);
+    const rows = this.database
+      .prepare(
+        "SELECT * FROM composition_layer WHERE composition_id = ? ORDER BY position, id",
+      )
+      .all(compositionId) as CompositionLayerRow[];
+    return rows.map((row) => mapCompositionLayer(row, this.getPart(row.part_id)));
+  }
+
   async createProject(input: CreateProjectInput): Promise<CreateProjectResult> {
     return this.withWriteLock(() => this.createProjectUnlocked(input));
   }
@@ -418,6 +489,71 @@ export class RevisionStore {
     input: ApplyPartInput,
   ): Promise<ApplyPartResult> {
     return this.withWriteLock(() => this.applyPartUnlocked(revisionId, input));
+  }
+
+  async createComposition(
+    input: CreateCompositionInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() => this.createCompositionUnlocked(input));
+  }
+
+  async getCompositionDetail(compositionId: string): Promise<CompositionDetail> {
+    const composition = this.getComposition(compositionId);
+    const layers = this.listCompositionLayers(composition.id);
+    const evaluated = await this.evaluateComposition(composition, layers);
+    return { composition, layers, report: evaluated.report };
+  }
+
+  async addCompositionPart(
+    compositionId: string,
+    input: AddCompositionPartInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.addCompositionPartUnlocked(compositionId, input),
+    );
+  }
+
+  async removeCompositionLayer(
+    compositionId: string,
+    layerId: string,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.removeCompositionLayerUnlocked(compositionId, layerId),
+    );
+  }
+
+  async reorderCompositionLayers(
+    compositionId: string,
+    input: ReorderCompositionLayersInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.reorderCompositionLayersUnlocked(compositionId, input),
+    );
+  }
+
+  async resolveCompositionConflict(
+    compositionId: string,
+    input: ResolveCompositionConflictInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.resolveCompositionConflictUnlocked(compositionId, input),
+    );
+  }
+
+  async readCompositionPreviewPng(compositionId: string): Promise<Uint8Array> {
+    const composition = this.getComposition(compositionId);
+    const layers = this.listCompositionLayers(composition.id);
+    const evaluated = await this.evaluateComposition(composition, layers);
+    return encodeSkinPng(evaluated.image);
+  }
+
+  async commitComposition(
+    compositionId: string,
+    input: CommitCompositionInput = {},
+  ): Promise<CommitCompositionResult> {
+    return this.withWriteLock(() =>
+      this.commitCompositionUnlocked(compositionId, input),
+    );
   }
 
   async verifyPartStorage(partId: string): Promise<VerifiedPartStorage> {
@@ -970,6 +1106,554 @@ export class RevisionStore {
       armType,
       warnings,
     };
+  }
+
+  private async createCompositionUnlocked(
+    input: CreateCompositionInput,
+  ): Promise<CompositionDetail> {
+    const sourceRevision = this.getRevision(input.baseRevisionId);
+    const project = this.getProject(sourceRevision.projectId);
+    const branch = this.getBranch(input.branchId ?? sourceRevision.branchId);
+    if (branch.projectId !== project.id) {
+      throw invalidInput("混搭目标 Branch 与基础 Revision 不属于同一 Project");
+    }
+    if (branch.headRevisionId !== sourceRevision.id) {
+      throw conflict("创建混搭工程只能基于所选 Branch 的最新 Revision", {
+        baseRevisionId: sourceRevision.id,
+        branchId: branch.id,
+        branchHeadRevisionId: branch.headRevisionId,
+      });
+    }
+    const snapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    const compositionId = this.id("composition");
+    const createdAt = this.now();
+    const name = validateText(
+      "混搭工程名称",
+      input.name ?? `${project.name} 混搭`,
+      120,
+    );
+    const emptyResult = composeSkin({
+      base: decodeSkinPng(snapshot.files["skin.png"].bytes),
+      targetArmType: segmentation.source.armType,
+      layers: [],
+    });
+    this.database
+      .prepare(`
+        INSERT INTO composition_project (
+          id, project_id, base_revision_id, branch_id, name, arm_type,
+          status, resolution_mode, conflict_winners_json, report_json,
+          result_revision_id, created_at, updated_at, committed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'draft', 'unresolved', '{}', ?, NULL, ?, ?, NULL)
+      `)
+      .run(
+        compositionId,
+        project.id,
+        sourceRevision.id,
+        branch.id,
+        name,
+        segmentation.source.armType,
+        compactCanonicalJson(emptyResult.report),
+        createdAt,
+        createdAt,
+      );
+    const composition = this.getComposition(compositionId);
+    return { composition, layers: [], report: emptyResult.report };
+  }
+
+  private async addCompositionPartUnlocked(
+    compositionId: string,
+    input: AddCompositionPartInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    const existing = this.listCompositionLayers(composition.id);
+    if (existing.some((layer) => layer.partId === input.partId)) {
+      throw conflict("同一部件不能在一个混搭工程中重复添加", {
+        compositionId,
+        partId: input.partId,
+      });
+    }
+    const part = this.getPart(input.partId);
+    await this.verifyPartStorage(part.id);
+    const position = input.position ?? existing.length;
+    if (!Number.isInteger(position) || position < 0 || position > existing.length) {
+      throw invalidInput("部件图层位置超出范围", {
+        position,
+        layerCount: existing.length,
+      });
+    }
+    const createdAt = this.now();
+    const inserted: CompositionLayer = {
+      id: this.id("composition_layer"),
+      compositionId: composition.id,
+      partId: part.id,
+      position,
+      part,
+      createdAt,
+    };
+    const layers = [...existing];
+    layers.splice(position, 0, inserted);
+    const normalized = normalizeCompositionLayers(layers);
+    const draft = resetCompositionResolution(composition);
+    const evaluated = await this.evaluateComposition(draft, normalized);
+    this.persistCompositionDraft(
+      composition.id,
+      normalized,
+      draft.resolutionMode,
+      draft.conflictWinners,
+      evaluated.report,
+      createdAt,
+    );
+    return {
+      composition: this.getComposition(composition.id),
+      layers: normalized,
+      report: evaluated.report,
+    };
+  }
+
+  private async removeCompositionLayerUnlocked(
+    compositionId: string,
+    layerId: string,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    assertSafeReferenceId("layerId", layerId);
+    const existing = this.listCompositionLayers(composition.id);
+    if (!existing.some((layer) => layer.id === layerId)) {
+      throw notFound("Composition layer", layerId);
+    }
+    const layers = normalizeCompositionLayers(
+      existing.filter((layer) => layer.id !== layerId),
+    );
+    const draft = resetCompositionResolution(composition);
+    const evaluated = await this.evaluateComposition(draft, layers);
+    const updatedAt = this.now();
+    this.persistCompositionDraft(
+      composition.id,
+      layers,
+      draft.resolutionMode,
+      draft.conflictWinners,
+      evaluated.report,
+      updatedAt,
+    );
+    return {
+      composition: this.getComposition(composition.id),
+      layers,
+      report: evaluated.report,
+    };
+  }
+
+  private async reorderCompositionLayersUnlocked(
+    compositionId: string,
+    input: ReorderCompositionLayersInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    const existing = this.listCompositionLayers(composition.id);
+    const requested = [...input.layerIds];
+    if (
+      requested.length !== existing.length ||
+      new Set(requested).size !== requested.length ||
+      requested.some((id) => !existing.some((layer) => layer.id === id))
+    ) {
+      throw invalidInput("图层排序必须完整且不能重复", {
+        expectedLayerIds: existing.map((layer) => layer.id),
+      });
+    }
+    const byId = new Map(existing.map((layer) => [layer.id, layer]));
+    const layers = requested.map((id, position) => ({
+      ...byId.get(id)!,
+      position,
+    }));
+    const draft = resetCompositionResolution(composition);
+    const evaluated = await this.evaluateComposition(draft, layers);
+    const updatedAt = this.now();
+    this.persistCompositionDraft(
+      composition.id,
+      layers,
+      draft.resolutionMode,
+      draft.conflictWinners,
+      evaluated.report,
+      updatedAt,
+    );
+    return {
+      composition: this.getComposition(composition.id),
+      layers,
+      report: evaluated.report,
+    };
+  }
+
+  private async resolveCompositionConflictUnlocked(
+    compositionId: string,
+    input: ResolveCompositionConflictInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    const layers = this.listCompositionLayers(composition.id);
+    let resolutionMode = composition.resolutionMode;
+    let conflictWinners = { ...composition.conflictWinners };
+
+    if (input.strategy === "clear") {
+      resolutionMode = "unresolved";
+      conflictWinners = {};
+    } else if (input.strategy === "layer_order") {
+      resolutionMode = "layer_order";
+    } else {
+      const current = await this.evaluateComposition(composition, layers);
+      const target = current.report.conflicts.find(
+        (candidate) => candidate.id === input.conflictId,
+      );
+      if (!target || !("writes" in target)) {
+        throw invalidInput("只能为逐像素冲突指定胜出图层", {
+          conflictId: input.conflictId,
+        });
+      }
+      if (!target.writes.some((write) => write.layerId === input.winnerLayerId)) {
+        throw invalidInput("胜出图层没有写入该冲突像素", {
+          conflictId: input.conflictId,
+          winnerLayerId: input.winnerLayerId,
+        });
+      }
+      conflictWinners[input.conflictId] = input.winnerLayerId;
+    }
+
+    const candidate: CompositionProject = {
+      ...composition,
+      resolutionMode,
+      conflictWinners,
+    };
+    const evaluated = await this.evaluateComposition(candidate, layers);
+    const updatedAt = this.now();
+    const update = this.database
+      .prepare(`
+        UPDATE composition_project
+        SET resolution_mode = ?, conflict_winners_json = ?, report_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'draft'
+      `)
+      .run(
+        resolutionMode,
+        compactCanonicalJson(conflictWinners),
+        compactCanonicalJson(evaluated.report),
+        updatedAt,
+        composition.id,
+      );
+    if (update.changes !== 1) {
+      throw conflict("混搭工程已提交，请重新载入", { compositionId });
+    }
+    return {
+      composition: this.getComposition(composition.id),
+      layers,
+      report: evaluated.report,
+    };
+  }
+
+  private async commitCompositionUnlocked(
+    compositionId: string,
+    input: CommitCompositionInput,
+  ): Promise<CommitCompositionResult> {
+    const composition = this.requireDraftComposition(compositionId);
+    const sourceRevision = this.getRevision(composition.baseRevisionId);
+    const project = this.getProject(composition.projectId);
+    const branch = this.getBranch(composition.branchId);
+    if (branch.headRevisionId !== sourceRevision.id) {
+      throw conflict("基础 Branch 已产生新 Revision，请重新创建混搭工程", {
+        compositionId,
+        baseRevisionId: sourceRevision.id,
+        branchHeadRevisionId: branch.headRevisionId,
+      });
+    }
+    const layers = this.listCompositionLayers(composition.id);
+    const evaluated = await this.evaluateComposition(composition, layers);
+    if (!evaluated.report.committable) {
+      throw conflict("混搭仍有未解决冲突，不能创建 Revision", {
+        compositionId,
+        unresolvedConflictCount: evaluated.report.unresolvedConflictCount,
+      });
+    }
+
+    const sourceSnapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
+    const segmentation = parseSegmentation(
+      sourceSnapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    const sourceState = semanticStateFromSnapshot(
+      sourceSnapshot,
+      segmentation,
+      sourceRevision.id,
+    );
+    const sourceImage = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    const skinPng = encodeSkinPng(evaluated.image);
+    let state = rebaseSemanticStateImage({
+      state: sourceState,
+      sourceImage,
+      resultImage: evaluated.image,
+      sourceHash: sha256(skinPng),
+    });
+    const affectedComponents: string[] = [];
+    const affectedPixelIds = new Set<number>();
+    for (const layer of layers) {
+      const pixelIds = evaluated.winningPixelIdsByLayer[layer.id] ?? [];
+      if (pixelIds.length === 0) continue;
+      const componentId = composedPartComponentId(layer.id);
+      state = applyManualSemanticOperation(
+        state,
+        {
+          type: "assign_pixels",
+          target: {
+            instanceId: componentId,
+            displayName: layer.part.name,
+            category: layer.part.category,
+            ...(layer.part.subtype ? { subtype: layer.part.subtype } : {}),
+          },
+          spans: pixelIdsToSpans(pixelIds, getSkinLayout(composition.armType)),
+        },
+        evaluated.image,
+      );
+      affectedComponents.push(componentId);
+      for (const pixelId of pixelIds) affectedPixelIds.add(pixelId);
+    }
+
+    const ids = this.revisionIds();
+    state = {
+      ...state,
+      document: { ...state.document, revisionId: ids.revisionId },
+    };
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const summary = validateText(
+      "Revision 摘要",
+      input.summary ?? `提交混搭 ${composition.name}`,
+      300,
+    );
+    const resultHash = computeResultHash(skinPng, state.document);
+    const metadata = {
+      compositionId: composition.id,
+      resolutionMode: composition.resolutionMode,
+      layers: layers.map((layer) => ({
+        layerId: layer.id,
+        partId: layer.partId,
+        position: layer.position,
+      })),
+      conflictSummary: compositionConflictSummary(evaluated.report),
+    };
+    const operation = createOperation({
+      type: "compose",
+      inputRevisionId: sourceRevision.id,
+      outputRevisionId: ids.revisionId,
+      actorType: "user",
+      actorId,
+      createdAt,
+      summary,
+      beforeHash: sourceRevision.resultHash,
+      afterHash: resultHash,
+      affectedComponents,
+      affectedSpans: pixelIdsToSpans(
+        [...affectedPixelIds],
+        getSkinLayout(composition.armType),
+      ),
+      metadata,
+    });
+    const snapshot = await this.storage.writeSnapshot({
+      projectId: project.id,
+      revisionId: ids.revisionId,
+      skinPng,
+      segmentationJson: canonicalJson(state.document),
+      operationJson: canonicalJson(operation),
+      additionalFiles: semanticMaskFiles(state),
+    });
+
+    try {
+      const commit = this.database.transaction(() => {
+        const current = this.database
+          .prepare(`
+            SELECT composition.status, branch.head_revision_id
+            FROM composition_project AS composition
+            JOIN skin_branch AS branch ON branch.id = composition.branch_id
+            WHERE composition.id = ?
+          `)
+          .get(composition.id) as
+          | { readonly status: string; readonly head_revision_id: string | null }
+          | undefined;
+        if (
+          current?.status !== "draft" ||
+          current.head_revision_id !== sourceRevision.id
+        ) {
+          throw conflict("混搭工程或 Branch 已发生变化，请重新载入", {
+            compositionId,
+          });
+        }
+        const assetIds = this.insertAssets(
+          project.id,
+          ids,
+          snapshot,
+          createdAt,
+        );
+        this.insertRevision({
+          ids,
+          projectId: project.id,
+          branchId: branch.id,
+          parentRevisionId: sourceRevision.id,
+          sequence: sourceRevision.sequence + 1,
+          operationType: "compose",
+          actorType: "user",
+          actorId,
+          summary,
+          sourceHash: sourceRevision.resultHash,
+          resultHash,
+          createdAt,
+          metadata,
+        });
+        this.attachAssetsToRevision(ids.revisionId, assetIds);
+        this.insertOperation(project.id, ids, "compose", summary, createdAt);
+        this.database
+          .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
+          .run(ids.revisionId, branch.id);
+        if (branch.id === project.defaultBranchId) {
+          this.database
+            .prepare(`
+              UPDATE skin_project
+              SET head_revision_id = ?, updated_at = ?
+              WHERE id = ?
+            `)
+            .run(ids.revisionId, createdAt, project.id);
+        } else {
+          this.database
+            .prepare("UPDATE skin_project SET updated_at = ? WHERE id = ?")
+            .run(createdAt, project.id);
+        }
+        this.database
+          .prepare(`
+            UPDATE composition_project
+            SET status = 'committed', result_revision_id = ?,
+                report_json = ?, updated_at = ?, committed_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            ids.revisionId,
+            compactCanonicalJson(evaluated.report),
+            createdAt,
+            createdAt,
+            composition.id,
+          );
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.storage.removeNewSnapshot(project.id, ids.revisionId);
+      throw error;
+    }
+
+    return {
+      project: this.getProject(project.id),
+      branch: this.getBranch(branch.id),
+      revision: this.getRevision(ids.revisionId),
+      composition: this.getComposition(composition.id),
+      report: evaluated.report,
+    };
+  }
+
+  private requireDraftComposition(compositionId: string): CompositionProject {
+    const composition = this.getComposition(compositionId);
+    if (composition.status !== "draft") {
+      throw conflict("已提交的混搭工程不能继续修改", { compositionId });
+    }
+    return composition;
+  }
+
+  private async evaluateComposition(
+    composition: CompositionProject,
+    layers: readonly CompositionLayer[],
+  ): Promise<PixelCompositionResult> {
+    const sourceRevision = this.getRevision(composition.baseRevisionId);
+    if (sourceRevision.projectId !== composition.projectId) {
+      throw snapshotCorrupt(composition.id, "基础 Revision 与 Project 不一致");
+    }
+    const snapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      sourceRevision.id,
+    );
+    if (segmentation.source.armType !== composition.armType) {
+      throw snapshotCorrupt(composition.id, "基础 Revision 手臂模型发生变化");
+    }
+    const pixelLayers = await Promise.all(
+      layers.map(async (layer): Promise<PixelCompositionLayer> => {
+        const stored = await this.verifyPartStorage(layer.partId);
+        return {
+          layerId: layer.id,
+          partId: layer.partId,
+          position: layer.position,
+          texture: decodeSkinPng(stored.files["texture.png"].bytes),
+          writeMask: rgbaImageToMask(
+            decodeSkinPng(stored.files["write-mask.png"].bytes),
+          ),
+          manifest: layer.part.manifest,
+        };
+      }),
+    );
+    try {
+      return composeSkin({
+        base: decodeSkinPng(snapshot.files["skin.png"].bytes),
+        targetArmType: composition.armType,
+        layers: pixelLayers,
+        resolutionMode: composition.resolutionMode,
+        conflictWinners: composition.conflictWinners,
+      });
+    } catch (error) {
+      if (error instanceof RevisionStoreError) throw error;
+      throw snapshotCorrupt(composition.id, "部件图层或冲突决议无效", {
+        cause: error,
+      });
+    }
+  }
+
+  private persistCompositionDraft(
+    compositionId: string,
+    layers: readonly CompositionLayer[],
+    resolutionMode: CompositionProject["resolutionMode"],
+    conflictWinners: Readonly<Record<string, string>>,
+    report: CompositionReport,
+    updatedAt: string,
+  ): void {
+    const persist = this.database.transaction(() => {
+      const current = this.database
+        .prepare("SELECT status FROM composition_project WHERE id = ?")
+        .get(compositionId) as { readonly status: string } | undefined;
+      if (current?.status !== "draft") {
+        throw conflict("混搭工程已提交，请重新载入", { compositionId });
+      }
+      this.database
+        .prepare("DELETE FROM composition_layer WHERE composition_id = ?")
+        .run(compositionId);
+      const insert = this.database.prepare(`
+        INSERT INTO composition_layer (
+          id, composition_id, part_id, position, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const layer of layers) {
+        insert.run(
+          layer.id,
+          compositionId,
+          layer.partId,
+          layer.position,
+          layer.createdAt,
+        );
+      }
+      this.database
+        .prepare(`
+          UPDATE composition_project
+          SET resolution_mode = ?, conflict_winners_json = ?,
+              report_json = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          resolutionMode,
+          compactCanonicalJson(conflictWinners),
+          compactCanonicalJson(report),
+          updatedAt,
+          compositionId,
+        );
+    });
+    persist.immediate();
   }
 
   private async applyPartUnlocked(
@@ -2092,6 +2776,126 @@ function mapPart(row: PartRow): SkinPart {
   };
 }
 
+function mapCompositionProject(row: CompositionProjectRow): CompositionProject {
+  if (
+    !["wide", "slim"].includes(row.arm_type) ||
+    !["draft", "committed"].includes(row.status) ||
+    !["unresolved", "layer_order"].includes(row.resolution_mode)
+  ) {
+    throw snapshotCorrupt(row.id, "混搭工程枚举值无效");
+  }
+  const rawWinners = parseObjectJson(
+    row.conflict_winners_json,
+    `Composition ${row.id} conflict winners`,
+  );
+  if (Object.values(rawWinners).some((value) => typeof value !== "string")) {
+    throw snapshotCorrupt(row.id, "混搭冲突决议必须引用图层 ID");
+  }
+  if (
+    (row.status === "draft" && row.result_revision_id !== null) ||
+    (row.status === "committed" &&
+      (row.result_revision_id === null || row.committed_at === null))
+  ) {
+    throw snapshotCorrupt(row.id, "混搭提交状态与结果 Revision 不一致");
+  }
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    baseRevisionId: row.base_revision_id,
+    branchId: row.branch_id,
+    name: row.name,
+    armType: row.arm_type as "wide" | "slim",
+    status: row.status as "draft" | "committed",
+    resolutionMode: row.resolution_mode as "unresolved" | "layer_order",
+    conflictWinners: rawWinners as Readonly<Record<string, string>>,
+    report: parseCompositionReport(row.report_json, row.id),
+    resultRevisionId: row.result_revision_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    committedAt: row.committed_at,
+  };
+}
+
+function mapCompositionLayer(
+  row: CompositionLayerRow,
+  part: SkinPart,
+): CompositionLayer {
+  if (row.position < 0 || !Number.isInteger(row.position)) {
+    throw snapshotCorrupt(row.composition_id, "混搭图层位置无效");
+  }
+  return {
+    id: row.id,
+    compositionId: row.composition_id,
+    partId: row.part_id,
+    position: row.position,
+    part,
+    createdAt: row.created_at,
+  };
+}
+
+function parseCompositionReport(
+  source: string,
+  compositionId: string,
+): CompositionReport {
+  try {
+    const value = JSON.parse(source) as Partial<CompositionReport>;
+    if (
+      !["wide", "slim"].includes(value.targetArmType ?? "") ||
+      !isNonNegativeInteger(value.layerCount) ||
+      !isNonNegativeInteger(value.writePixelCount) ||
+      !isNonNegativeInteger(value.appliedPixelCount) ||
+      !isNonNegativeInteger(value.hardConflictCount) ||
+      !isNonNegativeInteger(value.sameColorOverlapCount) ||
+      !isNonNegativeInteger(value.layerConflictCount) ||
+      !isNonNegativeInteger(value.modelConflictCount) ||
+      !isNonNegativeInteger(value.unknownConflictCount) ||
+      !isNonNegativeInteger(value.unresolvedConflictCount) ||
+      typeof value.committable !== "boolean" ||
+      !Array.isArray(value.conflicts)
+    ) {
+      throw new TypeError("report 结构无效");
+    }
+    return value as CompositionReport;
+  } catch (error) {
+    throw snapshotCorrupt(compositionId, "混搭冲突报告无效", { cause: error });
+  }
+}
+
+function normalizeCompositionLayers(
+  layers: readonly CompositionLayer[],
+): CompositionLayer[] {
+  return layers.map((layer, position) => ({ ...layer, position }));
+}
+
+function resetCompositionResolution(
+  composition: CompositionProject,
+): CompositionProject {
+  return {
+    ...composition,
+    resolutionMode: "unresolved",
+    conflictWinners: {},
+  };
+}
+
+function compositionConflictSummary(report: CompositionReport) {
+  return {
+    hardConflictCount: report.hardConflictCount,
+    sameColorOverlapCount: report.sameColorOverlapCount,
+    layerConflictCount: report.layerConflictCount,
+    modelConflictCount: report.modelConflictCount,
+    unknownConflictCount: report.unknownConflictCount,
+    unresolvedConflictCount: report.unresolvedConflictCount,
+  };
+}
+
+function compactCanonicalJson(value: unknown): string {
+  return canonicalJson(value).trim();
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
 function mapPartFile(
   id: string,
   storagePath: string,
@@ -2417,6 +3221,10 @@ function appliedPartComponentId(partId: string): string {
   return `applied.${partId.slice(0, 90)}`;
 }
 
+function composedPartComponentId(layerId: string): string {
+  return `composed.${layerId.slice(0, 89)}`;
+}
+
 function computeResultHash(
   skinPng: Uint8Array,
   segmentation: SegmentationSnapshot,
@@ -2541,6 +3349,8 @@ function defaultId(kind: RevisionIdKind): string {
     asset: "asset",
     operation: "op",
     part: "part",
+    composition: "composition",
+    composition_layer: "complayer",
   };
   return `${prefix[kind]}_${randomUUID().replaceAll("-", "")}`;
 }

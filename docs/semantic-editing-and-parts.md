@@ -87,9 +87,10 @@ paths. Reads verify both the files and database metadata.
 
 Calling apply without a strategy performs a read-only preview. It reports model
 compatibility, write-pixel count, and conflicts without creating a Revision.
-The current M4 single-part report distinguishes different-color hard conflicts
-from same-color overlap; the shared report schema also reserves layer and unknown
-conflicts for the M6 multi-part compositor.
+The M4 single-part report distinguishes different-color hard conflicts from
+same-color overlap. M6 extends that contract with ordered part layers, model and
+semantic-boundary conflicts, and persisted pixel-winner decisions; see
+[`composition-workflow.md`](composition-workflow.md).
 
 An application is committed only with an explicit strategy:
 

@@ -8,12 +8,18 @@ Browser UI
     -> Revision service (M2)
     -> Deterministic skin core (M1)
     -> AI job service (M5)
+    -> Composition service (M6)
 
 Deterministic skin core
   -> PNG RGBA decoder
   -> Classic/Slim UV layouts
   -> Atlas/surface round trip
-  -> masks, spans, composition, conflict reports
+  -> masks, spans, semantic operations, and parts
+
+Skin compositor
+  -> ordered part layers over an immutable base
+  -> per-pixel winner selection
+  -> model, semantic-boundary, and overlap conflict reports
 
 AI worker
   -> isolated, integrity-checked analysis workspace
@@ -73,8 +79,8 @@ The detailed coordinate and inference contract is in [`uv-layout.md`](uv-layout.
 - Exported parts are immutable five-file assets. Export does not mutate the source
   Revision; application always previews first and requires an explicit conflict
   strategy before it creates an `apply_part` Revision.
-- M4 conflict reports share the M6 report shape. Layer and unknown conflicts remain
-  zero for single-part application and will be populated by the compositor.
+- M4 single-part conflict reports remain a lightweight preview contract. M6 owns
+  ordered layer-to-layer, model, and semantic-boundary conflict evaluation.
 
 The detailed contract is in
 [`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).
@@ -104,16 +110,36 @@ The detailed contract is in
 
 The detailed contract is in [`ai-analysis.md`](ai-analysis.md).
 
-## Planned package boundaries
+## M6 decisions
+
+- `packages/skin-compositor` is a pure framework-independent evaluator. It receives
+  decoded base/part images, masks, manifests, ordered positions, and conflict
+  decisions; it does not read SQLite, the filesystem, HTTP state, or React state.
+- The base participates as a fixed non-transparent pixel writer. Parts are ordered
+  bottom to top, and the highest layer is the preview winner.
+- Same-color overlap is non-blocking. Different colors require either an explicit
+  per-pixel winner or an explicit whole-stack layer-order confirmation. Model and
+  semantic-boundary conflicts always block.
+- `packages/skin-revision` owns Composition Project persistence and revalidates all
+  hashes, manifests, Branch HEAD concurrency, and conflict decisions at commit.
+- Layer changes invalidate prior decisions. A committed Composition Project is
+  immutable and references its resulting `compose` Revision.
+- Winning layer pixels become composed semantic components without duplicating
+  pixels that were hidden by higher layers.
+
+The detailed contract is in
+[`composition-workflow.md`](composition-workflow.md).
+
+## Package boundaries
 
 ```text
-apps/web                 UI, semantic editor, AI console, and preview adapters
-apps/api                 HTTP API and revision orchestration
+apps/web                 UI, editors, AI console, compositor, and preview adapters
+apps/api                 HTTP API, revision, AI, and composition orchestration
 apps/ai-worker           persistent isolated analysis jobs (M5)
-packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M5)
+packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M6)
 packages/skin-schema     JSON schemas and shared types
-packages/skin-revision   immutable snapshots, branching, and AI audit tables
-packages/skin-compositor part application and conflict detection
+packages/skin-revision   immutable snapshots, branching, AI audit, and compositions
+packages/skin-compositor ordered layers and deterministic conflict evaluation (M6)
 packages/skin-analysis-pack deterministic analysis workspace generation (M5)
 packages/ai-provider     replaceable provider contracts and validation (M5)
 ```

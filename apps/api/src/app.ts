@@ -60,6 +60,14 @@ interface PartParams {
   readonly partId: string;
 }
 
+interface CompositionParams {
+  readonly compositionId: string;
+}
+
+interface CompositionLayerParams extends CompositionParams {
+  readonly layerId: string;
+}
+
 interface AiJobParams {
   readonly jobId: string;
 }
@@ -99,6 +107,39 @@ interface ApplyPartBody {
   readonly partId: string;
   readonly strategy?: "use_part" | "keep_base";
   readonly branchId?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+interface CompositionsQuery {
+  readonly revisionId?: string;
+}
+
+interface CreateCompositionBody {
+  readonly baseRevisionId: string;
+  readonly branchId?: string;
+  readonly name?: string;
+}
+
+interface AddCompositionPartBody {
+  readonly partId: string;
+  readonly position?: number;
+}
+
+interface ReorderCompositionBody {
+  readonly layerIds: readonly string[];
+}
+
+type ResolveCompositionBody =
+  | { readonly strategy: "layer_order" }
+  | {
+      readonly strategy: "winner";
+      readonly conflictId: string;
+      readonly winnerLayerId: string;
+    }
+  | { readonly strategy: "clear" };
+
+interface CommitCompositionBody {
   readonly actorId?: string;
   readonly summary?: string;
 }
@@ -521,6 +562,95 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.get<{ Querystring: CompositionsQuery }>(
+    "/api/compositions",
+    { schema: { querystring: compositionsQuerySchema } },
+    async (request) => ({
+      compositions: store.listCompositions(request.query.revisionId),
+    }),
+  );
+
+  app.post<{ Body: CreateCompositionBody }>(
+    "/api/compositions",
+    { schema: { body: createCompositionSchema } },
+    async (request, reply) => {
+      const detail = await store.createComposition(request.body);
+      return reply.status(201).send(detail);
+    },
+  );
+
+  app.get<{ Params: CompositionParams }>(
+    "/api/compositions/:compositionId",
+    async (request) =>
+      await store.getCompositionDetail(request.params.compositionId),
+  );
+
+  app.get<{ Params: CompositionParams }>(
+    "/api/compositions/:compositionId/preview.png",
+    async (request, reply) => {
+      const bytes = await store.readCompositionPreviewPng(
+        request.params.compositionId,
+      );
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, no-store")
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.post<{ Params: CompositionParams; Body: AddCompositionPartBody }>(
+    "/api/compositions/:compositionId/apply-part",
+    { schema: { body: addCompositionPartSchema } },
+    async (request, reply) => {
+      const detail = await store.addCompositionPart(
+        request.params.compositionId,
+        request.body,
+      );
+      return reply.status(201).send(detail);
+    },
+  );
+
+  app.post<{ Params: CompositionParams; Body: ReorderCompositionBody }>(
+    "/api/compositions/:compositionId/reorder",
+    { schema: { body: reorderCompositionSchema } },
+    async (request) =>
+      await store.reorderCompositionLayers(
+        request.params.compositionId,
+        request.body,
+      ),
+  );
+
+  app.delete<{ Params: CompositionLayerParams }>(
+    "/api/compositions/:compositionId/layers/:layerId",
+    async (request) =>
+      await store.removeCompositionLayer(
+        request.params.compositionId,
+        request.params.layerId,
+      ),
+  );
+
+  app.post<{ Params: CompositionParams; Body: ResolveCompositionBody }>(
+    "/api/compositions/:compositionId/resolve-conflict",
+    { schema: { body: resolveCompositionSchema } },
+    async (request) =>
+      await store.resolveCompositionConflict(
+        request.params.compositionId,
+        request.body,
+      ),
+  );
+
+  app.post<{ Params: CompositionParams; Body: CommitCompositionBody }>(
+    "/api/compositions/:compositionId/commit",
+    { schema: { body: commitCompositionSchema } },
+    async (request, reply) => {
+      const result = await store.commitComposition(
+        request.params.compositionId,
+        request.body,
+      );
+      return reply.status(201).send(result);
+    },
+  );
+
   app.post<{ Params: RevisionParams; Body: StartAiAnalysisBody }>(
     "/api/revisions/:revisionId/ai-analysis",
     { schema: { body: startAiAnalysisSchema } },
@@ -709,6 +839,93 @@ const applyPartSchema = {
     partId: { type: "string", minLength: 1, maxLength: 100 },
     strategy: { type: "string", enum: ["use_part", "keep_base"] },
     branchId: { type: "string", minLength: 1 },
+    actorId: { type: "string", minLength: 1, maxLength: 120 },
+    summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const compositionsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    revisionId: { type: "string", minLength: 1, maxLength: 100 },
+  },
+} as const;
+
+const createCompositionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["baseRevisionId"],
+  properties: {
+    baseRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+    branchId: { type: "string", minLength: 1, maxLength: 100 },
+    name: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const addCompositionPartSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["partId"],
+  properties: {
+    partId: { type: "string", minLength: 1, maxLength: 100 },
+    position: { type: "integer", minimum: 0, maximum: 255 },
+  },
+} as const;
+
+const reorderCompositionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["layerIds"],
+  properties: {
+    layerIds: {
+      type: "array",
+      maxItems: 256,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 100 },
+    },
+  },
+} as const;
+
+const resolveCompositionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["strategy"],
+  properties: {
+    strategy: { type: "string", enum: ["layer_order", "winner", "clear"] },
+    conflictId: { type: "string", minLength: 1, maxLength: 100 },
+    winnerLayerId: { type: "string", minLength: 1, maxLength: 100 },
+  },
+  oneOf: [
+    {
+      properties: { strategy: { const: "layer_order" } },
+      not: {
+        anyOf: [
+          { required: ["conflictId"] },
+          { required: ["winnerLayerId"] },
+        ],
+      },
+    },
+    {
+      required: ["strategy", "conflictId", "winnerLayerId"],
+      properties: { strategy: { const: "winner" } },
+    },
+    {
+      properties: { strategy: { const: "clear" } },
+      not: {
+        anyOf: [
+          { required: ["conflictId"] },
+          { required: ["winnerLayerId"] },
+        ],
+      },
+    },
+  ],
+} as const;
+
+const commitCompositionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
     actorId: { type: "string", minLength: 1, maxLength: 120 },
     summary: { type: "string", minLength: 1, maxLength: 300 },
   },

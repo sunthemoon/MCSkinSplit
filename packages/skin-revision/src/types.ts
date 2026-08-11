@@ -6,6 +6,10 @@ import type {
   SemanticComponent,
   SemanticState,
 } from "@mc-skin-split/skin-core";
+import type {
+  CompositionReport,
+  CompositionResolutionMode,
+} from "@mc-skin-split/skin-compositor";
 
 export const OPERATION_TYPES = [
   "import",
@@ -237,6 +241,74 @@ export interface ApplyPartResult extends RevisionMutationResult {
   readonly report: PartApplicationReport;
 }
 
+export type CompositionStatus = "draft" | "committed";
+
+export interface CompositionProject {
+  readonly id: string;
+  readonly projectId: string;
+  readonly baseRevisionId: string;
+  readonly branchId: string;
+  readonly name: string;
+  readonly armType: ArmType;
+  readonly status: CompositionStatus;
+  readonly resolutionMode: CompositionResolutionMode;
+  readonly conflictWinners: Readonly<Record<string, string>>;
+  readonly report: CompositionReport;
+  readonly resultRevisionId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly committedAt: string | null;
+}
+
+export interface CompositionLayer {
+  readonly id: string;
+  readonly compositionId: string;
+  readonly partId: string;
+  readonly position: number;
+  readonly part: SkinPart;
+  readonly createdAt: string;
+}
+
+export interface CompositionDetail {
+  readonly composition: CompositionProject;
+  readonly layers: readonly CompositionLayer[];
+  readonly report: CompositionReport;
+}
+
+export interface CreateCompositionInput {
+  readonly baseRevisionId: string;
+  readonly branchId?: string;
+  readonly name?: string;
+}
+
+export interface AddCompositionPartInput {
+  readonly partId: string;
+  readonly position?: number;
+}
+
+export interface ReorderCompositionLayersInput {
+  readonly layerIds: readonly string[];
+}
+
+export type ResolveCompositionConflictInput =
+  | { readonly strategy: "layer_order" }
+  | {
+      readonly strategy: "winner";
+      readonly conflictId: string;
+      readonly winnerLayerId: string;
+    }
+  | { readonly strategy: "clear" };
+
+export interface CommitCompositionInput {
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface CommitCompositionResult extends RevisionMutationResult {
+  readonly composition: CompositionProject;
+  readonly report: CompositionReport;
+}
+
 export interface RevisionDiff {
   readonly fromRevisionId: string;
   readonly toRevisionId: string;
@@ -256,7 +328,9 @@ export type RevisionIdKind =
   | "revision"
   | "asset"
   | "operation"
-  | "part";
+  | "part"
+  | "composition"
+  | "composition_layer";
 
 export interface RevisionStoreOptions {
   readonly dataDirectory: string;

@@ -4,9 +4,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   decodeSkinPng,
+  createRgbaImage,
+  encodeSkinPng,
+  getSkinLayout,
   getPixel,
   maskToPixelIds,
+  pixelIdsToSpans,
   rgbaImageToMask,
+  type BodyPart,
 } from "@mc-skin-split/skin-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -26,6 +31,9 @@ const TARGET_SKIN_PATH = fileURLToPath(
     "../../../tests/fixtures/skins/354359a2c2f33777.png",
     import.meta.url,
   ),
+);
+const REAL_SKIN_DIRECTORY = fileURLToPath(
+  new URL("../../../tests/fixtures/skins/", import.meta.url),
 );
 
 const temporaryDirectories: string[] = [];
@@ -399,6 +407,155 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("persists explicit conflict resolution before committing a composition", async () => {
+    const { store } = await createStore();
+
+    try {
+      const source = await importRealSkin(store);
+      const segmented = await store.applyManualOperation(source.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+          },
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      });
+      const part = await store.exportPart(segmented.revision.id, "hair.main");
+      const target = await store.importProject({
+        name: "Composition target",
+        skinPng: await readFile(TARGET_SKIN_PATH),
+      });
+      const created = await store.createComposition({
+        baseRevisionId: target.revision.id,
+        name: "冲突测试",
+      });
+      const layered = await store.addCompositionPart(created.composition.id, {
+        partId: part.id,
+      });
+
+      expect(layered.report.hardConflictCount).toBeGreaterThan(0);
+      expect(layered.report.committable).toBe(false);
+      await expect(
+        store.commitComposition(created.composition.id),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+
+      const resolved = await store.resolveCompositionConflict(
+        created.composition.id,
+        { strategy: "layer_order" },
+      );
+      expect(resolved.composition.resolutionMode).toBe("layer_order");
+      expect(resolved.report).toMatchObject({
+        unresolvedConflictCount: 0,
+        committable: true,
+      });
+
+      const committed = await store.commitComposition(created.composition.id, {
+        summary: "提交显式冲突决议",
+      });
+      expect(committed.revision).toMatchObject({
+        parentRevisionId: target.revision.id,
+        operationType: "compose",
+        sequence: 2,
+      });
+      expect(committed.composition).toMatchObject({
+        status: "committed",
+        resultRevisionId: committed.revision.id,
+      });
+      await expect(
+        store.addCompositionPart(created.composition.id, { partId: part.id }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("mixes saved body parts from all six real Slim skins into the expected PNG", async () => {
+    const { store } = await createStore();
+
+    try {
+      const manifest = JSON.parse(
+        await readFile(join(REAL_SKIN_DIRECTORY, "real-skins.json"), "utf8"),
+      ) as RealSkinManifest;
+      const entries = new Map(manifest.skins.map((entry) => [entry.id, entry]));
+      const parts = new Map<BodyPart, Awaited<ReturnType<typeof exportBodyPart>>>();
+      for (const [bodyPart, sourceId] of Object.entries(manifest.mix.recipe) as [
+        BodyPart,
+        string,
+      ][]) {
+        const fixture = entries.get(sourceId)!;
+        parts.set(
+          bodyPart,
+          await exportBodyPart(
+            store,
+            bodyPart,
+            fixture.file,
+            await readFile(join(REAL_SKIN_DIRECTORY, fixture.file)),
+          ),
+        );
+      }
+      expect(new Set([...parts.values()].map((part) => part.sourceProjectId))).toHaveLength(
+        6,
+      );
+
+      const base = await store.importProject({
+        name: "Transparent Slim composition base",
+        armType: "slim",
+        skinPng: encodeSkinPng(createRgbaImage(64, 64)),
+      });
+      const created = await store.createComposition({
+        baseRevisionId: base.revision.id,
+        name: "六皮肤 Slim 混搭",
+      });
+      let detail = created;
+      for (const bodyPart of Object.keys(manifest.mix.recipe) as BodyPart[]) {
+        detail = await store.addCompositionPart(created.composition.id, {
+          partId: parts.get(bodyPart)!.id,
+        });
+      }
+      expect(detail.report).toMatchObject({
+        targetArmType: "slim",
+        layerCount: 6,
+        hardConflictCount: 0,
+        modelConflictCount: 0,
+        unknownConflictCount: 0,
+        unresolvedConflictCount: 0,
+        committable: true,
+      });
+
+      const expected = decodeSkinPng(
+        await readFile(join(REAL_SKIN_DIRECTORY, manifest.mix.file)),
+      );
+      expect(
+        decodeSkinPng(
+          await store.readCompositionPreviewPng(created.composition.id),
+        ).data,
+      ).toEqual(expected.data);
+
+      const committed = await store.commitComposition(created.composition.id);
+      expect(
+        decodeSkinPng(await store.readRevisionSkinPng(committed.revision.id)).data,
+      ).toEqual(expected.data);
+      const state = await store.readRevisionSemanticState(committed.revision.id);
+      expect(state.document.source.armType).toBe("slim");
+      expect(state.document.components).toHaveLength(6);
+      expect(state.document.unknown.pixelCount).toBe(0);
+      expect(await store.readRevisionOperation(committed.revision.id)).toMatchObject({
+        type: "compose",
+        inputRevisionId: base.revision.id,
+        affectedComponents: expect.arrayContaining([
+          expect.stringMatching(/^composed\./),
+        ]),
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("creates new revert and branch nodes without mutating historical snapshots", async () => {
     const { directory, store } = await createStore();
 
@@ -561,6 +718,71 @@ describe("RevisionStore", () => {
     }
   });
 });
+
+interface RealSkinManifest {
+  readonly skins: readonly { readonly id: string; readonly file: string }[];
+  readonly mix: {
+    readonly file: string;
+    readonly recipe: Readonly<Record<BodyPart, string>>;
+  };
+}
+
+async function exportBodyPart(
+  store: RevisionStore,
+  bodyPart: BodyPart,
+  fileName: string,
+  skinPng: Uint8Array,
+) {
+  const imported = await store.importProject({
+    name: `${bodyPart} source`,
+    fileName,
+    skinPng,
+  });
+  const image = decodeSkinPng(skinPng);
+  const layout = getSkinLayout("slim");
+  const pixelIds: number[] = [];
+  for (const key of layout.surfaceOrder.filter((surface) =>
+    surface.startsWith(`${bodyPart}.`),
+  )) {
+    const rect = layout.surfaces[key].atlasRect;
+    for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+      for (let x = rect.x; x < rect.x + rect.width; x += 1) {
+        const pixelId = y * 64 + x;
+        if (image.data[pixelId * 4 + 3] !== 0) pixelIds.push(pixelId);
+      }
+    }
+  }
+  const componentId = `fixture.${bodyPart.toLowerCase()}`;
+  const segmented = await store.applyManualOperation(imported.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: componentId,
+        displayName: `${bodyPart} / ${fileName}`,
+        category: categoryForBodyPart(bodyPart),
+      },
+      spans: pixelIdsToSpans(pixelIds, layout),
+    },
+  });
+  return await store.exportPart(segmented.revision.id, componentId, {
+    name: `${bodyPart} / ${fileName}`,
+  });
+}
+
+function categoryForBodyPart(bodyPart: BodyPart) {
+  switch (bodyPart) {
+    case "head":
+      return "head_accessory" as const;
+    case "torso":
+      return "one_piece_clothing" as const;
+    case "leftArm":
+    case "rightArm":
+      return "sleeve" as const;
+    case "leftLeg":
+    case "rightLeg":
+      return "legwear" as const;
+  }
+}
 
 async function createStore(): Promise<{
   readonly directory: string;

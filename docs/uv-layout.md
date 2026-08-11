@@ -86,4 +86,4 @@ The real fixture filenames and SHA-256 digests are pinned in `tests/fixtures/ski
 | Right leg | A6 |
 | Left leg | A2 |
 
-The generator starts from a transparent 64×64 image, copies both Base and Outer surfaces for each body part, and clears all Slim marker regions. Tests compare every mixed surface with its declared source. This is a fixture-generation proof, not the conflict-aware interactive compositor planned for M6.
+The generator starts from a transparent 64×64 image, copies both Base and Outer surfaces for each body part, and clears all Slim marker regions. Tests compare every mixed surface with its declared source. M6 additionally persists the same six groups as real parts and requires the production compositor to reproduce this fixture pixel for pixel; see [`composition-workflow.md`](composition-workflow.md).

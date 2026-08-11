@@ -28,10 +28,14 @@ import {
   decodeMinecraftSkinFile,
 } from "./lib/skinFile";
 import {
+  addCompositionPart,
   branchRevision,
   applySemanticOperation,
   cancelAiJob,
+  commitComposition as commitCompositionProject,
   commitRevisionPart,
+  compositionPreviewUrl,
+  createComposition,
   createProject,
   exportRevisionPart,
   getProject,
@@ -39,21 +43,27 @@ import {
   listAiJobs,
   listAiProviders,
   listBranches,
+  listCompositions,
   listParts,
   listProjects,
   listRevisions,
   loadAiJobDetail,
+  loadComposition,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partPreviewUrl,
   previewRevisionPart,
   retryAiJob,
+  removeCompositionLayer,
+  reorderCompositionLayers,
+  resolveCompositionConflicts,
   revertRevision,
   startAiAnalysis,
   type ApiAiJobDetail,
   type ApiAiJobStatus,
   type ApiAiAnalysisOptions,
   type ApiBranch,
+  type ApiCompositionDetail,
   type ApiProject,
   type ApiPart,
   type ApiPartPreview,
@@ -221,6 +231,11 @@ export function App() {
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
+  const [compositionDetail, setCompositionDetail] =
+    useState<ApiCompositionDetail | null>(null);
+  const [compositionName, setCompositionName] = useState("Slim 真实皮肤混搭");
+  const [compositionBusy, setCompositionBusy] = useState(false);
+  const [compositionError, setCompositionError] = useState<string | null>(null);
   const [aiProviders, setAiProviders] = useState<readonly string[]>([]);
   const [aiProvider, setAiProvider] = useState("codex-exec");
   const [aiModel, setAiModel] = useState("codex-config-default");
@@ -532,6 +547,41 @@ export function App() {
   }, [selectedRevisionId]);
 
   useEffect(() => {
+    if (!selectedRevisionId) {
+      setCompositionDetail(null);
+      setCompositionError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setCompositionError(null);
+    void listCompositions(selectedRevisionId)
+      .then(async (compositions) => {
+        const latest =
+          compositions.findLast((composition) => composition.status === "draft") ??
+          compositions.at(-1);
+        return latest ? loadComposition(latest.id) : null;
+      })
+      .then((detail) => {
+        if (!cancelled) {
+          setCompositionDetail(detail);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setCompositionDetail(null);
+          setCompositionError(
+            `混搭工程读取失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRevisionId]);
+
+  useEffect(() => {
     const job = aiJobDetail?.job;
     if (!job || terminalAiStatuses.has(job.status)) {
       return;
@@ -657,6 +707,20 @@ export function App() {
     (component) => component.instanceId === activeComponentId,
   );
   const selectedPart = partLibrary.find((part) => part.id === selectedPartId);
+  const composition = compositionDetail?.composition ?? null;
+  const compositionReport = compositionDetail?.report ?? null;
+  const compositionDraft = composition?.status === "draft";
+  const partAlreadyLayered = Boolean(
+    selectedPart &&
+      compositionDetail?.layers.some((layer) => layer.partId === selectedPart.id),
+  );
+  const unresolvedCompositionConflicts =
+    compositionReport?.conflicts.filter(
+      (conflict) => conflict.blocking && !conflict.resolved,
+    ) ?? [];
+  const compositionLayerNames = new Map(
+    compositionDetail?.layers.map((layer) => [layer.id, layer.part.name]) ?? [],
+  );
   const canEditSemantic = Boolean(
     selectedRevision?.isBranchHead && segmentation && activeSkin,
   );
@@ -1094,6 +1158,164 @@ export function App() {
     }
   };
 
+  const updateComposition = async (
+    operation: () => Promise<ApiCompositionDetail>,
+    pendingNotice: string,
+    successNotice: (detail: ApiCompositionDetail) => string,
+  ) => {
+    setCompositionBusy(true);
+    setCompositionError(null);
+    setNotice(pendingNotice);
+    try {
+      const detail = await operation();
+      setCompositionDetail(detail);
+      setNotice(successNotice(detail));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompositionError(message);
+      setNotice(`混搭操作失败：${message}`);
+    } finally {
+      setCompositionBusy(false);
+    }
+  };
+
+  const createNewComposition = async () => {
+    if (!selectedRevision?.isBranchHead) {
+      return;
+    }
+    await updateComposition(
+      () =>
+        createComposition(
+          selectedRevision.id,
+          compositionName.trim() || undefined,
+        ),
+      `正在基于 ${selectedRevision.branchName} #${selectedRevision.sequence} 创建混搭工程`,
+      (detail) =>
+        `已创建 ${detail.composition.name} · ${armLabels[detail.composition.armType]} · 等待添加图层`,
+    );
+  };
+
+  const addSelectedPartToComposition = async () => {
+    if (!composition || !selectedPart || !compositionDraft) {
+      return;
+    }
+    await updateComposition(
+      () => addCompositionPart(composition.id, selectedPart.id),
+      `正在添加部件 ${selectedPart.name}`,
+      (detail) =>
+        `已添加 ${selectedPart.name} · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
+    );
+  };
+
+  const moveCompositionLayer = async (layerId: string, delta: -1 | 1) => {
+    if (!composition || !compositionDetail || !compositionDraft) {
+      return;
+    }
+    const layerIds = compositionDetail.layers.map((layer) => layer.id);
+    const sourceIndex = layerIds.indexOf(layerId);
+    const targetIndex = sourceIndex + delta;
+    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= layerIds.length) {
+      return;
+    }
+    [layerIds[sourceIndex], layerIds[targetIndex]] = [
+      layerIds[targetIndex]!,
+      layerIds[sourceIndex]!,
+    ];
+    await updateComposition(
+      () => reorderCompositionLayers(composition.id, layerIds),
+      "正在调整图层覆盖顺序",
+      (detail) =>
+        `图层顺序已更新 · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
+    );
+  };
+
+  const deleteCompositionLayer = async (layerId: string) => {
+    if (!composition || !compositionDraft) {
+      return;
+    }
+    await updateComposition(
+      () => removeCompositionLayer(composition.id, layerId),
+      "正在移除混搭图层",
+      (detail) =>
+        `图层已移除 · 当前 ${detail.layers.length} 个可复用部件`,
+    );
+  };
+
+  const resolveAllCompositionConflicts = async () => {
+    if (!composition || !compositionDraft) {
+      return;
+    }
+    await updateComposition(
+      () =>
+        resolveCompositionConflicts(composition.id, {
+          strategy: "layer_order",
+        }),
+      "正在确认由上层图层覆盖冲突像素",
+      (detail) =>
+        detail.report.committable
+          ? "图层顺序已明确确认，可以创建 Compose Revision"
+          : `仍有 ${detail.report.unresolvedConflictCount} 项模型或语义边界冲突`,
+    );
+  };
+
+  const clearCompositionResolutions = async () => {
+    if (!composition || !compositionDraft) {
+      return;
+    }
+    await updateComposition(
+      () =>
+        resolveCompositionConflicts(composition.id, { strategy: "clear" }),
+      "正在清除冲突确认",
+      (detail) =>
+        `冲突确认已清除 · ${detail.report.unresolvedConflictCount} 项等待处理`,
+    );
+  };
+
+  const chooseCompositionConflictWinner = async (
+    conflictId: string,
+    winnerLayerId: string,
+  ) => {
+    if (!composition || !compositionDraft) {
+      return;
+    }
+    await updateComposition(
+      () =>
+        resolveCompositionConflicts(composition.id, {
+          strategy: "winner",
+          conflictId,
+          winnerLayerId,
+        }),
+      "正在保存逐像素胜出图层",
+      (detail) =>
+        `像素处理已保存 · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
+    );
+  };
+
+  const commitActiveComposition = async () => {
+    if (!composition || !compositionReport?.committable || !compositionDraft) {
+      return;
+    }
+    setCompositionBusy(true);
+    setCompositionError(null);
+    setNotice("正在校验混搭结果并创建不可变 Revision");
+    try {
+      const result = await commitCompositionProject(
+        composition.id,
+        `混搭提交：${composition.name}`,
+      );
+      await refreshHistory(result.project.id, result.revision.id);
+      setNotice(
+        `混搭已提交 · ${result.branch.name} #${result.revision.sequence} · ${result.report.appliedPixelCount} px`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompositionError(message);
+      setNotice(`混搭提交失败：${message}`);
+    } finally {
+      setCompositionBusy(false);
+    }
+  };
+
   const downloadActiveSkin = () => {
     if (!activeSkin) {
       return;
@@ -1120,17 +1342,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">AI-ASSISTED SEMANTIC STUDIO / M5</p>
+          <p className="eyebrow">VERSIONED SEMANTIC COMPOSITION STUDIO / M6</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            Codex 读取隔离分析包并提出语义分类；Schema 与像素校验通过后才创建不可变 Revision，低置信度区域保留给人工修正。
+            Codex 辅助识别真实皮肤的语义部件；多图层混搭会逐像素报告冲突，只有明确确认覆盖规则后才创建不可变 Revision。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M5 AI 辅助语义工作室">
-          <strong>M5</strong>
-          <span>AI REVIEW</span>
+        <div className="baseline-stamp" aria-label="M6 像素混搭工作室">
+          <strong>M6</strong>
+          <span>PIXEL MIX</span>
         </div>
       </header>
 
@@ -1917,10 +2139,362 @@ export function App() {
         </section>
       </section>
 
+      <section
+        className="composition-studio"
+        aria-label="多部件混搭与冲突处理"
+        data-status={composition?.status ?? "idle"}
+      >
+        <header className="composition-heading">
+          <div className="panel-heading">
+            <span>07</span>
+            <div>
+              <p>PIXEL-SAFE COMPOSER</p>
+              <h2>多皮肤部件混搭</h2>
+            </div>
+          </div>
+          <p>
+            <strong>{composition ? composition.name : "NO DRAFT"}</strong>
+            <span>
+              {composition
+                ? `${armLabels[composition.armType]} · ${composition.status.toUpperCase()}`
+                : "选择 Branch HEAD 后创建"}
+            </span>
+          </p>
+        </header>
+
+        <div className="composition-grid">
+          <section className="composition-setup">
+            <div className="composition-section-title">
+              <span>SETUP</span>
+              <h3>基础与部件</h3>
+            </div>
+            <label className="composition-name-field">
+              <span>混搭工程名称</span>
+              <input
+                value={compositionName}
+                maxLength={120}
+                disabled={compositionBusy}
+                onChange={(event) => setCompositionName(event.target.value)}
+              />
+            </label>
+            <button
+              className="composition-create-button"
+              type="button"
+              disabled={!selectedRevision?.isBranchHead || compositionBusy}
+              onClick={() => void createNewComposition()}
+            >
+              {compositionDraft ? "另建混搭草稿" : "创建混搭工程"}
+            </button>
+
+            <dl className="composition-base-facts">
+              <div>
+                <dt>BASE</dt>
+                <dd>
+                  {selectedRevision
+                    ? `${selectedRevision.branchName} #${selectedRevision.sequence}`
+                    : "未选择 Revision"}
+                </dd>
+              </div>
+              <div>
+                <dt>MODEL</dt>
+                <dd>{composition ? armLabels[composition.armType] : "Alex / Slim 默认"}</dd>
+              </div>
+            </dl>
+
+            <div className="composition-part-pick" data-empty={!selectedPart}>
+              {selectedPart ? (
+                <>
+                  <img src={partPreviewUrl(selectedPart.id)} alt="" />
+                  <div>
+                    <strong>{selectedPart.name}</strong>
+                    <span>
+                      {SEMANTIC_CATEGORY_LABELS[selectedPart.category]} · {selectedPart.manifest.compatibility.armTypes.join("/")}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={
+                      !compositionDraft ||
+                      compositionBusy ||
+                      partAlreadyLayered
+                    }
+                    onClick={() => void addSelectedPartToComposition()}
+                  >
+                    {partAlreadyLayered ? "已在图层中" : "加入混搭"}
+                  </button>
+                </>
+              ) : (
+                <p>在上方部件库选择一个已识别并保存的语义部件。</p>
+              )}
+            </div>
+            {compositionError && (
+              <p className="composition-error" role="alert">
+                {compositionError}
+              </p>
+            )}
+          </section>
+
+          <section className="composition-layers-panel">
+            <div className="composition-section-title">
+              <span>LAYER STACK</span>
+              <h3>覆盖优先级</h3>
+            </div>
+            <p className="composition-layer-guide">
+              顶部图层优先写入；重新排序会清除已有冲突确认。
+            </p>
+            <div className="composition-layers" data-empty={!compositionDetail?.layers.length}>
+              {compositionDetail?.layers.length ? (
+                compositionDetail.layers.toReversed().map((layer) => (
+                  <article key={layer.id} className="composition-layer">
+                    <span>{layer.position === compositionDetail.layers.length - 1 ? "TOP" : `L${layer.position + 1}`}</span>
+                    <img src={partPreviewUrl(layer.part.id)} alt="" />
+                    <div>
+                      <strong>{layer.part.name}</strong>
+                      <small>{SEMANTIC_CATEGORY_LABELS[layer.part.category]}</small>
+                    </div>
+                    <div className="composition-layer-actions">
+                      <button
+                        type="button"
+                        aria-label={`上移 ${layer.part.name}`}
+                        title="上移，提高覆盖优先级"
+                        disabled={
+                          !compositionDraft ||
+                          compositionBusy ||
+                          layer.position === compositionDetail.layers.length - 1
+                        }
+                        onClick={() => void moveCompositionLayer(layer.id, 1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`下移 ${layer.part.name}`}
+                        title="下移，降低覆盖优先级"
+                        disabled={
+                          !compositionDraft ||
+                          compositionBusy ||
+                          layer.position === 0
+                        }
+                        onClick={() => void moveCompositionLayer(layer.id, -1)}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`移除 ${layer.part.name}`}
+                        title="移除图层"
+                        disabled={!compositionDraft || compositionBusy}
+                        onClick={() => void deleteCompositionLayer(layer.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p>混搭工程创建后，从部件库逐个加入头发、衣服、手臂或腿部组件。</p>
+              )}
+              {composition && (
+                <article className="composition-layer composition-base-layer">
+                  <span>BASE</span>
+                  <div aria-hidden="true">64</div>
+                  <div>
+                    <strong>基础 Revision</strong>
+                    <small>固定底层，不可移除</small>
+                  </div>
+                </article>
+              )}
+            </div>
+          </section>
+
+          <section className="composition-preview-panel">
+            <div className="composition-section-title">
+              <span>LIVE OUTPUT</span>
+              <h3>64×64 结果预览</h3>
+            </div>
+            <div className="composition-preview-frame" data-ready={Boolean(composition)}>
+              {composition ? (
+                <img
+                  src={compositionPreviewUrl(composition.id, composition.updatedAt)}
+                  alt={`${composition.name} 混搭预览`}
+                />
+              ) : (
+                <p>PREVIEW<br />WAITING</p>
+              )}
+            </div>
+            <dl className="composition-metrics">
+              <div>
+                <dt>LAYERS</dt>
+                <dd>{compositionReport?.layerCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>WRITE</dt>
+                <dd>{compositionReport?.writePixelCount ?? 0}<small> px</small></dd>
+              </div>
+              <div>
+                <dt>HARD</dt>
+                <dd>{compositionReport?.hardConflictCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>OPEN</dt>
+                <dd>{compositionReport?.unresolvedConflictCount ?? 0}</dd>
+              </div>
+            </dl>
+            <div className="composition-output-actions">
+              {composition && (
+                <a
+                  href={compositionPreviewUrl(composition.id, composition.updatedAt)}
+                  download={`${composition.name}.png`}
+                >
+                  导出预览 PNG
+                </a>
+              )}
+              <button
+                type="button"
+                disabled={
+                  !compositionDraft ||
+                  !compositionReport?.committable ||
+                  compositionBusy
+                }
+                onClick={() => void commitActiveComposition()}
+              >
+                {composition?.status === "committed"
+                  ? "已创建 Revision"
+                  : compositionReport?.committable
+                    ? "创建 Compose Revision"
+                    : "解决冲突后提交"}
+              </button>
+            </div>
+            <p className="composition-output-note">
+              预览始终按当前顶部图层渲染；导出不等于提交，Revision 仍要求显式解决全部阻塞冲突。
+            </p>
+          </section>
+
+          <section
+            className="composition-conflicts-panel"
+            data-ready={compositionReport?.committable ?? false}
+          >
+            <div className="composition-conflict-heading">
+              <div className="composition-section-title">
+                <span>CONFLICT MATRIX</span>
+                <h3>逐像素裁决</h3>
+              </div>
+              <p>
+                <strong>{compositionReport?.unresolvedConflictCount ?? 0}</strong>
+                <span>UNRESOLVED</span>
+              </p>
+            </div>
+            <div className="composition-resolution-actions">
+              <button
+                type="button"
+                disabled={
+                  !compositionDraft ||
+                  !compositionReport?.hardConflictCount ||
+                  compositionBusy
+                }
+                onClick={() => void resolveAllCompositionConflicts()}
+              >
+                确认顶部图层优先
+              </button>
+              <button
+                type="button"
+                disabled={
+                  !compositionDraft ||
+                  compositionBusy ||
+                  (composition?.resolutionMode === "unresolved" &&
+                    Object.keys(composition.conflictWinners).length === 0)
+                }
+                onClick={() => void clearCompositionResolutions()}
+              >
+                清除确认
+              </button>
+            </div>
+
+            <div className="composition-conflict-list" data-empty={unresolvedCompositionConflicts.length === 0}>
+              {unresolvedCompositionConflicts.length === 0 ? (
+                <p>
+                  {compositionReport?.committable
+                    ? "全部阻塞冲突已解决，可以提交。"
+                    : compositionReport?.layerCount
+                      ? "没有待处理的像素冲突。"
+                      : "添加图层后显示模型、语义边界和像素覆盖冲突。"}
+                </p>
+              ) : (
+                unresolvedCompositionConflicts.slice(0, 8).map((conflict) => {
+                  if (conflict.type === "hard_conflict") {
+                    return (
+                      <article key={conflict.id} className="composition-pixel-conflict" data-resolved={conflict.resolved}>
+                        <header>
+                          <strong>PX {conflict.x},{conflict.y}</strong>
+                          <span>{conflict.resolved ? "RESOLVED" : "CHOOSE WINNER"}</span>
+                        </header>
+                        <div>
+                          {conflict.writes.toReversed().map((write) => {
+                            const layerName =
+                              write.layerId === "base"
+                                ? "基础皮肤"
+                                : compositionLayerNames.get(write.layerId) ?? shortIdentifier(write.layerId);
+                            return (
+                              <button
+                                key={write.layerId}
+                                type="button"
+                                aria-pressed={conflict.resolved && conflict.winnerLayerId === write.layerId}
+                                disabled={!compositionDraft || compositionBusy}
+                                onClick={() => void chooseCompositionConflictWinner(conflict.id, write.layerId)}
+                              >
+                                <span
+                                  style={{
+                                    backgroundColor: `rgba(${write.rgba[0]}, ${write.rgba[1]}, ${write.rgba[2]}, ${write.rgba[3] / 255})`,
+                                  }}
+                                  aria-hidden="true"
+                                />
+                                <strong>{layerName}</strong>
+                                <small>{write.rgba.join("/")}</small>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </article>
+                    );
+                  }
+
+                  if (conflict.type === "model_conflict") {
+                    return (
+                      <article key={conflict.id} className="composition-structural-conflict">
+                        <strong>MODEL / {compositionLayerNames.get(conflict.layerId) ?? shortIdentifier(conflict.layerId)}</strong>
+                        <p>
+                          目标为 {armLabels[conflict.targetArmType]}，部件仅支持 {conflict.supportedArmTypes.map((armType) => armLabels[armType]).join(" / ")}。
+                        </p>
+                      </article>
+                    );
+                  }
+
+                  if (conflict.type === "unknown_conflict") {
+                    return (
+                      <article key={conflict.id} className="composition-structural-conflict">
+                        <strong>SEMANTIC BOUNDS / {compositionLayerNames.get(conflict.layerId) ?? shortIdentifier(conflict.layerId)}</strong>
+                        <p>{conflict.pixelIds.length} 个写入像素超出部件声明的 UV surface，必须修正部件。</p>
+                      </article>
+                    );
+                  }
+
+                  return null;
+                })
+              )}
+            </div>
+            {unresolvedCompositionConflicts.length > 8 && (
+              <p className="composition-conflict-overflow">
+                仅显示前 8 项；可确认统一图层顺序，或逐项处理后继续显示下一批。
+              </p>
+            )}
+          </section>
+        </div>
+      </section>
+
       <footer className="status-bar" role="status" aria-live="polite">
         <span>STATUS</span>
         <p>{notice}</p>
-        <code>immutable edits · 64×64 parts · {layout.id}</code>
+        <code>immutable edits · pixel composition · {layout.id}</code>
       </footer>
     </main>
   );

@@ -98,6 +98,98 @@ export interface ApiPartCommit extends ApiMutationResult {
   readonly report: PartApplicationReport;
 }
 
+export interface ApiCompositionPixelWrite {
+  readonly layerId: string;
+  readonly partId: string | null;
+  readonly position: number;
+  readonly rgba: readonly [number, number, number, number];
+}
+
+export type ApiCompositionConflict =
+  | {
+      readonly id: string;
+      readonly type: "hard_conflict" | "same_color_overlap";
+      readonly blocking: boolean;
+      readonly resolved: boolean;
+      readonly pixelId: number;
+      readonly x: number;
+      readonly y: number;
+      readonly writes: readonly ApiCompositionPixelWrite[];
+      readonly defaultWinnerLayerId: string;
+      readonly winnerLayerId: string;
+    }
+  | {
+      readonly id: string;
+      readonly type: "model_conflict";
+      readonly blocking: true;
+      readonly resolved: false;
+      readonly layerId: string;
+      readonly partId: string;
+      readonly targetArmType: ArmType;
+      readonly supportedArmTypes: readonly ArmType[];
+    }
+  | {
+      readonly id: string;
+      readonly type: "unknown_conflict";
+      readonly blocking: true;
+      readonly resolved: false;
+      readonly layerId: string;
+      readonly partId: string;
+      readonly pixelIds: readonly number[];
+    };
+
+export interface ApiCompositionReport {
+  readonly targetArmType: ArmType;
+  readonly layerCount: number;
+  readonly writePixelCount: number;
+  readonly appliedPixelCount: number;
+  readonly hardConflictCount: number;
+  readonly sameColorOverlapCount: number;
+  readonly layerConflictCount: number;
+  readonly modelConflictCount: number;
+  readonly unknownConflictCount: number;
+  readonly unresolvedConflictCount: number;
+  readonly committable: boolean;
+  readonly conflicts: readonly ApiCompositionConflict[];
+}
+
+export interface ApiCompositionProject {
+  readonly id: string;
+  readonly projectId: string;
+  readonly baseRevisionId: string;
+  readonly branchId: string;
+  readonly name: string;
+  readonly armType: ArmType;
+  readonly status: "draft" | "committed";
+  readonly resolutionMode: "unresolved" | "layer_order";
+  readonly conflictWinners: Readonly<Record<string, string>>;
+  readonly report: ApiCompositionReport;
+  readonly resultRevisionId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly committedAt: string | null;
+}
+
+export interface ApiCompositionLayer {
+  readonly id: string;
+  readonly compositionId: string;
+  readonly partId: string;
+  readonly position: number;
+  readonly part: ApiPart;
+  readonly createdAt: string;
+}
+
+export interface ApiCompositionDetail {
+  readonly composition: ApiCompositionProject;
+  readonly layers: readonly ApiCompositionLayer[];
+  readonly report: ApiCompositionReport;
+}
+
+export interface ApiCompositionCommit extends ApiMutationResult {
+  readonly composition: ApiCompositionProject;
+  readonly report: ApiCompositionReport;
+}
+
 export type ApiAiJobStatus =
   | "queued"
   | "preparing"
@@ -453,6 +545,139 @@ export async function commitRevisionPart(
 
 export function partPreviewUrl(partId: string): string {
   return `/api/parts/${encodeURIComponent(partId)}/preview.png`;
+}
+
+export async function listCompositions(
+  revisionId?: string,
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiCompositionProject[]> {
+  const query = revisionId
+    ? `?revisionId=${encodeURIComponent(revisionId)}`
+    : "";
+  const body = await requestJson<{
+    compositions: readonly ApiCompositionProject[];
+  }>(`/api/compositions${query}`, undefined, fetcher);
+  return body.compositions;
+}
+
+export function createComposition(
+  baseRevisionId: string,
+  name?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    "/api/compositions",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseRevisionId, ...(name ? { name } : {}) }),
+    },
+    fetcher,
+  );
+}
+
+export function loadComposition(
+  compositionId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}`,
+    undefined,
+    fetcher,
+  );
+}
+
+export function addCompositionPart(
+  compositionId: string,
+  partId: string,
+  position?: number,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/apply-part`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ partId, ...(position === undefined ? {} : { position }) }),
+    },
+    fetcher,
+  );
+}
+
+export function reorderCompositionLayers(
+  compositionId: string,
+  layerIds: readonly string[],
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/reorder`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ layerIds }),
+    },
+    fetcher,
+  );
+}
+
+export function removeCompositionLayer(
+  compositionId: string,
+  layerId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/layers/${encodeURIComponent(layerId)}`,
+    { method: "DELETE" },
+    fetcher,
+  );
+}
+
+export function resolveCompositionConflicts(
+  compositionId: string,
+  resolution:
+    | { readonly strategy: "layer_order" | "clear" }
+    | {
+        readonly strategy: "winner";
+        readonly conflictId: string;
+        readonly winnerLayerId: string;
+      },
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/resolve-conflict`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(resolution),
+    },
+    fetcher,
+  );
+}
+
+export function commitComposition(
+  compositionId: string,
+  summary?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionCommit> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/commit`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(summary ? { summary } : {}),
+    },
+    fetcher,
+  );
+}
+
+export function compositionPreviewUrl(
+  compositionId: string,
+  updatedAt?: string,
+): string {
+  const cacheBuster = updatedAt
+    ? `?v=${encodeURIComponent(updatedAt)}`
+    : "";
+  return `/api/compositions/${encodeURIComponent(compositionId)}/preview.png${cacheBuster}`;
 }
 
 export async function listAiProviders(

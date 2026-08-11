@@ -1,5 +1,5 @@
 {
-  "name": "@mc-skin-split/skin-revision",
+  "name": "@mc-skin-split/skin-compositor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,12 +12,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mc-skin-split/skin-compositor": "workspace:*",
-    "@mc-skin-split/skin-core": "workspace:*",
-    "better-sqlite3": "13.0.3"
+    "@mc-skin-split/skin-core": "workspace:*"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "9.6.0",
     "@types/node": "24.13.3",
     "typescript": "7.0.2",
     "vitest": "4.1.10"

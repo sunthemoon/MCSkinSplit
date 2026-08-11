@@ -318,6 +318,144 @@ describe("revision API", () => {
     });
   });
 
+  it("creates, resolves, previews, and commits a composition project", async () => {
+    const { app } = await createApi();
+    const sourceProject = await createProject(app, "Composer source");
+    const sourceImport = await importSkin(app, sourceProject.projectId);
+    const edited = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceImport.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "hair.compose",
+          displayName: "混搭头发",
+          category: "hair",
+        },
+        spans: [
+          { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+        ],
+      },
+    });
+    const sourceRevisionId = edited.json<MutationResponse>().revision.id;
+    const exported = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/components/hair.compose/export-part`,
+      payload: { name: "Composition hair" },
+    });
+    const partId = exported.json<{ part: { id: string } }>().part.id;
+
+    const targetProject = await createProject(app, "Composer target");
+    const target = await importSkinFromPath(
+      app,
+      targetProject.projectId,
+      TARGET_SKIN_PATH,
+    );
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/compositions",
+      payload: {
+        baseRevisionId: target.revisionId,
+        name: "API composition",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const compositionId = created.json<{
+      composition: { id: string; status: string; armType: string };
+    }>().composition.id;
+    expect(created.json()).toMatchObject({
+      composition: { status: "draft", armType: "slim" },
+      layers: [],
+      report: { layerCount: 0, committable: false },
+    });
+
+    const added = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/apply-part`,
+      payload: { partId },
+    });
+    expect(added.statusCode).toBe(201);
+    expect(added.json()).toMatchObject({
+      layers: [{ partId, position: 0 }],
+      report: {
+        layerCount: 1,
+        hardConflictCount: expect.any(Number),
+        committable: false,
+      },
+    });
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/compositions?revisionId=${target.revisionId}`,
+    });
+    expect(listed.json()).toMatchObject({
+      compositions: [{ id: compositionId, status: "draft" }],
+    });
+    const preview = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}/preview.png`,
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.headers["cache-control"]).toContain("no-store");
+    expect(decodeSkinPng(preview.rawPayload)).toMatchObject({
+      width: 64,
+      height: 64,
+    });
+
+    const unresolvedCommit = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/commit`,
+      payload: {},
+    });
+    expect(unresolvedCommit.statusCode).toBe(409);
+
+    const invalidResolution = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/resolve-conflict`,
+      payload: { strategy: "clear", conflictId: "pixel:1" },
+    });
+    expect(invalidResolution.statusCode).toBe(400);
+    expect(invalidResolution.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const resolved = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/resolve-conflict`,
+      payload: { strategy: "layer_order" },
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({
+      composition: { resolutionMode: "layer_order" },
+      report: { unresolvedConflictCount: 0, committable: true },
+    });
+
+    const committed = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/commit`,
+      payload: { summary: "API 提交混搭" },
+    });
+    expect(committed.statusCode).toBe(201);
+    expect(committed.json()).toMatchObject({
+      revision: {
+        parentRevisionId: target.revisionId,
+        operationType: "compose",
+        summary: "API 提交混搭",
+      },
+      composition: { status: "committed" },
+    });
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/compositions",
+      payload: { baseRevisionId: target.revisionId, unexpected: true },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+  });
+
   it("returns stable client errors for bad PNG data and duplicate imports", async () => {
     const { app } = await createApi();
     const project = await createProject(app, "Error handling");

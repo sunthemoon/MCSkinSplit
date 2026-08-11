@@ -149,6 +149,22 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
 
+  packages/skin-compositor:
+    dependencies:
+      '@mc-skin-split/skin-core':
+        specifier: workspace:*
+        version: link:../skin-core
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
   packages/skin-core:
     dependencies:
       buffer:
@@ -176,6 +192,9 @@ importers:
 
   packages/skin-revision:
     dependencies:
+      '@mc-skin-split/skin-compositor':
+        specifier: workspace:*
+        version: link:../skin-compositor
       '@mc-skin-split/skin-core':
         specifier: workspace:*
         version: link:../skin-core

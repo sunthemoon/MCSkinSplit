@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  addCompositionPart,
   applySemanticOperation,
+  commitComposition,
   commitRevisionPart,
+  compositionPreviewUrl,
+  createComposition,
   exportRevisionPart,
   importProjectSkin,
   listAiJobs,
   loadRevisionSegmentation,
   loadRevisionSkin,
   retryAiJob,
+  removeCompositionLayer,
+  reorderCompositionLayers,
+  resolveCompositionConflicts,
   RevisionApiError,
   startAiAnalysis,
 } from "./revisionApi";
@@ -157,6 +164,63 @@ describe("revisionApi", () => {
       partId: "part_1",
       strategy: "use_part",
     });
+  });
+
+  it("serializes the complete composition workflow with encoded ids", async () => {
+    const detail = {
+      composition: { id: "composition_1", status: "draft" },
+      layers: [],
+      report: { committable: false },
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(detail, 201))
+      .mockResolvedValueOnce(jsonResponse(detail, 201))
+      .mockResolvedValueOnce(jsonResponse(detail, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 200))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { ...detail, revision: { id: "rev_2", operationType: "compose" } },
+          201,
+        ),
+      );
+
+    await createComposition("rev / 1", "Real mix", fetcher);
+    await addCompositionPart("composition / 1", "part / 1", 0, fetcher);
+    await reorderCompositionLayers(
+      "composition / 1",
+      ["layer / 2", "layer / 1"],
+      fetcher,
+    );
+    await resolveCompositionConflicts(
+      "composition / 1",
+      { strategy: "layer_order" },
+      fetcher,
+    );
+    await removeCompositionLayer("composition / 1", "layer / 2", fetcher);
+    await commitComposition("composition / 1", "Commit mix", fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/compositions",
+      "/api/compositions/composition%20%2F%201/apply-part",
+      "/api/compositions/composition%20%2F%201/reorder",
+      "/api/compositions/composition%20%2F%201/resolve-conflict",
+      "/api/compositions/composition%20%2F%201/layers/layer%20%2F%202",
+      "/api/compositions/composition%20%2F%201/commit",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      baseRevisionId: "rev / 1",
+      name: "Real mix",
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      partId: "part / 1",
+      position: 0,
+    });
+    expect(fetcher.mock.calls[4]?.[1]?.method).toBe("DELETE");
+    expect(compositionPreviewUrl("composition / 1", "2026-08-11T00:00:00Z")).toBe(
+      "/api/compositions/composition%20%2F%201/preview.png?v=2026-08-11T00%3A00%3A00Z",
+    );
   });
 
   it("starts, lists, and retries AI jobs with explicit provider options", async () => {
