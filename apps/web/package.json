@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mc-skin-split/skin-core": "workspace:*",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "skinview3d": "3.4.2"

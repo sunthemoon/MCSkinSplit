@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "defaultArmType": "slim",
+  "skins": [
+    {
+      "id": "actual-01",
+      "label": "A1",
+      "file": "ab87de696cfca859.png",
+      "sha256": "9d6932ce88c8add7224ebd6e7fe338ca71eb630af0dee052d6621e746717d495",
+      "expectedArmType": "slim"
+    },
+    {
+      "id": "actual-02",
+      "label": "A2",
+      "file": "354359a2c2f33777.png",
+      "sha256": "b7c9317dd8fb14203985ebe8cb56ec324161705280da7cf2e5f41140c4754e81",
+      "expectedArmType": "slim"
+    },
+    {
+      "id": "actual-03",
+      "label": "A3",
+      "file": "bad5dea368e72b05.png",
+      "sha256": "ec7c211c64f67764b9f0d156139b11ba0d77be1c44361b35efb7e5d32ea008c3",
+      "expectedArmType": "slim"
+    },
+    {
+      "id": "actual-04",
+      "label": "A4",
+      "file": "bc1a12c777b45e7b.png",
+      "sha256": "983aa48f4bc58f5c977dc32cf83e2e3c7567f4fdfbf6d93dbcc6870fdba0d8e4",
+      "expectedArmType": "slim"
+    },
+    {
+      "id": "actual-05",
+      "label": "A5",
+      "file": "8d9ecb2e49f9d3df.png",
+      "sha256": "8c54bf781570386771b4657825f11ecdea21b18bf768d3a627ef8dde82634559",
+      "expectedArmType": "slim"
+    },
+    {
+      "id": "actual-06",
+      "label": "A6",
+      "file": "9058f3af3ffb104c.png",
+      "sha256": "009a92659847cd511498cf406ba2f7780ad7bd1d8f50a420bbfcf9550fca4117",
+      "expectedArmType": "slim"
+    }
+  ],
+  "mix": {
+    "id": "alex-mix-01",
+    "label": "MIX",
+    "file": "alex-mix-real.png",
+    "armType": "slim",
+    "recipe": {
+      "head": "actual-01",
+      "torso": "actual-04",
+      "rightArm": "actual-03",
+      "leftArm": "actual-05",
+      "rightLeg": "actual-06",
+      "leftLeg": "actual-02"
+    }
+  }
+}

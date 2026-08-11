@@ -1,14 +1,16 @@
 import { useEffect, useRef } from "react";
 import { SkinViewer, WalkingAnimation } from "skinview3d";
+import type { ArmType } from "@mc-skin-split/skin-core";
 
 export type PreviewState = "loading" | "ready" | "error";
 
 interface SkinPreviewProps {
+  armType: ArmType;
   skinUrl: string;
   onStateChange: (state: PreviewState, detail?: string) => void;
 }
 
-export function SkinPreview({ skinUrl, onStateChange }: SkinPreviewProps) {
+export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<SkinViewer | null>(null);
@@ -64,7 +66,7 @@ export function SkinPreview({ skinUrl, onStateChange }: SkinPreviewProps) {
     stateCallbackRef.current("loading");
 
     void viewer
-      .loadSkin(skinUrl)
+      .loadSkin(skinUrl, { model: armType === "wide" ? "default" : "slim" })
       .then(() => {
         if (!cancelled) {
           stateCallbackRef.current("ready");
@@ -80,7 +82,7 @@ export function SkinPreview({ skinUrl, onStateChange }: SkinPreviewProps) {
     return () => {
       cancelled = true;
     };
-  }, [skinUrl]);
+  }, [armType, skinUrl]);
 
   return (
     <div className="skin-stage" ref={stageRef}>

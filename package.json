@@ -10,9 +10,9 @@
   },
   "scripts": {
     "dev": "pnpm --filter @mc-skin-split/web dev",
-    "build": "pnpm --filter @mc-skin-split/web build",
-    "typecheck": "pnpm --filter @mc-skin-split/web typecheck",
-    "test": "pnpm --filter @mc-skin-split/web test",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
     "fixtures:generate": "node scripts/generate-fixtures.mjs",
     "fixtures:check": "node scripts/generate-fixtures.mjs --check",
     "verify": "pnpm fixtures:check && pnpm typecheck && pnpm test && pnpm build"

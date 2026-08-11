@@ -30,13 +30,25 @@ AI worker
 - The installed 3.4.2 API uses `viewer.animation = new WalkingAnimation()` and `viewer.autoRotate = true`.
 - The bundled fixture is created by a deterministic script and can be checked without rewriting it.
 
+## M1 decisions
+
+- `packages/skin-core` is framework-independent and has no React, WebGL, AI, database, or persistence dependency.
+- A decoded `RgbaImage` is the source of truth for pixel work. Blob URLs remain presentation adapters for `skinview3d`, not the pixel model.
+- Wide and Slim layouts are versioned JSON inputs validated by a JSON Schema in tests and expanded to 72 fixed surface rectangles at module load.
+- Canonical surfaces are outside-facing. Explicit orientation transforms normalize Atlas coordinates and make the inverse write deterministic.
+- Used UV pixels live in surface textures; every other Atlas byte lives in `unusedAtlasData`. The two stores are disjoint and together reconstruct the full image.
+- The PNG adapter normalizes supported PNG color formats to 8-bit RGBA. The contract preserves decoded RGBA, not original PNG container bytes or metadata.
+- The web adapter renders derived RGBA images into Canvas 2D with smoothing disabled. The core remains DOM-free.
+
+The detailed coordinate and inference contract is in [`uv-layout.md`](uv-layout.md).
+
 ## Planned package boundaries
 
 ```text
-apps/web                 UI and 2D/3D adapters
+apps/web                 UI and 2D/3D adapters (M0-M1)
 apps/api                 HTTP API and revision orchestration
 apps/ai-worker           isolated analysis jobs
-packages/skin-core       PNG, UV, pixels, masks, render helpers
+packages/skin-core       PNG, UV, pixels, and render helpers (M1)
 packages/skin-schema     JSON schemas and shared types
 packages/skin-revision   immutable snapshots and branching
 packages/skin-compositor part application and conflict detection

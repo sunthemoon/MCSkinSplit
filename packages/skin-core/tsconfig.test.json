@@ -2,11 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
-    "lib": ["ES2024", "DOM"],
+    "lib": ["ES2024"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "resolveJsonModule": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*.test.ts", "src/lib/skinFile.ts"]
+  "include": ["src", "tests"]
 }

@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcskinsplit.local/schemas/skin-layout.schema.json",
+  "title": "Minecraft 64x64 skin layout source",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "width", "height", "armType", "faceOrientations", "cuboids"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "width": { "const": 64 },
+    "height": { "const": 64 },
+    "armType": { "enum": ["wide", "slim"] },
+    "faceOrientations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["front", "back", "left", "right", "top", "bottom"],
+      "properties": {
+        "front": { "$ref": "#/$defs/orientation" },
+        "back": { "$ref": "#/$defs/orientation" },
+        "left": { "$ref": "#/$defs/orientation" },
+        "right": { "$ref": "#/$defs/orientation" },
+        "top": { "$ref": "#/$defs/orientation" },
+        "bottom": { "$ref": "#/$defs/orientation" }
+      }
+    },
+    "cuboids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head.base",
+        "head.outer",
+        "torso.base",
+        "torso.outer",
+        "rightArm.base",
+        "rightArm.outer",
+        "leftArm.base",
+        "leftArm.outer",
+        "rightLeg.base",
+        "rightLeg.outer",
+        "leftLeg.base",
+        "leftLeg.outer"
+      ],
+      "properties": {
+        "head.base": { "$ref": "#/$defs/cuboid" },
+        "head.outer": { "$ref": "#/$defs/cuboid" },
+        "torso.base": { "$ref": "#/$defs/cuboid" },
+        "torso.outer": { "$ref": "#/$defs/cuboid" },
+        "rightArm.base": { "$ref": "#/$defs/cuboid" },
+        "rightArm.outer": { "$ref": "#/$defs/cuboid" },
+        "leftArm.base": { "$ref": "#/$defs/cuboid" },
+        "leftArm.outer": { "$ref": "#/$defs/cuboid" },
+        "rightLeg.base": { "$ref": "#/$defs/cuboid" },
+        "rightLeg.outer": { "$ref": "#/$defs/cuboid" },
+        "leftLeg.base": { "$ref": "#/$defs/cuboid" },
+        "leftLeg.outer": { "$ref": "#/$defs/cuboid" }
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 63 }
+      }
+    },
+    "orientation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rotate", "flipX", "flipY"],
+      "properties": {
+        "rotate": { "enum": [0, 90, 180, 270] },
+        "flipX": { "type": "boolean" },
+        "flipY": { "type": "boolean" }
+      }
+    },
+    "cuboid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "width", "height", "depth"],
+      "properties": {
+        "origin": { "$ref": "#/$defs/point" },
+        "width": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "depth": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    }
+  }
+}

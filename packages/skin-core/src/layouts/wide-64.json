@@ -1,0 +1,28 @@
+{
+  "id": "wide-64",
+  "width": 64,
+  "height": 64,
+  "armType": "wide",
+  "faceOrientations": {
+    "front": { "rotate": 0, "flipX": false, "flipY": false },
+    "back": { "rotate": 0, "flipX": false, "flipY": false },
+    "left": { "rotate": 0, "flipX": false, "flipY": false },
+    "right": { "rotate": 0, "flipX": false, "flipY": false },
+    "top": { "rotate": 0, "flipX": false, "flipY": false },
+    "bottom": { "rotate": 0, "flipX": false, "flipY": true }
+  },
+  "cuboids": {
+    "head.base": { "origin": { "x": 0, "y": 0 }, "width": 8, "height": 8, "depth": 8 },
+    "head.outer": { "origin": { "x": 32, "y": 0 }, "width": 8, "height": 8, "depth": 8 },
+    "torso.base": { "origin": { "x": 16, "y": 16 }, "width": 8, "height": 12, "depth": 4 },
+    "torso.outer": { "origin": { "x": 16, "y": 32 }, "width": 8, "height": 12, "depth": 4 },
+    "rightArm.base": { "origin": { "x": 40, "y": 16 }, "width": 4, "height": 12, "depth": 4 },
+    "rightArm.outer": { "origin": { "x": 40, "y": 32 }, "width": 4, "height": 12, "depth": 4 },
+    "leftArm.base": { "origin": { "x": 32, "y": 48 }, "width": 4, "height": 12, "depth": 4 },
+    "leftArm.outer": { "origin": { "x": 48, "y": 48 }, "width": 4, "height": 12, "depth": 4 },
+    "rightLeg.base": { "origin": { "x": 0, "y": 16 }, "width": 4, "height": 12, "depth": 4 },
+    "rightLeg.outer": { "origin": { "x": 0, "y": 32 }, "width": 4, "height": 12, "depth": 4 },
+    "leftLeg.base": { "origin": { "x": 16, "y": 48 }, "width": 4, "height": 12, "depth": 4 },
+    "leftLeg.outer": { "origin": { "x": 0, "y": 48 }, "width": 4, "height": 12, "depth": 4 }
+  }
+}
