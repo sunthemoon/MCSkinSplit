@@ -11,6 +11,7 @@ coverage/
 
 data/*
 !data/.gitkeep
+apps/api/data/
 
 playwright-report/
 test-results/

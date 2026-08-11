@@ -30,12 +30,14 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 label:focus-within {
   outline: 3px solid rgba(36, 195, 194, 0.48);
   outline-offset: 3px;
@@ -113,6 +115,261 @@ h1 span {
   font-family: "Cascadia Mono", monospace;
   font-size: 0.62rem;
   letter-spacing: 0.13em;
+}
+
+.history-panel {
+  position: relative;
+  margin-bottom: 18px;
+  border: 2px solid var(--ink);
+  background:
+    linear-gradient(90deg, rgba(15, 130, 145, 0.06), transparent 42%),
+    var(--paper);
+  box-shadow: 8px 9px 0 rgba(24, 33, 38, 0.11);
+}
+
+.history-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(170px, 0.65fr) minmax(150px, 0.5fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.history-toolbar .panel-heading {
+  margin: 0;
+}
+
+.history-select,
+.branch-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.history-select > span,
+.branch-form label > span {
+  color: rgba(24, 33, 38, 0.52);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.61rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.history-select select,
+.branch-form input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: #fbf7ec;
+  color: var(--ink);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.history-select select {
+  padding: 0 30px 0 10px;
+}
+
+.history-select select:disabled,
+.branch-form input:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
+
+.history-import-button,
+.branch-form button {
+  min-height: 36px;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.history-import-button {
+  padding: 0 14px;
+}
+
+.history-import-button:hover:not(:disabled),
+.branch-form button:hover:not(:disabled) {
+  background: var(--orange);
+  transform: translateY(-1px);
+}
+
+.history-import-button:disabled,
+.branch-form button:disabled {
+  cursor: wait;
+  opacity: 0.42;
+}
+
+.timeline-rail {
+  display: flex;
+  min-height: 136px;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 16px 20px 18px;
+  scrollbar-color: var(--cyan) var(--paper-muted);
+}
+
+.timeline-rail[data-empty="true"] {
+  align-items: center;
+  justify-content: center;
+}
+
+.timeline-rail > p {
+  margin: 0;
+  color: rgba(24, 33, 38, 0.54);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.revision-node {
+  position: relative;
+  display: grid;
+  width: 188px;
+  min-width: 188px;
+  padding: 12px 13px;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  border-left: 6px solid var(--cyan);
+  border-radius: 0;
+  background: #eae4d6;
+  color: var(--ink);
+  text-align: left;
+  transition: transform 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.revision-node::after {
+  position: absolute;
+  width: 10px;
+  height: 1px;
+  background: var(--ink);
+  content: "";
+  right: -11px;
+  top: 50%;
+}
+
+.revision-node:last-child::after {
+  display: none;
+}
+
+.revision-node:hover:not(:disabled) {
+  background: #dce9e4;
+  transform: translateY(-2px);
+}
+
+.revision-node[data-selected="true"] {
+  background: var(--orange);
+  box-shadow: 4px 4px 0 var(--ink);
+  color: white;
+  transform: translateY(-2px);
+}
+
+.revision-node[data-head="true"] {
+  border-top: 4px solid var(--cyan-bright);
+}
+
+.revision-node:disabled {
+  cursor: wait;
+}
+
+.revision-node-index,
+.revision-node time {
+  overflow: hidden;
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.59rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.66;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.revision-node strong {
+  margin: 7px 0 3px;
+  font-family: "Bahnschrift", sans-serif;
+  font-size: 0.84rem;
+  letter-spacing: 0.06em;
+}
+
+.revision-node small {
+  overflow: hidden;
+  margin-bottom: 8px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-actions {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(520px, 1.35fr);
+  align-items: center;
+  gap: 20px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: rgba(230, 224, 209, 0.66);
+}
+
+.history-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.history-facts span {
+  color: rgba(24, 33, 38, 0.52);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.61rem;
+  letter-spacing: 0.06em;
+}
+
+.history-facts strong {
+  margin-left: 4px;
+  color: var(--ink);
+}
+
+.branch-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.branch-form input {
+  padding: 0 10px;
+}
+
+.branch-form button {
+  padding: 0 12px;
+}
+
+.branch-form .revert-button {
+  background: transparent;
+  color: var(--ink);
+}
+
+.branch-form .revert-button:hover:not(:disabled) {
+  background: var(--cyan);
+  color: white;
+}
+
+.history-error {
+  margin: 0;
+  padding: 9px 20px;
+  border-top: 1px solid rgba(227, 108, 61, 0.42);
+  background: rgba(227, 108, 61, 0.12);
+  color: #853719;
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.68rem;
 }
 
 .workbench {
@@ -535,6 +792,18 @@ h1 span {
 }
 
 @media (max-width: 1060px) {
+  .history-toolbar {
+    grid-template-columns: minmax(260px, 1fr) repeat(2, minmax(150px, 0.65fr));
+  }
+
+  .history-import-button {
+    grid-column: 2 / -1;
+  }
+
+  .history-actions {
+    grid-template-columns: 1fr;
+  }
+
   .workbench {
     grid-template-columns: minmax(270px, 0.78fr) minmax(390px, 1.22fr);
   }
@@ -573,6 +842,28 @@ h1 span {
 
   .workbench {
     display: block;
+  }
+
+  .history-toolbar {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .history-import-button {
+    grid-column: auto;
+  }
+
+  .timeline-rail {
+    justify-content: flex-start;
+  }
+
+  .history-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .branch-form {
+    grid-template-columns: 1fr;
   }
 
   .panel + .panel {
