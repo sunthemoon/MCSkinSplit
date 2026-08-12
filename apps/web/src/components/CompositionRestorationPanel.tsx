@@ -9,9 +9,12 @@ import {
   type RestorationTargetMode,
 } from "../lib/compositionRestoration";
 import type {
+  ApiAiJobDetail,
+  ApiAiReasoningEffort,
   ApiCompositionRestorationCandidates,
   ApiCompositionRestorationPlan,
 } from "../lib/revisionApi";
+import { RestorationRecommendationPanel } from "./RestorationRecommendationPanel";
 
 interface CompositionRestorationPanelProps {
   readonly components: readonly SemanticComponent[];
@@ -28,6 +31,15 @@ interface CompositionRestorationPanelProps {
   readonly disabled: boolean;
   readonly busy: boolean;
   readonly error: string | null;
+  readonly recommendationJobDetail: ApiAiJobDetail | null;
+  readonly recommendationUserIntent: string;
+  readonly recommendationProviders: readonly string[];
+  readonly recommendationProvider: string;
+  readonly recommendationModel: string;
+  readonly recommendationReasoningEffort: ApiAiReasoningEffort;
+  readonly recommendationStaleReason: string | null;
+  readonly recommendationBusy: boolean;
+  readonly recommendationError: string | null;
   readonly onModeChange: (mode: RestorationTargetMode) => void;
   readonly onToggleFine: (componentId: string) => void;
   readonly onDonorRevisionIdChange: (revisionId: string) => void;
@@ -37,6 +49,11 @@ interface CompositionRestorationPanelProps {
   readonly onToggleCandidate: (candidateId: string) => void;
   readonly onApply: () => void;
   readonly onClear: () => void;
+  readonly onRecommendationUserIntentChange: (value: string) => void;
+  readonly onRecommendationProviderChange: (provider: string) => void;
+  readonly onStartRecommendation: () => void;
+  readonly onCancelRecommendation: () => void;
+  readonly onLoadRecommendation: () => void;
 }
 
 const modeLabels: Readonly<Record<RestorationTargetMode, string>> = {
@@ -61,6 +78,15 @@ export function CompositionRestorationPanel({
   disabled,
   busy,
   error,
+  recommendationJobDetail,
+  recommendationUserIntent,
+  recommendationProviders,
+  recommendationProvider,
+  recommendationModel,
+  recommendationReasoningEffort,
+  recommendationStaleReason,
+  recommendationBusy,
+  recommendationError,
   onModeChange,
   onToggleFine,
   onDonorRevisionIdChange,
@@ -70,6 +96,11 @@ export function CompositionRestorationPanel({
   onToggleCandidate,
   onApply,
   onClear,
+  onRecommendationUserIntentChange,
+  onRecommendationProviderChange,
+  onStartRecommendation,
+  onCancelRecommendation,
+  onLoadRecommendation,
 }: CompositionRestorationPanelProps) {
   const visibleComponents = components.filter((component) =>
     componentMatchesRestorationMode(component, mode),
@@ -158,6 +189,25 @@ export function CompositionRestorationPanel({
       >
         {busy ? "正在校验候选…" : "生成确定性清理候选"}
       </button>
+
+      <RestorationRecommendationPanel
+        candidates={candidates}
+        jobDetail={recommendationJobDetail}
+        userIntent={recommendationUserIntent}
+        providers={recommendationProviders}
+        provider={recommendationProvider}
+        model={recommendationModel}
+        reasoningEffort={recommendationReasoningEffort}
+        staleReason={recommendationStaleReason}
+        disabled={disabled}
+        busy={recommendationBusy || busy}
+        error={recommendationError}
+        onUserIntentChange={onRecommendationUserIntentChange}
+        onProviderChange={onRecommendationProviderChange}
+        onStart={onStartRecommendation}
+        onCancel={onCancelRecommendation}
+        onLoad={onLoadRecommendation}
+      />
 
       {candidates && (
         <div className="restoration-candidates">

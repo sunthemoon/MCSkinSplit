@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, and M9 adds deterministic target-remnant cleanup and Base skin restoration to composition.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, and M10 added a separate constrained AI recommendation step over those host-generated restoration candidates.
 
 The current Studio can:
 
@@ -40,6 +40,9 @@ The current Studio can:
   same-surface, same-body-part, mirror, donor-Revision, or opaque manual candidates;
 - preview, version, audit, clear, and commit a hash-verified restoration plan
   without accepting client-supplied masks or PNG output;
+- ask the repository `mc-skin-replacement-planner` Skill to rank only the
+  already generated Base candidate IDs, then review and load its confidence and
+  explanation without automatically applying a restoration plan;
 - export the live composition preview and commit a validated `compose` Revision;
 - rebuild the checked-in Alex/Slim mix pixel-exactly from all six real skins.
 
@@ -48,7 +51,7 @@ The current Studio can:
 - Node.js 24
 - pnpm 10.13.1
 - A browser with WebGL support
-- An installed and authenticated Codex CLI for optional AI-assisted analysis
+- An installed and authenticated Codex CLI for optional AI-assisted analysis or replacement recommendation
 
 ## Start the Studio
 
@@ -62,7 +65,7 @@ Open `http://127.0.0.1:5173`. The command starts both the Fastify API (`127.0.0.
 
 Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` before starting the API to use another directory.
 
-AI analysis defaults to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. It is optional: deterministic editing, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
+AI analysis and replacement recommendation default to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. Both are optional: deterministic editing, candidate generation, manual selection, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
 
 Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution and every requested Base restoration pixel has a validated source. Complete-category bundles and restoration target groups are convenience views over immutable fine parts and the unchanged 23-category taxonomy; neither flattens or deletes fine semantic components. Component repair provides deterministic authored reconstruction, while composition restoration clears selected target remnants and fills exposed Base pixels from explicit candidates. Neither workflow claims to recover factual pixels that were hidden in the source artwork. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer and conflict behavior, [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md) for cleanup, candidate, audit, and provenance contracts, [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog and whole-bundle workflow, and [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md) for repair tools and history.
 
@@ -86,6 +89,7 @@ packages/skin-compositor/ Deterministic multi-part composition and conflict repo
 packages/skin-core/       Framework-independent PNG, layout, UV, and render core
 packages/skin-revision/   SQLite metadata and immutable snapshot service
 .agents/skills/mc-skin-segmenter/ Repository semantic-analysis Skill
+.agents/skills/mc-skin-replacement-planner/ Repository candidate-ranking Skill
 docs/                     Architecture, implementation status, and specification
 scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures

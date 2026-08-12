@@ -23,7 +23,10 @@ matching stored fine component IDs; persisted plans still name those IDs.
    append an audit event, or create a skin Revision.
 5. Inspect the aggregate Outer cleanup and the Base candidates grouped by body
    part. Outer cleanup is always included. Select at most one Base candidate for
-   each target group and require complete coverage before applying the plan.
+   each target group and require complete coverage before applying the plan. As
+   an optional M10 step, request an AI recommendation over this exact public
+   candidate set, review its ranking, confidence, and explanation, then load the
+   suggested IDs into the same local selector.
 6. Apply explicitly. The service regenerates the complete candidate set from the
    trusted Revisions and request inputs, checks its hash and selected IDs, then
    stores a new version of the plan.
@@ -67,18 +70,50 @@ Translucent or transparent manual fills are rejected. A candidate may be partial
 its coverage is shown, but a plan with any missing requested pixel cannot be
 committed.
 
-M9 does not call a model. AI is not connected to candidate generation, target
-selection, cleanup, or color choice. The model-facing analysis boundary still
-accepts proposals only; it cannot supply a restoration mask, write pixels, or
-return a PNG to be trusted as the result.
+M9 candidate generation remains deterministic and never calls a model. M10 can
+optionally recommend among the resulting public Base candidate IDs, but it is not
+connected to candidate generation, masks, pixels, target expansion, cleanup
+operations, or color creation. It cannot supply a restoration mask, write pixels,
+return a PNG, access the application database, or apply a plan.
+
+## Optional AI recommendation
+
+The repository `mc-skin-replacement-planner` Skill receives an integrity-checked
+public candidate catalog plus a short user intent. The default provider ignores
+user configuration, clears MCP/apps, disables model tools, uses a read-only
+sandbox, and inlines that public input instead of granting file access. It returns exactly
+one sorted decision per Base target group: a complete ranking of that group's
+supplied candidate IDs, an optional selected complete candidate, confidence, and
+a short explanation. Aggregate Outer cleanup remains automatic host behavior and
+is excluded from the proposal.
+
+Host validation binds a recommendation to its Job ID, Composition ID, and
+candidate-set hash. The browser separately compares the catalog's Composition
+version before loading. Unknown, duplicate, cross-group,
+partial selected, or privately evidenced results fail validation. The Studio
+shows the normal live Job/Run/Event process and lets the user load a fresh valid
+recommendation into local candidate selection. Loading is deliberately distinct
+from applying: the user must still press **Apply** so the service can regenerate
+the candidates, recheck version/hash/coverage, and persist the existing M9 plan.
+
+Manual selection remains available before, during, and after an AI Job. No Codex
+installation or model call is required for deterministic candidate generation,
+selection, preview, plan application, or commit. The Skill is stored in the
+repository and copied into each Run workspace; it is not a required global Codex
+Skill installation.
 
 ## Trust boundary and API
 
 ```text
 POST   /api/compositions/:compositionId/restoration-candidates
+POST   /api/compositions/:compositionId/ai-restoration-recommendation
 PUT    /api/compositions/:compositionId/restoration-plan
 DELETE /api/compositions/:compositionId/restoration-plan
 ```
+
+The AI route starts an advisory Job bound to the supplied public catalog inputs;
+the shared `/api/ai-jobs` detail, event, cancel, and retry routes expose its
+audited process. It does not replace either candidate generation or plan apply.
 
 Candidate generation accepts `targetComponentIds` plus optional
 `donorRevisionId` and `manualRgba`. It returns public summaries, coverage counts,

@@ -18,6 +18,7 @@ import {
   importProjectSkin,
   listAnalyzedSkins,
   listAiJobs,
+  listAiProviders,
   listPartBundles,
   loadRevisionSegmentation,
   loadRevisionSkin,
@@ -33,11 +34,28 @@ import {
   reorderCompositionLayers,
   resolveCompositionConflicts,
   setCompositionRestorationPlan,
+  startAiRestorationRecommendation,
   RevisionApiError,
   startAiAnalysis,
 } from "./revisionApi";
 
 describe("revisionApi", () => {
+  it("preserves recommendation-capable providers separately from semantic providers", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        providers: ["semantic-provider", "restoration-provider"],
+        restorationRecommendationProviders: ["restoration-provider"],
+        defaultModel: "codex-config-default",
+        defaultReasoningEffort: "medium",
+      }, 200),
+    );
+
+    await expect(listAiProviders(fetcher)).resolves.toMatchObject({
+      providers: ["semantic-provider", "restoration-provider"],
+      restorationRecommendationProviders: ["restoration-provider"],
+    });
+  });
+
   it("uploads PNG bytes with encoded import metadata", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse(
@@ -501,6 +519,51 @@ describe("revisionApi", () => {
       reasoningEffort: "high",
       createRevisionOnSuccess: false,
     });
+  });
+
+  it("starts and filters restoration recommendation jobs without exposing pixel operations", async () => {
+    const job = {
+      id: "job_1",
+      kind: "restoration_recommendation",
+      status: "queued",
+      compositionId: "composition / 1",
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ job }, 202))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [job] }, 200));
+    const input = {
+      provider: "codex-exec",
+      model: "codex-config-default",
+      reasoningEffort: "high" as const,
+      userIntent: "优先使用完整覆盖的候选",
+      compositionVersion: 4,
+      candidateSetHash: `sha256:${"a".repeat(64)}`,
+      targetComponentIds: ["shirt.main"],
+      donorRevisionId: "revision / donor",
+      manualRgba: [220, 169, 140, 255] as [number, number, number, number],
+    };
+
+    await startAiRestorationRecommendation("composition / 1", input, fetcher);
+    await listAiJobs(
+      {
+        kind: "restoration_recommendation",
+        compositionId: "composition / 1",
+      },
+      fetcher,
+    );
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/compositions/composition%20%2F%201/ai-restoration-recommendation",
+    );
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
+    expect(body).toEqual(input);
+    expect(body).not.toHaveProperty("mode");
+    expect(body).not.toHaveProperty("compositionId");
+    expect(JSON.stringify(body)).not.toMatch(/mask|pixelIds|operations/);
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
+      "/api/ai-jobs?kind=restoration_recommendation&compositionId=composition%20%2F%201",
+    );
   });
 });
 

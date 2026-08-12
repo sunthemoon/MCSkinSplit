@@ -6,6 +6,9 @@ import type {
   AnalysisProposal,
   ProviderAnalysisInput,
   ProviderAnalysisResult,
+  ProviderReplacementInput,
+  ProviderReplacementResult,
+  ReplacementPlanProposal,
   SkinSemanticAiProvider,
 } from "@mc-skin-split/ai-provider";
 import { AiProviderError } from "@mc-skin-split/ai-provider";
@@ -25,6 +28,9 @@ const skillDirectory = resolve(
   repositoryRoot,
   ".agents/skills/mc-skin-segmenter",
 );
+const restorationManualRgba: [number, number, number, number] = [
+  210, 170, 140, 255,
+];
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
@@ -239,7 +245,7 @@ describe("AiJobManager", () => {
       createRevisionOnSuccess: false,
     });
     await manager.waitForJob(first.id);
-    const retry = manager.retryJob(first.id, {
+    const retry = await manager.retryJob(first.id, {
       provider: providerB.providerName,
       model: "model-b",
       reasoningEffort: "high",
@@ -272,6 +278,7 @@ describe("AiJobManager", () => {
     );
     const { manager, imported } = await setup([provider]);
     const legacy = manager.jobStore.createJob({
+      kind: "semantic_analysis",
       projectId: imported.project.id,
       inputRevisionId: imported.revision.id,
       options: {
@@ -291,7 +298,7 @@ describe("AiJobManager", () => {
       error: { code: "LEGACY_FAILURE", message: "legacy failure" },
     });
 
-    const retry = manager.retryJob(legacy.id, {
+    const retry = await manager.retryJob(legacy.id, {
       createRevisionOnSuccess: false,
     });
 
@@ -300,6 +307,338 @@ describe("AiJobManager", () => {
       promptVersion: "semantic-proposal-v2",
     });
     await manager.waitForJob(retry.id);
+  });
+
+  it("persists a validated restoration recommendation as advisory evidence only", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "replacement-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+    const revisionCount = store.listRevisions(imported.project.id).length;
+
+    const queued = await manager.startRestorationRecommendation(
+      composition.composition.id,
+      restorationRecommendationInput(provider.providerName, candidates),
+    );
+    const finished = await manager.waitForJob(queued.id);
+    const detail = manager.getJobDetail(queued.id);
+
+    expect(finished).toMatchObject({
+      kind: "restoration_recommendation",
+      status: "succeeded",
+      compositionId: composition.composition.id,
+      resultRevisionId: null,
+      proposalSummary: "已按目标组给出完整候选排序。",
+      advisoryResult: {
+        schemaVersion: "1.0",
+        jobId: queued.id,
+        compositionId: composition.composition.id,
+        candidateSetHash: candidates.candidateSetHash,
+      },
+    });
+    expect(finished.advisoryResult?.decisions).not.toHaveLength(0);
+    expect(provider.replacementCalls).toBe(1);
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({ status: "succeeded", attempt: 1 });
+    expect(detail.runs[0]!.assets.map((asset) => asset.fileRole).sort()).toEqual([
+      "input_manifest",
+      "raw_events",
+      "raw_output",
+      "stderr",
+      "validator_report",
+    ]);
+    expect(detail.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        "queued",
+        "preparing",
+        "run_started",
+        "running",
+        "provider_session",
+        "provider_output",
+        "validating",
+        "succeeded",
+      ]),
+    );
+
+    expect(store.listRevisions(imported.project.id)).toHaveLength(revisionCount);
+    expect(store.getComposition(composition.composition.id)).toMatchObject({
+      restorationVersion: 0,
+      restorationPlan: null,
+      resultRevisionId: null,
+    });
+    expect(
+      store.listCompositionRestorationEvents(composition.composition.id),
+    ).toEqual([]);
+  });
+
+  it("honors cancellation while the final restoration freshness check is pending", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "cancellable-replacement-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+    const generateCandidates =
+      store.generateCompositionRestorationCandidates.bind(store);
+    let regenerationCalls = 0;
+    let notifyFinalRegenerationStarted!: () => void;
+    let releaseFinalRegeneration!: () => void;
+    const finalRegenerationStarted = new Promise<void>((resolve) => {
+      notifyFinalRegenerationStarted = resolve;
+    });
+    const finalRegenerationRelease = new Promise<void>((resolve) => {
+      releaseFinalRegeneration = resolve;
+    });
+    store.generateCompositionRestorationCandidates = async (
+      compositionId,
+      input,
+    ) => {
+      regenerationCalls += 1;
+      const regenerated = await generateCandidates(compositionId, input);
+      if (regenerationCalls === 3) {
+        notifyFinalRegenerationStarted();
+        await finalRegenerationRelease;
+      }
+      return regenerated;
+    };
+
+    const queued = await manager.startRestorationRecommendation(
+      composition.composition.id,
+      restorationRecommendationInput(provider.providerName, candidates),
+    );
+    await finalRegenerationStarted;
+
+    expect(manager.cancelJob(queued.id)).toMatchObject({
+      status: "validating",
+      cancelRequested: true,
+      advisoryResult: null,
+    });
+    releaseFinalRegeneration();
+
+    const finished = await manager.waitForJob(queued.id);
+    const detail = manager.getJobDetail(queued.id);
+    expect(finished).toMatchObject({
+      kind: "restoration_recommendation",
+      status: "cancelled",
+      resultRevisionId: null,
+      advisoryResult: null,
+      error: { code: "AI_CANCELLED" },
+    });
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({ status: "cancelled", attempt: 1 });
+    expect(detail.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining(["cancel_requested", "cancelled"]),
+    );
+    expect(detail.events.map((event) => event.eventType)).not.toContain(
+      "succeeded",
+    );
+  });
+
+  it("does not queue a restoration recommendation committed during start regeneration", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "start-race-replacement-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates: initialCandidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+    const candidates = await makeRestorationFixtureCommittable(
+      store,
+      composition.composition.id,
+      initialCandidates,
+    );
+    const generateCandidates =
+      store.generateCompositionRestorationCandidates.bind(store);
+    let notifyRegenerationStarted!: () => void;
+    let releaseRegeneration!: () => void;
+    const regenerationStarted = new Promise<void>((resolve) => {
+      notifyRegenerationStarted = resolve;
+    });
+    const regenerationRelease = new Promise<void>((resolve) => {
+      releaseRegeneration = resolve;
+    });
+    store.generateCompositionRestorationCandidates = async (
+      compositionId,
+      input,
+    ) => {
+      const regenerated = await generateCandidates(compositionId, input);
+      notifyRegenerationStarted();
+      await regenerationRelease;
+      return regenerated;
+    };
+
+    const start = manager.startRestorationRecommendation(
+      composition.composition.id,
+      restorationRecommendationInput(provider.providerName, candidates),
+    );
+    await regenerationStarted;
+    try {
+      await store.commitComposition(composition.composition.id);
+    } finally {
+      releaseRegeneration();
+    }
+
+    await expect(start).rejects.toMatchObject({
+      code: "AI_RESTORATION_STALE",
+      statusCode: 409,
+    });
+    expect(provider.replacementCalls).toBe(0);
+    expect(
+      manager.listJobs({
+        kind: "restoration_recommendation",
+        compositionId: composition.composition.id,
+      }),
+    ).toEqual([]);
+  });
+
+  it("fails a restoration recommendation committed during final regeneration", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "final-race-replacement-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates: initialCandidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+    const candidates = await makeRestorationFixtureCommittable(
+      store,
+      composition.composition.id,
+      initialCandidates,
+    );
+    const generateCandidates =
+      store.generateCompositionRestorationCandidates.bind(store);
+    let regenerationCalls = 0;
+    let notifyFinalRegenerationStarted!: () => void;
+    let releaseFinalRegeneration!: () => void;
+    const finalRegenerationStarted = new Promise<void>((resolve) => {
+      notifyFinalRegenerationStarted = resolve;
+    });
+    const finalRegenerationRelease = new Promise<void>((resolve) => {
+      releaseFinalRegeneration = resolve;
+    });
+    store.generateCompositionRestorationCandidates = async (
+      compositionId,
+      input,
+    ) => {
+      regenerationCalls += 1;
+      const regenerated = await generateCandidates(compositionId, input);
+      if (regenerationCalls === 3) {
+        notifyFinalRegenerationStarted();
+        await finalRegenerationRelease;
+      }
+      return regenerated;
+    };
+
+    const queued = await manager.startRestorationRecommendation(
+      composition.composition.id,
+      restorationRecommendationInput(provider.providerName, candidates),
+    );
+    await finalRegenerationStarted;
+    try {
+      await store.commitComposition(composition.composition.id);
+    } finally {
+      releaseFinalRegeneration();
+    }
+
+    const finished = await manager.waitForJob(queued.id);
+    const detail = manager.getJobDetail(queued.id);
+    expect(finished).toMatchObject({
+      kind: "restoration_recommendation",
+      status: "failed",
+      resultRevisionId: null,
+      advisoryResult: null,
+      error: { code: "AI_RESTORATION_STALE" },
+    });
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({ status: "failed", attempt: 1 });
+    expect(detail.events.map((event) => event.eventType)).not.toContain(
+      "succeeded",
+    );
+  });
+
+  it("rejects a stale restoration candidate hash before creating a Job or calling the provider", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "stale-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+
+    await expect(
+      manager.startRestorationRecommendation(composition.composition.id, {
+        ...restorationRecommendationInput(provider.providerName, candidates),
+        candidateSetHash: `sha256:${"0".repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: "AI_RESTORATION_STALE", statusCode: 409 });
+
+    expect(provider.replacementCalls).toBe(0);
+    expect(
+      manager.listJobs({
+        kind: "restoration_recommendation",
+        compositionId: composition.composition.id,
+      }),
+    ).toEqual([]);
+    expect(store.getComposition(composition.composition.id)).toMatchObject({
+      restorationVersion: 0,
+      restorationPlan: null,
+    });
+  });
+
+  it("keeps restoration retries advisory-only and rechecks candidate freshness", async () => {
+    const provider = new ScriptedReplacementProvider(
+      "retry-replacement-provider",
+      ({ pack }) => validReplacementProposal(pack),
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const { composition, candidates } = await createRestorationFixture(
+      store,
+      imported,
+    );
+    const first = await manager.startRestorationRecommendation(
+      composition.composition.id,
+      restorationRecommendationInput(provider.providerName, candidates),
+    );
+    expect((await manager.waitForJob(first.id)).status).toBe("succeeded");
+
+    await expect(
+      manager.retryJob(first.id, { createRevisionOnSuccess: true }),
+    ).rejects.toMatchObject({ code: "INVALID_AI_JOB", statusCode: 400 });
+    expect(provider.replacementCalls).toBe(1);
+
+    await store.setCompositionRestorationPlan(composition.composition.id, {
+      expectedVersion: candidates.version,
+      candidateSetHash: candidates.candidateSetHash,
+      candidateIds: [],
+      targetComponentIds: candidates.targetComponentIds,
+      manualRgba: restorationManualRgba,
+    });
+    await expect(manager.retryJob(first.id)).rejects.toMatchObject({
+      code: "AI_RESTORATION_STALE",
+      statusCode: 409,
+    });
+
+    expect(provider.replacementCalls).toBe(1);
+    expect(
+      manager.listJobs({
+        kind: "restoration_recommendation",
+        compositionId: composition.composition.id,
+      }),
+    ).toHaveLength(1);
+    expect(store.listRevisions(imported.project.id)).toHaveLength(2);
   });
 });
 
@@ -331,6 +670,44 @@ class ScriptedProvider implements SkinSemanticAiProvider {
       stderr: "",
       threadId: `thread_${this.calls}`,
       usage: { input_tokens: 10 * this.calls, output_tokens: 5 },
+    };
+  }
+}
+
+class ScriptedReplacementProvider implements SkinSemanticAiProvider {
+  replacementCalls = 0;
+
+  constructor(
+    readonly providerName: string,
+    private readonly response: (
+      input: ProviderReplacementInput,
+    ) => unknown | Promise<unknown>,
+  ) {}
+
+  async analyze(): Promise<ProviderAnalysisResult> {
+    throw new Error("Semantic analysis was not expected in this test");
+  }
+
+  async recommendReplacement(
+    input: ProviderReplacementInput,
+  ): Promise<ProviderReplacementResult> {
+    this.replacementCalls += 1;
+    input.onProgress?.({
+      kind: "session",
+      status: "started",
+      message: "Codex 会话已建立",
+    });
+    input.onProgress?.({
+      kind: "output",
+      status: "completed",
+      message: "换装候选建议已生成",
+    });
+    return {
+      proposal: await this.response(input),
+      rawEvents: `${JSON.stringify({ type: "thread.started", thread_id: `replacement_thread_${this.replacementCalls}` })}\n`,
+      stderr: "",
+      threadId: `replacement_thread_${this.replacementCalls}`,
+      usage: { input_tokens: 12 * this.replacementCalls, output_tokens: 6 },
     };
   }
 }
@@ -400,5 +777,115 @@ function validProposal(
       },
     ],
     summary: "识别出一个低置信度头发组件，其余区域保留待分类。",
+  };
+}
+
+async function createRestorationFixture(
+  store: RevisionStore,
+  imported: ImportProjectResult,
+) {
+  const segmented = await store.applyManualOperation(imported.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: "outfit.cleanup",
+        displayName: "旧衣服",
+        category: "upper_clothing",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+    },
+  });
+  const composition = await store.createComposition({
+    baseRevisionId: segmented.revision.id,
+  });
+  const candidates = await store.generateCompositionRestorationCandidates(
+    composition.composition.id,
+    {
+      targetComponentIds: ["outfit.cleanup"],
+      manualRgba: restorationManualRgba,
+    },
+  );
+  expect(candidates.base.candidates).not.toHaveLength(0);
+  return { composition, candidates };
+}
+
+async function makeRestorationFixtureCommittable(
+  store: RevisionStore,
+  compositionId: string,
+  candidates: Awaited<
+    ReturnType<RevisionStore["generateCompositionRestorationCandidates"]>
+  >,
+) {
+  const manualCandidate = candidates.base.candidates.find(
+    (candidate) => candidate.kind === "manual_rgba",
+  );
+  expect(manualCandidate).toBeDefined();
+  await store.setCompositionRestorationPlan(compositionId, {
+    expectedVersion: candidates.version,
+    candidateSetHash: candidates.candidateSetHash,
+    candidateIds: [manualCandidate!.id],
+    targetComponentIds: candidates.targetComponentIds,
+    manualRgba: restorationManualRgba,
+  });
+  return await store.generateCompositionRestorationCandidates(compositionId, {
+    targetComponentIds: candidates.targetComponentIds,
+    manualRgba: restorationManualRgba,
+  });
+}
+
+function restorationRecommendationInput(
+  provider: string,
+  candidates: Awaited<ReturnType<RevisionStore["generateCompositionRestorationCandidates"]>>,
+) {
+  return {
+    provider,
+    model: "replacement-model",
+    reasoningEffort: "medium" as const,
+    userIntent: "优先保留当前配色，选择完整覆盖的候选。",
+    compositionVersion: candidates.version,
+    candidateSetHash: candidates.candidateSetHash,
+    targetComponentIds: candidates.targetComponentIds,
+    manualRgba: restorationManualRgba,
+  };
+}
+
+function validReplacementProposal(
+  pack: ProviderReplacementInput["pack"],
+): ReplacementPlanProposal {
+  const groups = new Map<
+    string,
+    Array<(typeof pack.candidateCatalog.base.candidates)[number]>
+  >();
+  for (const candidate of pack.candidateCatalog.base.candidates) {
+    const group = groups.get(candidate.targetGroupId) ?? [];
+    group.push(candidate);
+    groups.set(candidate.targetGroupId, group);
+  }
+  return {
+    schemaVersion: "1.0",
+    jobId: pack.job.jobId,
+    compositionId: pack.candidateCatalog.compositionId,
+    candidateSetHash: pack.candidateCatalog.candidateSetHash,
+    decisions: [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([targetGroupId, candidates]) => {
+        const selected = candidates.find(
+          (candidate) =>
+            candidate.coveragePixelCount === candidate.pixelCount,
+        );
+        const ranked = selected
+          ? [selected, ...candidates.filter((candidate) => candidate !== selected)]
+          : candidates;
+        return {
+          targetGroupId,
+          selectedCandidateId: selected?.id ?? null,
+          rankedCandidateIds: ranked.map((candidate) => candidate.id),
+          confidence: selected ? 0.9 : 0.4,
+          explanation: selected
+            ? "候选覆盖完整，符合用户意图。"
+            : "尚无完整候选，建议保留人工决策。",
+        };
+      }),
+    summary: "已按目标组给出完整候选排序。",
   };
 }

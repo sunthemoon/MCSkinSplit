@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultRestorationCandidateIds,
+  loadRestorationRecommendationSelection,
   normalizeSelectedRestorationCandidateIds,
   parseOpaqueHexColor,
   selectedRestorationCoverage,
@@ -8,6 +9,7 @@ import {
   toggleRestorationCandidateId,
 } from "./compositionRestoration";
 import type { ApiCompositionRestorationCandidates } from "./revisionApi";
+import type { ApiAiJob, ApiCompositionProject } from "./revisionApi";
 import type { SemanticComponent } from "@mc-skin-split/skin-core";
 
 const candidates: ApiCompositionRestorationCandidates = {
@@ -27,7 +29,7 @@ const candidates: ApiCompositionRestorationCandidates = {
         targetGroupId: "torso.base",
         label: "Same surface",
         description: "",
-        pixelCount: 8,
+        pixelCount: 10,
         coveragePixelCount: 8,
         selectedByDefault: true,
       },
@@ -44,6 +46,66 @@ const candidates: ApiCompositionRestorationCandidates = {
     ],
   },
 };
+
+const composition = {
+  id: "composition_1",
+  restorationVersion: 2,
+} as Pick<ApiCompositionProject, "id" | "restorationVersion">;
+
+function recommendationJob(
+  overrides: Partial<ApiAiJob> = {},
+): ApiAiJob {
+  return {
+    id: "job_1",
+    kind: "restoration_recommendation",
+    projectId: "project_1",
+    inputRevisionId: "revision_1",
+    resultRevisionId: null,
+    compositionId: "composition_1",
+    retryOfJobId: null,
+    status: "succeeded",
+    provider: "codex-exec",
+    model: "codex-config-default",
+    skillName: "mc-skin-replacement-planner",
+    skillVersion: "1.0.0",
+    promptVersion: "1.0.0",
+    inputHash: null,
+    outputHash: null,
+    options: {
+      mode: "restoration_recommendation",
+      provider: "codex-exec",
+      model: "codex-config-default",
+      reasoningEffort: "medium",
+      userIntent: "优先完整覆盖",
+      compositionId: "composition_1",
+      compositionVersion: 2,
+      candidateSetHash: candidates.candidateSetHash,
+      targetComponentIds: ["shirt.main"],
+    },
+    reviewItems: [],
+    proposalSummary: null,
+    advisoryResult: {
+      schemaVersion: "1.0",
+      jobId: "job_1",
+      compositionId: "composition_1",
+      candidateSetHash: candidates.candidateSetHash,
+      decisions: [{
+        targetGroupId: "torso.base",
+        selectedCandidateId: "candidate.manual",
+        rankedCandidateIds: ["candidate.manual", "candidate.same_surface"],
+        confidence: 0.91,
+        explanation: "完整覆盖 Base。",
+      }],
+      summary: "推荐手动肤色。",
+    },
+    cancelRequested: false,
+    createdAt: "2026-08-12T00:00:00.000Z",
+    startedAt: "2026-08-12T00:00:01.000Z",
+    finishedAt: "2026-08-12T00:00:02.000Z",
+    error: null,
+    ...overrides,
+  };
+}
 
 describe("composition restoration UI helpers", () => {
   it("keeps fine selection explicit and expands an aggregate target", () => {
@@ -88,5 +150,112 @@ describe("composition restoration UI helpers", () => {
         "candidate.manual",
       ),
     ).toEqual(["candidate.outer", "candidate.manual"]);
+  });
+
+  it("atomically loads a fresh recommendation and retains the forced Outer candidate", () => {
+    expect(
+      loadRestorationRecommendationSelection(
+        composition,
+        candidates,
+        recommendationJob(),
+      ),
+    ).toEqual({
+      ok: true,
+      candidateIds: ["candidate.outer", "candidate.manual"],
+    });
+  });
+
+  it("rejects stale composition versions and candidate hashes", () => {
+    expect(
+      loadRestorationRecommendationSelection(
+        { ...composition, restorationVersion: 3 },
+        candidates,
+        recommendationJob(),
+      ),
+    ).toMatchObject({ ok: false });
+    expect(
+      loadRestorationRecommendationSelection(
+        composition,
+        { ...candidates, candidateSetHash: `sha256:${"b".repeat(64)}` },
+        recommendationJob(),
+      ),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("rejects a non-terminal recommendation even if it carries provisional output", () => {
+    expect(
+      loadRestorationRecommendationSelection(
+        composition,
+        candidates,
+        recommendationJob({ status: "validating" }),
+      ),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("rejects unknown, cross-group, duplicate, and incomplete rankings without partial load", () => {
+    const baseJob = recommendationJob();
+    if (!baseJob.advisoryResult) throw new Error("fixture result missing");
+    const decision = baseJob.advisoryResult.decisions[0];
+    if (!decision) throw new Error("fixture decision missing");
+    const invalidDecisions = [
+      [],
+      [{ ...decision, rankedCandidateIds: ["candidate.unknown", "candidate.same_surface"] }],
+      [{ ...decision, rankedCandidateIds: ["candidate.manual", "candidate.manual"] }],
+      [{ ...decision, rankedCandidateIds: ["candidate.manual"] }],
+      [decision, { ...decision }],
+      [{ ...decision, targetGroupId: "opaque.other" }],
+    ];
+
+    for (const decisions of invalidDecisions) {
+      const result = loadRestorationRecommendationSelection(
+        composition,
+        candidates,
+        recommendationJob({
+          advisoryResult: { ...baseJob.advisoryResult, decisions },
+        }),
+      );
+      expect(result).toMatchObject({ ok: false });
+    }
+  });
+
+  it("rejects a selected candidate that is not ranked first or does not fully cover its group", () => {
+    const baseJob = recommendationJob();
+    if (!baseJob.advisoryResult) throw new Error("fixture result missing");
+    const decision = baseJob.advisoryResult.decisions[0];
+    if (!decision) throw new Error("fixture decision missing");
+
+    expect(
+      loadRestorationRecommendationSelection(
+        composition,
+        candidates,
+        recommendationJob({
+          advisoryResult: {
+            ...baseJob.advisoryResult,
+            decisions: [{
+              ...decision,
+              selectedCandidateId: "candidate.manual",
+              rankedCandidateIds: ["candidate.same_surface", "candidate.manual"],
+            }],
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false });
+
+    expect(
+      loadRestorationRecommendationSelection(
+        composition,
+        candidates,
+        recommendationJob({
+          advisoryResult: {
+            ...baseJob.advisoryResult,
+            decisions: [{
+              ...decision,
+              selectedCandidateId: "candidate.same_surface",
+              rankedCandidateIds: ["candidate.same_surface", "candidate.manual"],
+            }],
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false });
   });
 });

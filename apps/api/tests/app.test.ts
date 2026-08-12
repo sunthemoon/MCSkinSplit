@@ -7,6 +7,9 @@ import type {
   AnalysisProposal,
   ProviderAnalysisInput,
   ProviderAnalysisResult,
+  ProviderReplacementInput,
+  ProviderReplacementResult,
+  ReplacementPlanProposal,
   SkinSemanticAiProvider,
 } from "@mc-skin-split/ai-provider";
 import type { FastifyInstance } from "fastify";
@@ -1269,6 +1272,216 @@ describe("revision API", () => {
       error: { code: "INVALID_REQUEST" },
     });
   });
+
+  it("validates and completes advisory-only AI restoration recommendations", async () => {
+    const provider = new ApiAiProvider("restoration-provider");
+    const { app } = await createApi([provider]);
+    const project = await createProject(app, "AI restoration API");
+    const imported = await importSkinFromPath(
+      app,
+      project.projectId,
+      TARGET_SKIN_PATH,
+    );
+    const segmented = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "clothing.ai-replacement",
+          displayName: "AI 待替换衣服",
+          category: "upper_clothing",
+        },
+        spans: [
+          { surface: "torso.base.front", y: 20, x0: 20, x1: 20 },
+          { surface: "torso.outer.front", y: 37, x0: 21, x1: 21 },
+        ],
+      },
+    });
+    expect(segmented.statusCode).toBe(201);
+    const baseRevisionId = segmented.json<MutationResponse>().revision.id;
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/compositions",
+      payload: {
+        baseRevisionId,
+        name: "AI restoration recommendation",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const compositionId = created.json<{
+      composition: {
+        id: string;
+        restorationVersion: number;
+        restorationPlan: null;
+      };
+    }>().composition.id;
+    const generationInput = {
+      targetComponentIds: ["clothing.ai-replacement"],
+      manualRgba: [220, 170, 140, 255] as const,
+    };
+    const generated = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/restoration-candidates`,
+      payload: generationInput,
+    });
+    expect(generated.statusCode).toBe(200);
+    const candidates = generated.json<{
+      version: number;
+      candidateSetHash: string;
+      base: { candidates: readonly { id: string }[] };
+    }>();
+    expect(candidates.base.candidates.length).toBeGreaterThan(0);
+
+    const providers = await app.inject({
+      method: "GET",
+      url: "/api/ai/providers",
+    });
+    expect(providers.statusCode).toBe(200);
+    expect(providers.json()).toMatchObject({
+      restorationRecommendationProviders: ["restoration-provider"],
+    });
+
+    const recommendationInput = {
+      provider: "restoration-provider",
+      model: "restoration-model",
+      reasoningEffort: "medium",
+      userIntent: "优先采用完整候选，保留现有整体风格",
+      compositionVersion: candidates.version,
+      candidateSetHash: candidates.candidateSetHash,
+      ...generationInput,
+    } as const;
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/ai-restoration-recommendation`,
+      payload: { ...recommendationInput, rawMask: [1, 2, 3] },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const staleHash = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/ai-restoration-recommendation`,
+      payload: {
+        ...recommendationInput,
+        candidateSetHash: `sha256:${"a".repeat(64)}`,
+      },
+    });
+    expect(staleHash.statusCode).toBe(409);
+    expect(staleHash.json()).toMatchObject({
+      error: { code: "AI_RESTORATION_STALE" },
+    });
+
+    const revisionsBefore = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.projectId}/revisions`,
+    });
+    const revisionCountBefore = revisionsBefore.json<{
+      revisions: readonly unknown[];
+    }>().revisions.length;
+    const before = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}`,
+    });
+    expect(before.json()).toMatchObject({
+      composition: {
+        restorationVersion: candidates.version,
+        restorationPlan: null,
+      },
+      report: {
+        restorationPixelCount: 0,
+        restorationMissingPixelCount: 0,
+      },
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/ai-restoration-recommendation`,
+      payload: recommendationInput,
+    });
+    expect(started.statusCode, JSON.stringify(started.json())).toBe(202);
+    const jobId = started.json<{ job: { id: string } }>().job.id;
+    const completed = await waitForAiJob(app, jobId);
+    expect(completed.job).toMatchObject({
+      kind: "restoration_recommendation",
+      status: "succeeded",
+      compositionId,
+      resultRevisionId: null,
+      proposalSummary: "已生成换装候选建议",
+      advisoryResult: {
+        schemaVersion: "1.0",
+        jobId,
+        compositionId,
+        candidateSetHash: candidates.candidateSetHash,
+        decisions: [
+          {
+            targetGroupId: expect.any(String),
+            selectedCandidateId: expect.any(String),
+            rankedCandidateIds: expect.arrayContaining(
+              candidates.base.candidates.map((candidate) => candidate.id),
+            ),
+            confidence: 0.9,
+          },
+        ],
+      },
+    });
+    expect(completed.runs).toHaveLength(1);
+    expect(completed.runs[0]).toMatchObject({
+      status: "succeeded",
+      assets: [{}, {}, {}, {}, {}],
+    });
+    expect(completed.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        "provider_session",
+        "provider_output",
+        "validating",
+        "succeeded",
+      ]),
+    );
+
+    const visibleEvents = await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs/${jobId}/events`,
+    });
+    expect(visibleEvents.statusCode).toBe(200);
+    expect(
+      visibleEvents
+        .json<{ events: readonly { eventType: string }[] }>()
+        .events.map((event) => event.eventType),
+    ).toEqual(expect.arrayContaining(["provider_session", "succeeded"]));
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs?kind=restoration_recommendation&compositionId=${compositionId}`,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      jobs: [{ id: jobId, kind: "restoration_recommendation", compositionId }],
+    });
+
+    const after = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}`,
+    });
+    expect(after.json()).toMatchObject({
+      composition: {
+        restorationVersion: candidates.version,
+        restorationPlan: null,
+      },
+      report: {
+        restorationPixelCount: 0,
+        restorationMissingPixelCount: 0,
+      },
+    });
+    const revisionsAfter = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.projectId}/revisions`,
+    });
+    expect(
+      revisionsAfter.json<{ revisions: readonly unknown[] }>().revisions,
+    ).toHaveLength(revisionCountBefore);
+  });
 });
 
 interface CreatedProject {
@@ -1306,12 +1519,15 @@ async function createApi(aiProviders?: readonly SkinSemanticAiProvider[]) {
 interface AiJobApiDetail {
   readonly job: {
     readonly id: string;
+    readonly kind: string;
     readonly status: string;
     readonly resultRevisionId: string | null;
+    readonly compositionId: string | null;
     readonly retryOfJobId: string | null;
     readonly provider: string;
     readonly model: string;
     readonly proposalSummary: string | null;
+    readonly advisoryResult: ReplacementPlanProposal | null;
   };
   readonly runs: readonly {
     readonly status: string;
@@ -1359,6 +1575,67 @@ class ApiAiProvider implements SkinSemanticAiProvider {
       stderr: "",
       threadId: `${this.providerName}-thread`,
       usage: { input_tokens: 20, output_tokens: 10 },
+    };
+  }
+
+  async recommendReplacement(
+    input: ProviderReplacementInput,
+  ): Promise<ProviderReplacementResult> {
+    input.onProgress?.({
+      kind: "session",
+      status: "started",
+      message: "换装建议会话已建立",
+    });
+    const candidates = input.pack.candidateCatalog.base.candidates;
+    const groups = new Map<
+      string,
+      Array<(typeof candidates)[number]>
+    >();
+    for (const candidate of candidates) {
+      const group = groups.get(candidate.targetGroupId) ?? [];
+      group.push(candidate);
+      groups.set(candidate.targetGroupId, group);
+    }
+    const decisions = [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([targetGroupId, groupCandidates]) => {
+        const ranked = [...groupCandidates].sort((left, right) => {
+          const coverageOrder =
+            Number(right.coveragePixelCount === right.pixelCount) -
+            Number(left.coveragePixelCount === left.pixelCount);
+          return coverageOrder || left.id.localeCompare(right.id);
+        });
+        const selected = ranked.find(
+          (candidate) =>
+            candidate.coveragePixelCount === candidate.pixelCount,
+        );
+        return {
+          targetGroupId,
+          selectedCandidateId: selected?.id ?? null,
+          rankedCandidateIds: ranked.map((candidate) => candidate.id),
+          confidence: 0.9,
+          explanation: "完整候选优先，且符合用户意图",
+        };
+      });
+    const proposal: ReplacementPlanProposal = {
+      schemaVersion: "1.0",
+      jobId: input.jobId,
+      compositionId: input.pack.candidateCatalog.compositionId,
+      candidateSetHash: input.pack.candidateCatalog.candidateSetHash,
+      decisions,
+      summary: "已生成换装候选建议",
+    };
+    input.onProgress?.({
+      kind: "output",
+      status: "completed",
+      message: "换装候选建议已生成",
+    });
+    return {
+      proposal,
+      rawEvents: `${JSON.stringify({ type: "thread.started", thread_id: `${this.providerName}-replacement-thread` })}\n`,
+      stderr: "",
+      threadId: `${this.providerName}-replacement-thread`,
+      usage: { input_tokens: 16, output_tokens: 8 },
     };
   }
 }

@@ -11,6 +11,8 @@ import {
   AiJobManager,
   AiJobStoreError,
   type AiAnalysisOptions,
+  type AiJobKind,
+  type StartAiRestorationRecommendationInput,
   type AnalysisReasoningEffort,
 } from "@mc-skin-split/ai-worker";
 import {
@@ -229,9 +231,14 @@ interface ClearRestorationPlanBody {
 
 interface AiJobsQuery {
   readonly revisionId?: string;
+  readonly kind?: AiJobKind;
+  readonly compositionId?: string;
 }
 
 interface StartAiAnalysisBody extends AiAnalysisOptions {}
+
+interface StartAiRestorationRecommendationBody
+  extends StartAiRestorationRecommendationInput {}
 
 interface RetryAiJobBody {
   readonly provider?: string;
@@ -293,6 +300,13 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
       ),
       ...(process.env.MC_SKIN_AI_SKILL_DIR?.trim()
         ? { skillDirectory: resolve(process.env.MC_SKIN_AI_SKILL_DIR) }
+        : {}),
+      ...(process.env.MC_SKIN_REPLACEMENT_SKILL_DIR?.trim()
+        ? {
+            replacementSkillDirectory: resolve(
+              process.env.MC_SKIN_REPLACEMENT_SKILL_DIR,
+            ),
+          }
         : {}),
     });
 
@@ -362,6 +376,8 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
 
   app.get("/api/ai/providers", async () => ({
     providers: aiJobManager.listProviders(),
+    restorationRecommendationProviders:
+      aiJobManager.listRestorationRecommendationProviders(),
     defaultModel:
       process.env.AI_MODEL?.trim() || CODEX_CONFIG_DEFAULT_MODEL,
     defaultReasoningEffort: defaultAiReasoningEffort,
@@ -997,6 +1013,21 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.post<{
+    Params: CompositionParams;
+    Body: StartAiRestorationRecommendationBody;
+  }>(
+    "/api/compositions/:compositionId/ai-restoration-recommendation",
+    { schema: { body: startAiRestorationRecommendationSchema } },
+    async (request, reply) => {
+      const job = await aiJobManager.startRestorationRecommendation(
+        request.params.compositionId,
+        request.body,
+      );
+      return reply.status(202).send({ job });
+    },
+  );
+
   app.get<{ Querystring: AiJobsQuery }>(
     "/api/ai-jobs",
     {
@@ -1006,12 +1037,25 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
           additionalProperties: false,
           properties: {
             revisionId: { type: "string", minLength: 1, maxLength: 120 },
+            kind: {
+              type: "string",
+              enum: ["semantic_analysis", "restoration_recommendation"],
+            },
+            compositionId: { type: "string", minLength: 1, maxLength: 120 },
           },
         },
       },
     },
     async (request) => ({
-      jobs: aiJobManager.listJobs(request.query.revisionId),
+      jobs: aiJobManager.listJobs({
+        ...(request.query.revisionId
+          ? { inputRevisionId: request.query.revisionId }
+          : {}),
+        ...(request.query.kind ? { kind: request.query.kind } : {}),
+        ...(request.query.compositionId
+          ? { compositionId: request.query.compositionId }
+          : {}),
+      }),
     }),
   );
 
@@ -1037,7 +1081,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     "/api/ai-jobs/:jobId/retry",
     { schema: { body: retryAiJobSchema } },
     async (request, reply) => {
-      const job = aiJobManager.retryJob(request.params.jobId, request.body);
+      const job = await aiJobManager.retryJob(request.params.jobId, request.body);
       return reply.status(202).send({ job });
     },
   );
@@ -1605,6 +1649,33 @@ const startAiAnalysisSchema = {
       items: { type: "string", enum: SEMANTIC_CATEGORIES },
     },
     createRevisionOnSuccess: { type: "boolean" },
+  },
+} as const;
+
+const startAiRestorationRecommendationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "provider",
+    "model",
+    "reasoningEffort",
+    "userIntent",
+    "compositionVersion",
+    "candidateSetHash",
+    "targetComponentIds",
+  ],
+  properties: {
+    provider: startAiAnalysisSchema.properties.provider,
+    model: startAiAnalysisSchema.properties.model,
+    reasoningEffort: startAiAnalysisSchema.properties.reasoningEffort,
+    userIntent: { type: "string", minLength: 1, maxLength: 1000 },
+    compositionVersion: { type: "integer", minimum: 0 },
+    candidateSetHash: candidateSetHashSchema,
+    targetComponentIds:
+      generateRestorationCandidatesSchema.properties.targetComponentIds,
+    donorRevisionId:
+      generateRestorationCandidatesSchema.properties.donorRevisionId,
+    manualRgba: generateRestorationCandidatesSchema.properties.manualRgba,
   },
 } as const;
 

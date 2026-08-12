@@ -46,6 +46,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 8,
+    name: "AI restoration recommendation jobs",
+    sql: readFileSync(
+      new URL("./migrations/008_ai_restoration_planning.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

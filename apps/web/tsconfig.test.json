@@ -12,6 +12,7 @@
   "include": [
     "src/**/*.test.ts",
     "src/components/CompositionRestorationPanel.tsx",
+    "src/components/RestorationRecommendationPanel.tsx",
     "src/lib/mcSkinPreview.ts",
     "src/lib/compositionRestoration.ts",
     "src/lib/partRepairCoordinates.ts",

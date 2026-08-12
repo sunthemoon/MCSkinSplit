@@ -48,7 +48,7 @@ The default provider follows the official Codex non-interactive `codex exec`
 workflow documented in [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
 and uses supported options from the [CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
 
-The adapter:
+For semantic analysis, the adapter:
 
 - starts the command directly without a shell;
 - uses the Run directory as `--cd` with `--sandbox workspace-write`, `--ephemeral`,
@@ -67,12 +67,21 @@ The adapter:
 The fallback never weakens host validation. The same Ajv and pixel validator checks
 the final JSON in both paths.
 
-By default the provider retains the user's Codex configuration so existing
+By default semantic analysis retains the user's Codex configuration so existing
 authentication and custom provider settings work. The model value
 `codex-config-default` means “use the model selected by that configuration.” The Run
 still has a private working directory and explicit sandbox. Set
 `AI_IGNORE_USER_CONFIG=true` only when an independently authenticated default Codex
 configuration is available.
+
+Replacement recommendation uses a stricter invocation. It always adds
+`--ignore-user-config` (Codex authentication still comes from `CODEX_HOME`), uses
+the read-only sandbox, disables shell, web, browser, computer, image, app, plugin,
+MCP, and delegation capabilities, and inherits no shell environment. The provider
+inlines the immutable public Job and candidate catalog into the prompt, so the
+model does not need file-read access. The checked-in Skill remains the versioned
+decision contract and manual validation tool; schema validation and exact catalog
+validation remain authoritative host checks.
 
 ## Live process display
 
@@ -157,6 +166,7 @@ list, and `createRevisionOnSuccess` flag. Unknown request fields are rejected.
 | `AI_IGNORE_USER_CONFIG` | `false` | Add Codex `--ignore-user-config` |
 | `AI_ALLOW_SCHEMA_FALLBACK` | `true` | Retry only supported schema-transport failures |
 | `MC_SKIN_AI_SKILL_DIR` | repository Skill | Alternate Skill source directory |
+| `MC_SKIN_REPLACEMENT_SKILL_DIR` | repository replacement Skill | Alternate replacement-planner Skill source directory |
 | `MC_SKIN_DATA_DIR` | repository `data/` | SQLite, snapshots, Run workspaces, and audit assets |
 
 ## Real-skin verification
@@ -187,3 +197,63 @@ or backup policy.
 
 Semantic labels remain probabilistic. Review low-confidence items and use the manual
 editor for corrections before exporting reusable parts or composing a final skin.
+
+## Constrained replacement recommendation
+
+M10 adds a second, separate model task for composition restoration. It does not
+extend `mc-skin-segmenter`: semantic classification continues to use that Skill,
+while `.agents/skills/mc-skin-replacement-planner` can only rank candidates that
+the deterministic M9 restoration service has already generated.
+
+```text
+public restoration candidate catalog + user intent
+  -> isolated replacement-planning workspace
+  -> repository mc-skin-replacement-planner Skill
+  -> ID-only ranked decisions, confidence, and short explanations
+  -> schema and exact-catalog validation
+  -> user loads the suggestion into browser selection
+  -> user explicitly applies the existing deterministic restoration plan
+```
+
+The planning workspace stores `job.json`, the public
+`input/restoration-candidates.json` catalog, the output schema, and a copied
+repository Skill for audit and deterministic validation. The default provider
+inlines the public Job/catalog and runs tool-free; it has no attached images. The
+catalog exposes candidate IDs,
+kinds, labels, source identity when applicable, coverage counts, composition
+version, and candidate-set hash. It does not expose authoritative masks,
+coordinates, pixel-ID lists, compositor operations, generated PNGs, or database
+state. A manually supplied color can appear only as the already host-created
+`manual_rgba` candidate; the model cannot invent or change it.
+
+The proposal must contain every Base target group exactly once in sorted order.
+Each decision ranks exactly the supplied IDs for that group, may select only its
+first fully covering candidate, and includes a bounded confidence value and short
+explanation. The host validates exact Job, Composition, and candidate-set
+identity, rejects unknown/cross-group/duplicate IDs and private pixel evidence,
+and permits one normal repair attempt. Aggregate Outer cleanup is host-managed
+and never enters the model's Base decisions.
+
+Recommendation reuses the persistent Job, Run, Asset, and Event infrastructure,
+including the live provider process display. Job kind and Composition identity
+keep it separate from semantic-analysis history. The result is advisory: success
+does not create a Revision, write a restoration plan, or alter the preview. A
+result can be loaded only while its Composition version and candidate-set hash
+still match; loading changes local candidate selection only, and **Apply** remains
+the sole plan-persistence action.
+
+Each Job copies its task-specific repository Skill into that Run's isolated
+workspace. The Skills are repository-scoped runtime inputs, so users do not need
+to install either one globally in Codex. The non-AI candidate selector remains
+the complete fallback when Codex is unavailable or a recommendation is deferred,
+stale, invalid, cancelled, or failed.
+
+The recommendation start route is:
+
+```text
+POST /api/compositions/:compositionId/ai-restoration-recommendation
+```
+
+It reuses `/api/ai-jobs` detail, event, cancel, and retry routes. Job-list filters
+can distinguish `semantic_analysis` from `restoration_recommendation` and can
+scope recommendation history by Composition ID.

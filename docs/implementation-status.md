@@ -16,6 +16,7 @@ Last updated: 2026-08-12
 | M7 analyzed-skin catalog and complete-category bundles | Complete | Immutable atomic bundles, derived previews, and atomic whole-bundle composition |
 | M8 immutable component repair | Complete | Append-only repair Revisions, verified files, neutral 3D preview, and new-part commit |
 | M9 composition remnant cleanup and Base restoration | Complete | Deterministic candidates, versioned/audited plans, restored previews, and compose provenance |
+| M10 constrained AI replacement recommendation | Complete | Repository Skill, ID-only validated proposal, shared Job/Run/Event telemetry, and explicit user Apply boundary |
 
 ## M0 baseline
 
@@ -584,3 +585,74 @@ Last updated: 2026-08-12
 - Mirror coverage is verified for the canonical Slim arm counterpart exercised by
   the focused suite; the tests do not claim exhaustive mirror coverage for every
   face and both arm models.
+
+## M10 deliverables
+
+- Added a separate repository Skill at
+  `.agents/skills/mc-skin-replacement-planner`. It ranks only host-supplied Base
+  restoration candidate IDs and does not change the existing semantic-analysis
+  Skill or the fixed 23-category taxonomy.
+- Added a dedicated integrity-checked planning-pack contract over the public M9
+  candidate catalog. The model input contains IDs, labels, source identity where
+  applicable, coverage counts, and only an already user-authored opaque RGBA
+  attached to a `manual_rgba` candidate; it contains no masks, coordinates,
+  pixel lists, compositor operations, PNG output, or database state.
+- Added a schema and deterministic proposal validator for exact Job,
+  Composition, and candidate-set identity; complete sorted target-group coverage;
+  exact per-group rankings; fully covering selected candidates; bounded
+  explanations and confidence; and rejection of private evidence.
+- Added the browser recommendation surface and local-selection adapter. A valid,
+  fresh result can be loaded into the existing candidate selector, but loading
+  does not persist a plan. The normal M9 **Apply** action remains required.
+- Added a separate `restoration_recommendation` Job kind to the persistent
+  worker/API infrastructure. It reuses isolated Runs, immutable input/output
+  Assets, projected Events, cancellation, retry, and the live-process display,
+  while database constraints prevent it from creating a result Revision or
+  storing an advisory result for the wrong Job kind.
+- Recommendation start and retry regenerate the deterministic candidate catalog
+  and compare both Composition version and candidate-set hash. The worker repeats
+  that check after provider execution, so a result that becomes stale while the
+  model runs is retained as audited failed work rather than exposed as a current
+  recommendation.
+- Provider capability discovery and selection are independent from semantic
+  analysis. The browser enables recommendation only for providers that advertise
+  the replacement-planning capability, and keeps the full manual candidate flow
+  available when none do.
+- The default replacement provider uses a tool-free, read-only Codex invocation:
+  it ignores user configuration while retaining authentication, clears MCP/apps,
+  disables shell, web, browser, computer, image, plugin, and delegation features,
+  and inlines only the immutable public Job/catalog. Semantic analysis retains its
+  existing configurable provider behavior.
+
+## M10 verification evidence
+
+- `pnpm verify` passes all workspace checks: fixture integrity, type checks, 215
+  tests, and production builds. The package totals are skin core 71, compositor
+  8, analysis pack 4, AI provider 15, Revision store 26, AI worker 15, API 12,
+  and web 64 tests.
+- The replacement Skill scripts pass syntax checks, the contract self-test, and
+  repository Skill validation. The provider output schema is byte-for-byte equal
+  to the Skill's checked-in schema.
+- Worker and API integration tests cover advisory-only success, immutable Run
+  evidence, strict request shapes, stale input rejection before provider use,
+  retry freshness, capability discovery, and the absence of Revision,
+  restoration-plan, version, or preview mutations after recommendation success.
+- A real-browser smoke test imported fixture `354359a2c2f33777.png`, assigned Base
+  and Outer cleanup targets, created a Composition, generated deterministic
+  candidates, selected a complete Base candidate, and confirmed that the
+  recommendation control becomes available without changing the persisted plan
+  or restoration version. The smoke test did not invoke an external model.
+- Production web build still reports the existing advisory warning for a bundle
+  larger than 500 kB; it does not fail the build.
+
+## M10 boundaries
+
+- Candidate generation, masks, pixels, color creation, and plan application stay
+  deterministic host operations. AI output is advisory metadata only and never
+  creates a Revision or changes a Composition automatically.
+- Aggregate hair, clothing, and accessory controls remain convenience views over
+  the same persisted fine components. M10 neither merges nor deletes them.
+- The replacement-planner Skill is copied from the repository into each Run. It
+  does not need to be installed as a global Codex Skill.
+- Manual candidate selection remains the full no-AI fallback, including when a
+  recommendation is stale, deferred, invalid, cancelled, or failed.

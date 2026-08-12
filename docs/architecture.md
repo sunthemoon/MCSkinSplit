@@ -11,6 +11,7 @@ Browser UI
     -> Composition service (M6)
     -> Part repair service (M8)
     -> Composition restoration service (M9)
+    -> Restoration recommendation job service (M10)
 
 Deterministic skin core
   -> PNG RGBA decoder
@@ -30,6 +31,7 @@ AI worker
   -> replaceable provider
   -> schema and pixel-ownership validator
   -> proposal returned to revision service
+  -> separate restoration-recommendation workspace and exact candidate-ID validator
 
 Part repair service
   -> append-only part-edit Revisions
@@ -40,6 +42,11 @@ Composition restoration service
   -> deterministic host-side candidate derivation from semantic snapshots
   -> versioned candidate-ID/hash plans and append-only audit events
   -> preview and compose-Revision restoration provenance
+
+Restoration recommendation job service
+  -> public candidate catalog and user intent only
+  -> repository replacement-planner Skill and shared provider telemetry
+  -> advisory ranked IDs loaded for review, never automatic plan application
 ```
 
 ## M0 decisions
@@ -204,15 +211,44 @@ The detailed contract is in
 The detailed contract is in
 [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 
+## M10 decisions
+
+- AI replacement assistance is a new `restoration_recommendation` Job kind, not
+  another responsibility of `mc-skin-segmenter`. The fixed 23-category taxonomy
+  and `hair`/`clothing`/`accessory` aggregate selection views remain unchanged.
+- `packages/skin-analysis-pack` builds a separate immutable planning workspace
+  from the M9 public catalog. It copies
+  `.agents/skills/mc-skin-replacement-planner` and its JSON Schema per Run and
+  verifies all input hashes after provider execution. No images are attached.
+- The default replacement provider ignores user configuration, clears MCP/apps,
+  disables shell, web, browser, computer, image, plugin, and delegation tools,
+  uses a read-only sandbox, and inlines the public catalog. This tool-free profile
+  is specific to replacement recommendation; semantic analysis keeps its existing
+  configurable image-and-workspace invocation.
+- `packages/ai-provider` accepts only the planner's structured ID recommendation.
+  Deterministic validation requires exact Job/Composition/candidate-set identity,
+  every Base group, exact per-group ID permutations, a complete selected
+  candidate, and prose without private pixel/color/image evidence.
+- The worker and API reuse generic persistent Job, Run, Asset, Event, retry,
+  cancellation, and live JSONL projection behavior. Job kind and Composition ID
+  keep semantic-analysis and replacement-recommendation queries distinct.
+- Success stores an advisory result only. It does not create a Revision or alter
+  the Composition. The browser rejects stale catalog version/hash results; loading a
+  recommendation changes local candidate selection, while the existing M9
+  **Apply** request remains the only restoration-plan write boundary.
+- Manual deterministic selection is a first-class no-AI fallback. Each
+  task-specific Skill is a repository-scoped asset copied into its Run workspace,
+  not a required global Codex install.
+
 ## Package boundaries
 
 ```text
-apps/web                 UI, editors, AI console, compositor, repair, restoration, and preview adapters
-apps/api                 HTTP API, revision, AI, composition, repair, and restoration orchestration
-apps/ai-worker           persistent isolated analysis jobs (M5)
+apps/web                 UI, editors, AI consoles, compositor, repair, restoration, and preview adapters
+apps/api                 HTTP API, revision, AI, composition, repair, restoration, and recommendation orchestration
+apps/ai-worker           persistent semantic/recommendation jobs, validation, and audit assets
 packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, and restoration (M1-M9)
 packages/skin-revision   immutable snapshots, parts, repair histories, AI audit, and compositions
 packages/skin-compositor ordered layers, restoration, and deterministic conflict evaluation (M6/M9)
-packages/skin-analysis-pack deterministic analysis workspace generation (M5)
-packages/ai-provider     replaceable provider contracts and validation (M5)
+packages/skin-analysis-pack deterministic model inputs, candidate catalogs, and manifests (M5/M10)
+packages/ai-provider     replaceable model execution and task-specific validation (M5/M10)
 ```

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minecraft Skin Replacement Planner"
+  short_description: "Choose safe skin restoration candidates by ID"
+  default_prompt: "Use $mc-skin-replacement-planner to rank the supplied restoration candidates and return a validated ID-only proposal."

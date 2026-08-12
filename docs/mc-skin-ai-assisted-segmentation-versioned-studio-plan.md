@@ -2360,6 +2360,47 @@ feat(parts): add immutable component repair studio
 
 ---
 
+## M10：受限 AI 换装候选建议
+
+目标：在不授予模型像素写入权的前提下，让独立的仓库级 Skill 对 M9
+已经生成的公开肤色候选进行排序与解释，减少逐组人工比较成本，同时保留
+显式审核和应用步骤。
+
+实现：
+
+1. 保持 `.agents/skills/mc-skin-segmenter/` 只负责 23 个精细语义分类；
+   新增 `.agents/skills/mc-skin-replacement-planner/` 负责换装还原建议。
+2. Host 先生成确定性候选目录，再把公开的候选 ID、类型、标签、来源标识、
+   覆盖统计、Composition 版本和候选集 hash 复制到隔离 Run；不提供 mask、
+   坐标、pixel ID、compositor operation、PNG 或数据库访问。
+3. 默认 Provider 忽略用户 Codex 配置但保留认证，清空 MCP/Apps，禁用
+   shell、web、browser、computer、image、plugin 和多代理等工具，使用
+   read-only sandbox，并将公开 Job/候选目录内联到 prompt。
+4. AI 只返回每个 Base 目标组内完整候选 ID 排序、可选首选 ID、置信度和
+   简短说明。Outer 清理仍由 Host 自动包含。
+5. Validator 校验 Job、Composition、候选集 hash、目标组和候选 ID 的精确
+   归属与完整性；浏览器另行比较目录 version；未知、重复、跨组、覆盖不足
+   的首选或私有像素证据均拒绝。
+6. 复用既有 AI Job、Run、Asset、Event、取消、重试和实时过程展示，但以
+   独立 Job 类型区分语义分析和换装建议。
+7. 成功结果仅是建议，不创建 Revision，不修改 Composition，不自动应用。
+   用户先将新鲜建议载入本地选择，再显式执行 M9 的 Apply；服务端仍会重新
+   生成候选并验证 version/hash/coverage。
+8. 无 AI 时保留完整人工选择流程。两个 Skill 都随仓库版本管理并按 Run
+   复制，不要求全局安装到本地 Codex Skill 目录。
+
+验收：
+
+- AI 无法生成或修改颜色值，也不能提交坐标、遮罩、PNG 和数据库变更。
+- 建议只能引用精确候选集内同组 ID，过期 version/hash 不能载入。
+- 载入建议后仍必须由用户显式 Apply；取消、失败或校验失败不改变皮肤。
+- 23 个精细类别与完整头发、衣服、饰品聚合视图均保持原结构。
+
+详细合同见 [`ai-analysis.md`](ai-analysis.md) 与
+[`composition-restoration-workflow.md`](composition-restoration-workflow.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。

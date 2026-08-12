@@ -52,6 +52,15 @@ describe("composition restoration panel contract", () => {
       disabled: false,
       busy: false,
       error: null,
+      recommendationJobDetail: null,
+      recommendationUserIntent: "优先完整覆盖",
+      recommendationProviders: ["restoration-provider"],
+      recommendationProvider: "restoration-provider",
+      recommendationModel: "codex-config-default",
+      recommendationReasoningEffort: "medium",
+      recommendationStaleReason: null,
+      recommendationBusy: false,
+      recommendationError: null,
       onModeChange: () => undefined,
       onToggleFine: () => undefined,
       onDonorRevisionIdChange: () => undefined,
@@ -61,6 +70,11 @@ describe("composition restoration panel contract", () => {
       onToggleCandidate: () => undefined,
       onApply: () => undefined,
       onClear: () => undefined,
+      onRecommendationUserIntentChange: () => undefined,
+      onRecommendationProviderChange: () => undefined,
+      onStartRecommendation: () => undefined,
+      onCancelRecommendation: () => undefined,
+      onLoadRecommendation: () => undefined,
     }));
 
     expect(html).toContain("目标皮肤残留清理与肤色还原");

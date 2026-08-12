@@ -3,7 +3,11 @@ import type {
   SemanticCategory,
   SemanticState,
 } from "@mc-skin-split/skin-core";
-import type { AnalysisPack } from "@mc-skin-split/skin-analysis-pack";
+import type {
+  AnalysisPack,
+  AnalysisReasoningEffort,
+  ReplacementPlanningPack,
+} from "@mc-skin-split/skin-analysis-pack";
 
 export type ReviewItemType =
   | "ambiguous_region"
@@ -132,6 +136,76 @@ export interface ProviderAnalysisResult {
 export interface SkinSemanticAiProvider {
   readonly providerName: string;
   analyze(input: ProviderAnalysisInput): Promise<ProviderAnalysisResult>;
+  recommendReplacement?(
+    input: ProviderReplacementInput,
+  ): Promise<ProviderReplacementResult>;
+}
+
+export interface ReplacementPlanDecision {
+  readonly targetGroupId: string;
+  readonly selectedCandidateId: string | null;
+  readonly rankedCandidateIds: readonly string[];
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface ReplacementPlanProposal {
+  readonly schemaVersion: "1.0";
+  readonly jobId: string;
+  readonly compositionId: string;
+  readonly candidateSetHash: string;
+  readonly decisions: readonly ReplacementPlanDecision[];
+  readonly summary: string;
+}
+
+export interface ReplacementPlanValidationIssue {
+  readonly code: string;
+  readonly path: string;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export interface ReplacementPlanValidationReport {
+  readonly schemaVersion: "1.0";
+  readonly validatorVersion: "replacement-plan-validator-v1";
+  readonly valid: boolean;
+  readonly errors: readonly ReplacementPlanValidationIssue[];
+  readonly stats: {
+    readonly targetGroupCount: number;
+    readonly decisionCount: number;
+    readonly candidateCount: number;
+    readonly selectedCount: number;
+    readonly deferredCount: number;
+  };
+}
+
+export type ReplacementPlanValidationResult =
+  | {
+      readonly proposal: ReplacementPlanProposal;
+      readonly report: ReplacementPlanValidationReport & { readonly valid: true };
+    }
+  | {
+      readonly proposal: ReplacementPlanProposal | null;
+      readonly report: ReplacementPlanValidationReport & { readonly valid: false };
+    };
+
+export interface ProviderReplacementInput {
+  readonly jobId: string;
+  readonly attempt: number;
+  readonly model: string;
+  readonly reasoningEffort: AnalysisReasoningEffort;
+  readonly pack: ReplacementPlanningPack;
+  readonly repairReport?: ReplacementPlanValidationReport;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (event: ProviderProgressEvent) => void;
+}
+
+export interface ProviderReplacementResult {
+  readonly proposal: unknown;
+  readonly rawEvents: string;
+  readonly stderr: string;
+  readonly threadId?: string;
+  readonly usage?: Readonly<Record<string, unknown>>;
 }
 
 export interface ProviderAvailability {

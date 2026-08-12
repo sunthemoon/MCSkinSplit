@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcskinsplit.local/schemas/restoration-candidate-catalog.schema.json",
+  "title": "MCSkinSplit public restoration candidate catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "compositionId",
+    "version",
+    "candidateSetHash",
+    "targetComponentIds",
+    "outer",
+    "base"
+  ],
+  "properties": {
+    "compositionId": { "type": "string", "minLength": 3, "maxLength": 120 },
+    "version": { "type": "integer", "minimum": 0 },
+    "candidateSetHash": { "$ref": "#/$defs/hash" },
+    "targetComponentIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+    },
+    "outer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pixelCount", "candidateId"],
+      "properties": {
+        "pixelCount": { "type": "integer", "minimum": 0 },
+        "candidateId": {
+          "oneOf": [{ "$ref": "#/$defs/candidateId" }, { "type": "null" }]
+        }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pixelCount", "coveredPixelCount", "missingPixelCount", "candidates"],
+      "properties": {
+        "pixelCount": { "type": "integer", "minimum": 0 },
+        "coveredPixelCount": { "type": "integer", "minimum": 0 },
+        "missingPixelCount": { "type": "integer", "minimum": 0 },
+        "candidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/candidate" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^restore_[0-9a-f]{64}$"
+    },
+    "targetGroupId": {
+      "type": "string",
+      "pattern": "^(head|torso|leftArm|rightArm|leftLeg|rightLeg)_base$"
+    },
+    "rgba": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "const": 255 }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "targetGroupId",
+        "label",
+        "description",
+        "pixelCount",
+        "coveragePixelCount"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/candidateId" },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "current_same_surface",
+            "current_same_body_part",
+            "mirrored_counterpart",
+            "donor_revision",
+            "manual_rgba"
+          ]
+        },
+        "targetGroupId": { "$ref": "#/$defs/targetGroupId" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "pixelCount": { "type": "integer", "minimum": 1 },
+        "coveragePixelCount": { "type": "integer", "minimum": 0 },
+        "sourceRevisionId": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "rgba": { "$ref": "#/$defs/rgba" },
+        "selectedByDefault": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "manual_rgba" } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["rgba"] },
+          "else": { "not": { "required": ["rgba"] } }
+        }
+      ]
+    }
+  }
+}

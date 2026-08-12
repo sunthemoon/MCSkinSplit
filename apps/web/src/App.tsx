@@ -76,6 +76,7 @@ import {
   setCompositionRestorationPlan,
   revertRevision,
   startAiAnalysis,
+  startAiRestorationRecommendation,
   type ApiAiJobDetail,
   type ApiAiJobStatus,
   type ApiAiAnalysisOptions,
@@ -93,7 +94,9 @@ import {
 } from "./lib/revisionApi";
 import {
   defaultRestorationCandidateIds,
+  loadRestorationRecommendationSelection,
   parseOpaqueHexColor,
+  restorationRecommendationStaleReason,
   selectedRestorationCoverage,
   targetComponentIdsForMode,
   toggleRestorationCandidateId,
@@ -299,6 +302,18 @@ export function App() {
     useState<readonly string[]>([]);
   const [restorationBusy, setRestorationBusy] = useState(false);
   const [restorationError, setRestorationError] = useState<string | null>(null);
+  const [restorationRecommendationUserIntent, setRestorationRecommendationUserIntent] =
+    useState("优先选择来源可追溯且完整覆盖 Base 的肤色候选。");
+  const [restorationRecommendationJobDetail, setRestorationRecommendationJobDetail] =
+    useState<ApiAiJobDetail | null>(null);
+  const [restorationRecommendationBusy, setRestorationRecommendationBusy] =
+    useState(false);
+  const [restorationRecommendationError, setRestorationRecommendationError] =
+    useState<string | null>(null);
+  const [restorationRecommendationProviders, setRestorationRecommendationProviders] =
+    useState<readonly string[]>([]);
+  const [restorationRecommendationProvider, setRestorationRecommendationProvider] =
+    useState("");
   const [aiProviders, setAiProviders] = useState<readonly string[]>([]);
   const [aiProvider, setAiProvider] = useState("codex-exec");
   const [aiModel, setAiModel] = useState("codex-config-default");
@@ -310,6 +325,8 @@ export function App() {
   const objectUrlRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
   const aiJobDetailRef = useRef<ApiAiJobDetail | null>(null);
+  const restorationRecommendationJobDetailRef = useRef<ApiAiJobDetail | null>(null);
+  const restorationRecommendationContextRef = useRef(0);
   const handledAiJobsRef = useRef(new Set<string>());
   const aiEventLogRef = useRef<HTMLOListElement>(null);
 
@@ -518,6 +535,9 @@ export function App() {
   const synchronizeAiJob = useCallback(
     async (jobId: string, followSuccessfulRevision: boolean) => {
       const detail = await loadAiJobDetail(jobId);
+      if (detail.job.kind !== "semantic_analysis") {
+        throw new Error("API 返回的 Job 不是语义识别任务");
+      }
       aiJobDetailRef.current = detail;
       setAiJobDetail(detail);
 
@@ -551,6 +571,25 @@ export function App() {
     [refreshHistory, refreshReusableCatalog],
   );
 
+  const synchronizeRestorationRecommendationJob = useCallback(
+    async (
+      jobId: string,
+      expectedContextId = restorationRecommendationContextRef.current,
+    ) => {
+      const detail = await loadAiJobDetail(jobId);
+      if (detail.job.kind !== "restoration_recommendation") {
+        throw new Error("API 返回的 Job 不是修补候选推荐任务");
+      }
+      if (expectedContextId !== restorationRecommendationContextRef.current) {
+        return null;
+      }
+      restorationRecommendationJobDetailRef.current = detail;
+      setRestorationRecommendationJobDetail(detail);
+      return detail;
+    },
+    [],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void listAiProviders()
@@ -561,17 +600,26 @@ export function App() {
         const normalized = Array.isArray(catalog)
           ? {
               providers: catalog as readonly string[],
+              restorationRecommendationProviders: [] as readonly string[],
               defaultModel: "codex-config-default",
               defaultReasoningEffort: "medium" as const,
             }
           : catalog;
         setAiProviders(normalized.providers);
+        setRestorationRecommendationProviders(
+          normalized.restorationRecommendationProviders,
+        );
         setAiModel(normalized.defaultModel);
         setAiReasoningEffort(normalized.defaultReasoningEffort);
         setAiProvider((current) =>
           normalized.providers.includes(current)
             ? current
             : (normalized.providers[0] ?? ""),
+        );
+        setRestorationRecommendationProvider((current) =>
+          normalized.restorationRecommendationProviders.includes(current)
+            ? current
+            : (normalized.restorationRecommendationProviders[0] ?? ""),
         );
       })
       .catch((error: unknown) => {
@@ -601,7 +649,10 @@ export function App() {
     }
 
     let cancelled = false;
-    void listAiJobs(selectedRevisionId)
+    void listAiJobs({
+      revisionId: selectedRevisionId,
+      kind: "semantic_analysis",
+    })
       .then(async (jobs) => {
         const latest = jobs.at(-1);
         if (!latest) {
@@ -674,6 +725,51 @@ export function App() {
   }, [compositionDetail?.composition.id]);
 
   useEffect(() => {
+    const compositionId = compositionDetail?.composition.id;
+    restorationRecommendationContextRef.current += 1;
+    if (!compositionId) {
+      restorationRecommendationJobDetailRef.current = null;
+      setRestorationRecommendationJobDetail(null);
+      setRestorationRecommendationError(null);
+      return;
+    }
+    const current = restorationRecommendationJobDetailRef.current?.job;
+    if (
+      current?.kind === "restoration_recommendation" &&
+      current.compositionId === compositionId
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    setRestorationRecommendationError(null);
+    void listAiJobs({ kind: "restoration_recommendation", compositionId })
+      .then(async (jobs) => {
+        const latest = jobs.at(-1);
+        return latest ? loadAiJobDetail(latest.id) : null;
+      })
+      .then((detail) => {
+        if (cancelled) return;
+        if (detail && detail.job.kind !== "restoration_recommendation") {
+          throw new Error("API 返回的 Job 不是修补候选推荐任务");
+        }
+        restorationRecommendationJobDetailRef.current = detail;
+        setRestorationRecommendationJobDetail(detail);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setRestorationRecommendationJobDetail(null);
+          setRestorationRecommendationError(
+            `AI 推荐记录读取失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [compositionDetail?.composition.id]);
+
+  useEffect(() => {
     const job = aiJobDetail?.job;
     if (!job || terminalAiStatuses.has(job.status)) {
       return;
@@ -704,6 +800,47 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [aiJobDetail?.job, synchronizeAiJob]);
+
+  useEffect(() => {
+    const job = restorationRecommendationJobDetail?.job;
+    if (!job || terminalAiStatuses.has(job.status)) {
+      return;
+    }
+
+    let stopped = false;
+    let polling = false;
+    const poll = () => {
+      if (polling) return;
+      polling = true;
+      void loadAiJobDetail(job.id)
+        .then((detail) => {
+          if (stopped) return;
+          if (detail.job.kind !== "restoration_recommendation") {
+            throw new Error("API 返回的 Job 不是修补候选推荐任务");
+          }
+          restorationRecommendationJobDetailRef.current = detail;
+          setRestorationRecommendationJobDetail(detail);
+        })
+        .catch((error: unknown) => {
+          if (!stopped) {
+            setRestorationRecommendationError(
+              `AI 推荐轮询失败：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        })
+        .finally(() => {
+          polling = false;
+        });
+    };
+    const timer = window.setInterval(poll, 1_500);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    restorationRecommendationJobDetail?.job,
+    compositionDetail?.composition.id,
+  ]);
 
   useEffect(() => {
     const log = aiEventLogRef.current;
@@ -854,6 +991,18 @@ export function App() {
   const restorationCoverage = restorationCandidates
     ? selectedRestorationCoverage(restorationCandidates, restorationCandidateIds)
     : { coveredPixelCount: 0, missingPixelCount: 0 };
+  const restorationRecommendationJob = restorationRecommendationJobDetail?.job ?? null;
+  const restorationRecommendationRunning = Boolean(
+    restorationRecommendationJob &&
+      !terminalAiStatuses.has(restorationRecommendationJob.status),
+  );
+  const restorationRecommendationStale = restorationRecommendationJob
+    ? restorationRecommendationStaleReason(
+        composition,
+        restorationCandidates,
+        restorationRecommendationJob,
+      )
+    : null;
   const canEditSemantic = Boolean(
     selectedRevision?.isBranchHead && segmentation && activeSkin,
   );
@@ -1565,6 +1714,82 @@ export function App() {
     }
   };
 
+  const beginRestorationRecommendation = async () => {
+    if (
+      !composition ||
+      !compositionDraft ||
+      !restorationCandidates ||
+      !restorationRecommendationProvider ||
+      !restorationRecommendationProviders.includes(
+        restorationRecommendationProvider,
+      ) ||
+      !aiModel.trim() ||
+      !restorationRecommendationUserIntent.trim() ||
+      restorationRecommendationRunning
+    ) {
+      return;
+    }
+    setRestorationRecommendationBusy(true);
+    setRestorationRecommendationError(null);
+    setNotice("正在创建受限 AI 修补候选推荐任务");
+    const contextId = restorationRecommendationContextRef.current;
+    try {
+      const job = await startAiRestorationRecommendation(composition.id, {
+        provider: restorationRecommendationProvider,
+        model: aiModel.trim(),
+        reasoningEffort: aiReasoningEffort,
+        userIntent: restorationRecommendationUserIntent.trim(),
+        compositionVersion: restorationCandidates.version,
+        candidateSetHash: restorationCandidates.candidateSetHash,
+        ...restorationGenerationInput(),
+      });
+      if (job.kind !== "restoration_recommendation") {
+        throw new Error("API 返回的 Job 不是修补候选推荐任务");
+      }
+      if (contextId !== restorationRecommendationContextRef.current) return;
+      await synchronizeRestorationRecommendationJob(job.id, contextId);
+      setNotice("AI 推荐任务已创建 · 候选选择与还原计划保持不变");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRestorationRecommendationError(message);
+      setNotice(`AI 修补候选推荐启动失败：${message}`);
+    } finally {
+      setRestorationRecommendationBusy(false);
+    }
+  };
+
+  const cancelRestorationRecommendation = async () => {
+    if (!restorationRecommendationJob || !restorationRecommendationRunning) return;
+    setRestorationRecommendationBusy(true);
+    setRestorationRecommendationError(null);
+    try {
+      await cancelAiJob(restorationRecommendationJob.id);
+      await synchronizeRestorationRecommendationJob(restorationRecommendationJob.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRestorationRecommendationError(message);
+      setNotice(`AI 推荐取消失败：${message}`);
+    } finally {
+      setRestorationRecommendationBusy(false);
+    }
+  };
+
+  const loadRestorationRecommendation = () => {
+    if (!restorationRecommendationJob) return;
+    const result = loadRestorationRecommendationSelection(
+      composition,
+      restorationCandidates,
+      restorationRecommendationJob,
+    );
+    if (!result.ok) {
+      setRestorationRecommendationError(result.reason);
+      return;
+    }
+    setRestorationCandidateIds(result.candidateIds);
+    setRestorationRecommendationError(null);
+    setNotice("AI 建议已载入本地候选选择 · 尚未应用还原计划");
+  };
+
   const toggleRestorationCandidate = (candidateId: string) => {
     if (!restorationCandidates || candidateId === restorationCandidates.outer.candidateId) {
       return;
@@ -1688,17 +1913,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M9</p>
+          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M10</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            Codex 辅助识别真实皮肤的语义部件；单组件修补、多图层混搭和目标残留还原均保留可追溯历史。
+            Codex 辅助识别真实皮肤的语义部件，并对确定性还原候选给出受限建议；单组件修补、多图层混搭与目标残留还原均保留可追溯历史。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M9 目标皮肤还原与像素混搭工作室">
-          <strong>M9</strong>
-          <span>RESTORE TARGET</span>
+        <div className="baseline-stamp" aria-label="M10 受限 AI 换装建议与目标皮肤还原工作室">
+          <strong>M10</strong>
+          <span>ADVISE + RESTORE</span>
         </div>
       </header>
 
@@ -2954,6 +3179,15 @@ export function App() {
             disabled={!compositionDraft}
             busy={compositionBusy || restorationBusy}
             error={restorationError}
+            recommendationJobDetail={restorationRecommendationJobDetail}
+            recommendationUserIntent={restorationRecommendationUserIntent}
+            recommendationProviders={restorationRecommendationProviders}
+            recommendationProvider={restorationRecommendationProvider}
+            recommendationModel={aiModel}
+            recommendationReasoningEffort={aiReasoningEffort}
+            recommendationStaleReason={restorationRecommendationStale}
+            recommendationBusy={restorationRecommendationBusy}
+            recommendationError={restorationRecommendationError}
             onModeChange={changeRestorationMode}
             onToggleFine={toggleRestorationFineComponent}
             onDonorRevisionIdChange={(value) => {
@@ -2978,6 +3212,11 @@ export function App() {
             onToggleCandidate={toggleRestorationCandidate}
             onApply={() => void applyRestorationPlan()}
             onClear={() => void clearRestorationPlan()}
+            onRecommendationUserIntentChange={setRestorationRecommendationUserIntent}
+            onRecommendationProviderChange={setRestorationRecommendationProvider}
+            onStartRecommendation={() => void beginRestorationRecommendation()}
+            onCancelRecommendation={() => void cancelRestorationRecommendation()}
+            onLoadRecommendation={loadRestorationRecommendation}
           />
 
           <section

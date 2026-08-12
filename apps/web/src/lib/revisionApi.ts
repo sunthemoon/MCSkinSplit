@@ -288,6 +288,7 @@ export interface ApiCompositionProject {
   readonly status: "draft" | "committed";
   readonly resolutionMode: "unresolved" | "layer_order";
   readonly conflictWinners: Readonly<Record<string, string>>;
+  readonly restorationVersion: number;
   readonly restorationPlan: ApiCompositionRestorationPlan | null;
   readonly report: ApiCompositionReport;
   readonly resultRevisionId: string | null;
@@ -397,6 +398,43 @@ export interface ApiAiAnalysisOptions {
   readonly createRevisionOnSuccess: boolean;
 }
 
+export type ApiAiReasoningEffort = ApiAiAnalysisOptions["reasoningEffort"];
+
+export interface ApiAiRestorationRecommendationOptions {
+  readonly mode: "restoration_recommendation";
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: ApiAiReasoningEffort;
+  readonly userIntent: string;
+  readonly compositionId: string;
+  readonly compositionVersion: number;
+  readonly candidateSetHash: string;
+  readonly targetComponentIds: readonly string[];
+  readonly donorRevisionId?: string;
+  readonly manualRgba?: Rgba;
+}
+
+export type ApiAiJobOptions =
+  | ApiAiAnalysisOptions
+  | ApiAiRestorationRecommendationOptions;
+
+export interface ApiAiRestorationRecommendationDecision {
+  readonly targetGroupId: string;
+  readonly selectedCandidateId: string | null;
+  readonly rankedCandidateIds: readonly string[];
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface ApiAiRestorationRecommendationResult {
+  readonly schemaVersion: "1.0";
+  readonly jobId: string;
+  readonly compositionId: string;
+  readonly candidateSetHash: string;
+  readonly decisions: readonly ApiAiRestorationRecommendationDecision[];
+  readonly summary: string;
+}
+
 export interface ApiAiJobError {
   readonly code: string;
   readonly message: string;
@@ -405,9 +443,11 @@ export interface ApiAiJobError {
 
 export interface ApiAiJob {
   readonly id: string;
+  readonly kind: "semantic_analysis" | "restoration_recommendation";
   readonly projectId: string;
   readonly inputRevisionId: string;
   readonly resultRevisionId: string | null;
+  readonly compositionId: string | null;
   readonly retryOfJobId: string | null;
   readonly status: ApiAiJobStatus;
   readonly provider: string;
@@ -417,9 +457,10 @@ export interface ApiAiJob {
   readonly promptVersion: string;
   readonly inputHash: string | null;
   readonly outputHash: string | null;
-  readonly options: ApiAiAnalysisOptions;
+  readonly options: ApiAiJobOptions;
   readonly reviewItems: readonly ApiAiReviewItem[];
   readonly proposalSummary: string | null;
+  readonly advisoryResult: ApiAiRestorationRecommendationResult | null;
   readonly cancelRequested: boolean;
   readonly createdAt: string;
   readonly startedAt: string | null;
@@ -469,6 +510,17 @@ export interface ApiAiJobDetail {
   readonly runs: readonly ApiAiRun[];
   readonly events: readonly ApiAiJobEvent[];
 }
+
+export interface ApiAiJobListFilters {
+  readonly revisionId?: string;
+  readonly kind?: ApiAiJob["kind"];
+  readonly compositionId?: string;
+}
+
+export type StartAiRestorationRecommendationInput = Omit<
+  ApiAiRestorationRecommendationOptions,
+  "mode" | "compositionId"
+>;
 
 export class RevisionApiError extends Error {
   readonly status: number;
@@ -1137,6 +1189,7 @@ export async function listAiProviders(
   fetcher: Fetcher = fetch,
 ): Promise<{
   readonly providers: readonly string[];
+  readonly restorationRecommendationProviders: readonly string[];
   readonly defaultModel: string;
   readonly defaultReasoningEffort: ApiAiAnalysisOptions["reasoningEffort"];
 }> {
@@ -1164,13 +1217,40 @@ export async function startAiAnalysis(
   return body.job;
 }
 
+export async function startAiRestorationRecommendation(
+  compositionId: string,
+  input: StartAiRestorationRecommendationInput,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJob> {
+  const body = await requestJson<{ job: ApiAiJob }>(
+    `/api/compositions/${encodeURIComponent(compositionId)}/ai-restoration-recommendation`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+  return body.job;
+}
+
 export async function listAiJobs(
-  revisionId?: string,
+  filtersOrRevisionId?: ApiAiJobListFilters | string,
   fetcher: Fetcher = fetch,
 ): Promise<readonly ApiAiJob[]> {
-  const query = revisionId
-    ? `?revisionId=${encodeURIComponent(revisionId)}`
-    : "";
+  const filters = typeof filtersOrRevisionId === "string"
+    ? { revisionId: filtersOrRevisionId }
+    : (filtersOrRevisionId ?? {});
+  const queryParts = [
+    filters.revisionId
+      ? `revisionId=${encodeURIComponent(filters.revisionId)}`
+      : null,
+    filters.kind ? `kind=${encodeURIComponent(filters.kind)}` : null,
+    filters.compositionId
+      ? `compositionId=${encodeURIComponent(filters.compositionId)}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+  const query = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
   const body = await requestJson<{ jobs: readonly ApiAiJob[] }>(
     `/api/ai-jobs${query}`,
     undefined,
