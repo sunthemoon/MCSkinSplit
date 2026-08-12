@@ -18,9 +18,12 @@ ordered layers, and conflict decisions always produce the same RGBA result.
 4. Inspect the live 3D result or switch to its 64x64 texture and conflict report.
    Previewing is read-only and may show the default top-layer result even while
    conflicts remain unresolved.
-5. Resolve each hard pixel conflict by choosing a winning layer, or explicitly
+5. When replacing target components, optionally generate and explicitly apply a
+   restoration plan. It clears selected Outer remnants and requires a validated
+   opaque source for every selected Base pixel.
+6. Resolve each hard pixel conflict by choosing a winning layer, or explicitly
    confirm that the complete layer order should decide all hard conflicts.
-6. Commit only when the report is committable. The service rechecks the Branch
+7. Commit only when the report is committable. The service rechecks the Branch
    HEAD, all stored hashes, every part manifest, and the conflict decisions before
    creating one immutable `compose` Revision.
 
@@ -44,6 +47,10 @@ Composition Project is immutable.
 - A write outside the surfaces declared by the part manifest is a blocking
   semantic-boundary conflict. Neither structural conflict can be dismissed through
   layer ordering.
+- Restoration runs over the immutable base before ordinary part layers. Selected
+  Outer pixels become transparent; selected Base pixels require an opaque,
+  host-derived candidate. Missing coverage or restoration integrity issues block
+  commit.
 - Empty compositions cannot be committed.
 
 The committed segmentation keeps existing base ownership for untouched pixels and
@@ -68,6 +75,9 @@ POST   /api/compositions/:compositionId/apply-bundle
 POST   /api/compositions/:compositionId/reorder
 DELETE /api/compositions/:compositionId/layers/:layerId
 POST   /api/compositions/:compositionId/resolve-conflict
+POST   /api/compositions/:compositionId/restoration-candidates
+PUT    /api/compositions/:compositionId/restoration-plan
+DELETE /api/compositions/:compositionId/restoration-plan
 POST   /api/compositions/:compositionId/commit
 ```
 
@@ -79,6 +89,13 @@ the draft state, target arm model, insertion position, duplicate members, and ev
 member's immutable part files. It then evaluates the complete resulting stack and
 replaces the draft layer set in one transaction. As with any layer mutation,
 previous conflict decisions are cleared because their writers may have changed.
+
+Restoration candidates and plans use a narrower transport boundary than ordinary
+part previews. The client receives candidate IDs, hashes, labels, and coverage
+counts, never authoritative masks, pixel-ID lists, operations, or a generated
+skin PNG. The service regenerates and verifies the candidate set before storing a
+plan. The full candidate, versioning, audit, and provenance contract is in
+[`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 
 ## Real-skin composition fixture
 
@@ -118,3 +135,10 @@ confirmation and individual pixel-winner controls. The preview PNG can be
 downloaded at any time for inspection; the commit action stays disabled until the
 server report is committable. After commit, the new Revision is loaded into the
 timeline, Atlas, semantic editor, and 3D avatar together.
+
+M9 adds the restoration panel inside the same Composition Project. It can select
+fine components or expand complete hair, clothing, and accessory views without
+changing the fixed taxonomy. The panel shows aggregate Outer cleanup, grouped
+Base candidates, covered and missing pixels, optional donor/manual sources, and
+an explicit Apply/Clear boundary. Applying or clearing refreshes both the texture
+and draggable 3D composition preview from server state.

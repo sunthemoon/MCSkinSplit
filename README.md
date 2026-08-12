@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, and M8 adds immutable single-component repair.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, and M9 adds deterministic target-remnant cleanup and Base skin restoration to composition.
 
 The current Studio can:
 
@@ -34,6 +34,12 @@ The current Studio can:
 - arrange multiple saved parts in a persistent top-to-bottom layer stack;
 - inspect model, semantic-boundary, same-color, and hard per-pixel conflicts;
 - resolve hard conflicts through explicit layer order or individual pixel winners;
+- choose cleanup targets by fine semantic component or by complete hair, clothing,
+  or accessory view without changing the fixed 23-category taxonomy;
+- clear selected Outer remnants and fill exposed Base pixels from deterministic
+  same-surface, same-body-part, mirror, donor-Revision, or opaque manual candidates;
+- preview, version, audit, clear, and commit a hash-verified restoration plan
+  without accepting client-supplied masks or PNG output;
 - export the live composition preview and commit a validated `compose` Revision;
 - rebuild the checked-in Alex/Slim mix pixel-exactly from all six real skins.
 
@@ -58,7 +64,7 @@ Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` 
 
 AI analysis defaults to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. It is optional: deterministic editing, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
 
-Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution. Complete-category bundles are a convenience layer over immutable fine parts, not flattened replacement textures. Component repair provides deterministic authored reconstruction; it does not infer hidden source pixels or remove old target-skin remnants during composition. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer, conflict, persistence, and real-skin test contracts, [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog, batch-export, and whole-bundle workflow, and [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md) for repair tools, history, storage, and API contracts.
+Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution and every requested Base restoration pixel has a validated source. Complete-category bundles and restoration target groups are convenience views over immutable fine parts and the unchanged 23-category taxonomy; neither flattens or deletes fine semantic components. Component repair provides deterministic authored reconstruction, while composition restoration clears selected target remnants and fills exposed Base pixels from explicit candidates. Neither workflow claims to recover factual pixels that were hidden in the source artwork. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer and conflict behavior, [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md) for cleanup, candidate, audit, and provenance contracts, [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog and whole-bundle workflow, and [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md) for repair tools and history.
 
 ## Verify
 
@@ -85,4 +91,4 @@ scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), immutable component repair in [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), immutable component repair in [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), composition restoration in [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

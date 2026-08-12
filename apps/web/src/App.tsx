@@ -1,6 +1,7 @@
 import {
   SEMANTIC_CATEGORIES,
   SEMANTIC_CATEGORY_LABELS,
+  categoryBelongsToAggregate,
   encodeSkinPng,
   getSkinLayout,
   pixelIdsToSpans,
@@ -23,6 +24,7 @@ import {
 import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
 import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
 import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
+import { CompositionRestorationPanel } from "./components/CompositionRestorationPanel";
 import { PartBundleShelf } from "./components/PartBundleShelf";
 import {
   SkinPreview,
@@ -41,12 +43,14 @@ import {
   applySemanticOperation,
   cancelAiJob,
   commitComposition as commitCompositionProject,
+  clearCompositionRestorationPlan,
   commitRevisionPart,
   compositionPreviewUrl,
   createComposition,
   createProject,
   exportRevisionPart,
   exportRevisionBundle,
+  generateCompositionRestorationCandidates,
   getProject,
   importProjectSkin,
   listAiJobs,
@@ -69,6 +73,7 @@ import {
   removeCompositionLayer,
   reorderCompositionLayers,
   resolveCompositionConflicts,
+  setCompositionRestorationPlan,
   revertRevision,
   startAiAnalysis,
   type ApiAiJobDetail,
@@ -78,6 +83,7 @@ import {
   type ApiAnalyzedSkin,
   type ApiAnalyzedSkinGroup,
   type ApiCompositionDetail,
+  type ApiCompositionRestorationCandidates,
   type ApiProject,
   type ApiPart,
   type ApiPartBundle,
@@ -85,6 +91,14 @@ import {
   type ApiRevision,
   type ApiSegmentation,
 } from "./lib/revisionApi";
+import {
+  defaultRestorationCandidateIds,
+  parseOpaqueHexColor,
+  selectedRestorationCoverage,
+  targetComponentIdsForMode,
+  toggleRestorationCandidateId,
+  type RestorationTargetMode,
+} from "./lib/compositionRestoration";
 
 type ModelChoice = "auto" | ArmType;
 
@@ -269,6 +283,22 @@ export function App() {
   const [compositionName, setCompositionName] = useState("Slim 真实皮肤混搭");
   const [compositionBusy, setCompositionBusy] = useState(false);
   const [compositionError, setCompositionError] = useState<string | null>(null);
+  const [restorationMode, setRestorationMode] =
+    useState<RestorationTargetMode>("fine");
+  const [restorationFineIds, setRestorationFineIds] =
+    useState<readonly string[]>([]);
+  const [restorationDonorRevisionId, setRestorationDonorRevisionId] =
+    useState("");
+  const [restorationManualColor, setRestorationManualColor] =
+    useState("#d6a17b");
+  const [restorationIncludeManualColor, setRestorationIncludeManualColor] =
+    useState(false);
+  const [restorationCandidates, setRestorationCandidates] =
+    useState<ApiCompositionRestorationCandidates | null>(null);
+  const [restorationCandidateIds, setRestorationCandidateIds] =
+    useState<readonly string[]>([]);
+  const [restorationBusy, setRestorationBusy] = useState(false);
+  const [restorationError, setRestorationError] = useState<string | null>(null);
   const [aiProviders, setAiProviders] = useState<readonly string[]>([]);
   const [aiProvider, setAiProvider] = useState("codex-exec");
   const [aiModel, setAiModel] = useState("codex-config-default");
@@ -603,6 +633,9 @@ export function App() {
     if (!selectedRevisionId) {
       setCompositionDetail(null);
       setCompositionError(null);
+      setRestorationCandidates(null);
+      setRestorationCandidateIds([]);
+      setRestorationError(null);
       return;
     }
 
@@ -633,6 +666,12 @@ export function App() {
       cancelled = true;
     };
   }, [selectedRevisionId]);
+
+  useEffect(() => {
+    setRestorationCandidates(null);
+    setRestorationCandidateIds([]);
+    setRestorationError(null);
+  }, [compositionDetail?.composition.id]);
 
   useEffect(() => {
     const job = aiJobDetail?.job;
@@ -804,6 +843,17 @@ export function App() {
   const compositionLayerNames = new Map(
     compositionDetail?.layers.map((layer) => [layer.id, layer.part.name]) ?? [],
   );
+  const restorationComponents = segmentation?.components.filter(
+    (component) => component.category !== "skin" && component.category !== "unknown",
+  ) ?? [];
+  const restorationTargetComponentIds = targetComponentIdsForMode(
+    restorationComponents,
+    restorationMode,
+    restorationFineIds,
+  );
+  const restorationCoverage = restorationCandidates
+    ? selectedRestorationCoverage(restorationCandidates, restorationCandidateIds)
+    : { coveredPixelCount: 0, missingPixelCount: 0 };
   const canEditSemantic = Boolean(
     selectedRevision?.isBranchHead && segmentation && activeSkin,
   );
@@ -1454,8 +1504,141 @@ export function App() {
     );
   };
 
+  const changeRestorationMode = (mode: RestorationTargetMode) => {
+    setRestorationMode(mode);
+    setRestorationCandidates(null);
+    setRestorationCandidateIds([]);
+    setRestorationError(null);
+    if (mode !== "fine") {
+      const componentIds = restorationComponents
+        .filter((component) => categoryBelongsToAggregate(component.category, mode))
+        .map((component) => component.instanceId);
+      setRestorationFineIds(componentIds);
+    }
+  };
+
+  const toggleRestorationFineComponent = (componentId: string) => {
+    setRestorationFineIds((current) =>
+      current.includes(componentId)
+        ? current.filter((id) => id !== componentId)
+        : [...current, componentId],
+    );
+    setRestorationCandidates(null);
+    setRestorationCandidateIds([]);
+    setRestorationError(null);
+  };
+
+  const restorationGenerationInput = () => ({
+    targetComponentIds: restorationTargetComponentIds,
+    ...(restorationDonorRevisionId.trim()
+      ? { donorRevisionId: restorationDonorRevisionId.trim() }
+      : {}),
+    ...(restorationIncludeManualColor
+      ? { manualRgba: parseOpaqueHexColor(restorationManualColor) }
+      : {}),
+  });
+
+  const generateRestorationCandidates = async () => {
+    if (!composition || !compositionDraft || restorationTargetComponentIds.length === 0) {
+      setRestorationError("请先明确选择要替换的精细组件或完整大类");
+      return;
+    }
+    setRestorationBusy(true);
+    setRestorationError(null);
+    setNotice("正在从目标语义与已验证纹理生成还原候选");
+    try {
+      const next = await generateCompositionRestorationCandidates(
+        composition.id,
+        restorationGenerationInput(),
+      );
+      setRestorationCandidates(next);
+      setRestorationCandidateIds(defaultRestorationCandidateIds(next));
+      setNotice(
+        `已生成肤色候选 · Outer ${next.outer.pixelCount} px · Base 缺口 ${next.base.missingPixelCount} px`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRestorationError(message);
+      setNotice(`还原候选生成失败：${message}`);
+    } finally {
+      setRestorationBusy(false);
+    }
+  };
+
+  const toggleRestorationCandidate = (candidateId: string) => {
+    if (!restorationCandidates || candidateId === restorationCandidates.outer.candidateId) {
+      return;
+    }
+    setRestorationCandidateIds((current) =>
+      toggleRestorationCandidateId(restorationCandidates, current, candidateId),
+    );
+  };
+
+  const applyRestorationPlan = async () => {
+    if (
+      !composition ||
+      !compositionDraft ||
+      !restorationCandidates ||
+      restorationCoverage.missingPixelCount > 0
+    ) {
+      return;
+    }
+    setRestorationBusy(true);
+    setRestorationError(null);
+    setNotice("正在重新计算候选并应用清理计划");
+    try {
+      const detail = await setCompositionRestorationPlan(composition.id, {
+        expectedVersion: restorationCandidates.version,
+        candidateSetHash: restorationCandidates.candidateSetHash,
+        candidateIds: restorationCandidateIds,
+        ...restorationGenerationInput(),
+      });
+      setCompositionDetail(detail);
+      setRestorationCandidates(null);
+      setRestorationCandidateIds([]);
+      setNotice(
+        `清理计划已应用 · ${detail.report.restorationPixelCount ?? 0} px · 2D/3D 预览已刷新`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRestorationError(message);
+      setNotice(`清理计划应用失败：${message}`);
+    } finally {
+      setRestorationBusy(false);
+    }
+  };
+
+  const clearRestorationPlan = async () => {
+    if (!composition || !compositionDraft || !composition.restorationPlan) return;
+    setRestorationBusy(true);
+    setRestorationError(null);
+    setNotice("正在清除目标皮肤还原计划");
+    try {
+      const detail = await clearCompositionRestorationPlan(
+        composition.id,
+        composition.restorationPlan.version,
+      );
+      setCompositionDetail(detail);
+      setRestorationCandidates(null);
+      setRestorationCandidateIds([]);
+      setNotice("目标皮肤还原计划已清除");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRestorationError(message);
+      setNotice(`清除还原计划失败：${message}`);
+    } finally {
+      setRestorationBusy(false);
+    }
+  };
+
   const commitActiveComposition = async () => {
-    if (!composition || !compositionReport?.committable || !compositionDraft) {
+    if (
+      !composition ||
+      !compositionReport?.committable ||
+      (compositionReport.restorationMissingPixelCount ?? 0) > 0 ||
+      (compositionReport.restorationIssueCount ?? 0) > 0 ||
+      !compositionDraft
+    ) {
       return;
     }
     setCompositionBusy(true);
@@ -1505,17 +1688,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SKIN REPAIR + COMPOSITION STUDIO / M8</p>
+          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M9</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            Codex 辅助识别真实皮肤的语义部件；单组件修补与多图层混搭都通过不可变 Revision 保留完整历史。
+            Codex 辅助识别真实皮肤的语义部件；单组件修补、多图层混搭和目标残留还原均保留可追溯历史。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M8 组件修补与像素混搭工作室">
-          <strong>M8</strong>
-          <span>PART REPAIR</span>
+        <div className="baseline-stamp" aria-label="M9 目标皮肤还原与像素混搭工作室">
+          <strong>M9</strong>
+          <span>RESTORE TARGET</span>
         </div>
       </header>
 
@@ -2715,6 +2898,14 @@ export function App() {
                 <dt>OPEN</dt>
                 <dd>{compositionReport?.unresolvedConflictCount ?? 0}</dd>
               </div>
+              <div>
+                <dt>RESTORE</dt>
+                <dd>{compositionReport?.restorationPixelCount ?? 0}<small> px</small></dd>
+              </div>
+              <div data-alert={(compositionReport?.restorationMissingPixelCount ?? 0) > 0}>
+                <dt>MISSING</dt>
+                <dd>{compositionReport?.restorationMissingPixelCount ?? 0}</dd>
+              </div>
             </dl>
             <div className="composition-output-actions">
               {composition && (
@@ -2730,6 +2921,8 @@ export function App() {
                 disabled={
                   !compositionDraft ||
                   !compositionReport?.committable ||
+                  (compositionReport.restorationMissingPixelCount ?? 0) > 0 ||
+                  (compositionReport.restorationIssueCount ?? 0) > 0 ||
                   compositionBusy
                 }
                 onClick={() => void commitActiveComposition()}
@@ -2742,9 +2935,50 @@ export function App() {
               </button>
             </div>
             <p className="composition-output-note">
-              预览始终按当前顶部图层渲染；导出不等于提交，Revision 仍要求显式解决全部阻塞冲突。
+              预览按已应用的还原计划与顶部图层渲染；导出不等于提交，Revision 仍要求显式解决全部阻塞冲突。
             </p>
           </section>
+
+          <CompositionRestorationPanel
+            components={restorationComponents}
+            mode={restorationMode}
+            selectedFineIds={restorationFineIds}
+            donorRevisionId={restorationDonorRevisionId}
+            manualColor={restorationManualColor}
+            includeManualColor={restorationIncludeManualColor}
+            candidates={restorationCandidates}
+            selectedCandidateIds={restorationCandidateIds}
+            plan={composition?.restorationPlan ?? null}
+            coveredPixelCount={restorationCoverage.coveredPixelCount}
+            missingPixelCount={restorationCoverage.missingPixelCount}
+            disabled={!compositionDraft}
+            busy={compositionBusy || restorationBusy}
+            error={restorationError}
+            onModeChange={changeRestorationMode}
+            onToggleFine={toggleRestorationFineComponent}
+            onDonorRevisionIdChange={(value) => {
+              setRestorationDonorRevisionId(value);
+              setRestorationCandidates(null);
+              setRestorationCandidateIds([]);
+              setRestorationError(null);
+            }}
+            onManualColorChange={(value) => {
+              setRestorationManualColor(value);
+              setRestorationCandidates(null);
+              setRestorationCandidateIds([]);
+              setRestorationError(null);
+            }}
+            onIncludeManualColorChange={(enabled) => {
+              setRestorationIncludeManualColor(enabled);
+              setRestorationCandidates(null);
+              setRestorationCandidateIds([]);
+              setRestorationError(null);
+            }}
+            onGenerate={() => void generateRestorationCandidates()}
+            onToggleCandidate={toggleRestorationCandidate}
+            onApply={() => void applyRestorationPlan()}
+            onClear={() => void clearRestorationPlan()}
+          />
 
           <section
             className="composition-conflicts-panel"

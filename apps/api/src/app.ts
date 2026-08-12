@@ -211,6 +211,22 @@ interface CommitCompositionBody {
   readonly summary?: string;
 }
 
+interface GenerateRestorationCandidatesBody {
+  readonly targetComponentIds: readonly string[];
+  readonly donorRevisionId?: string;
+  readonly manualRgba?: readonly [number, number, number, number];
+}
+
+interface SetRestorationPlanBody extends GenerateRestorationCandidatesBody {
+  readonly expectedVersion: number;
+  readonly candidateSetHash: string;
+  readonly candidateIds: readonly string[];
+}
+
+interface ClearRestorationPlanBody {
+  readonly expectedVersion: number;
+}
+
 interface AiJobsQuery {
   readonly revisionId?: string;
 }
@@ -924,6 +940,39 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
       ),
   );
 
+  app.post<{
+    Params: CompositionParams;
+    Body: GenerateRestorationCandidatesBody;
+  }>(
+    "/api/compositions/:compositionId/restoration-candidates",
+    { schema: { body: generateRestorationCandidatesSchema } },
+    async (request) =>
+      await store.generateCompositionRestorationCandidates(
+        request.params.compositionId,
+        request.body,
+      ),
+  );
+
+  app.put<{ Params: CompositionParams; Body: SetRestorationPlanBody }>(
+    "/api/compositions/:compositionId/restoration-plan",
+    { schema: { body: setRestorationPlanSchema } },
+    async (request) =>
+      await store.setCompositionRestorationPlan(
+        request.params.compositionId,
+        request.body,
+      ),
+  );
+
+  app.delete<{ Params: CompositionParams; Body: ClearRestorationPlanBody }>(
+    "/api/compositions/:compositionId/restoration-plan",
+    { schema: { body: clearRestorationPlanSchema } },
+    async (request) =>
+      await store.clearCompositionRestorationPlan(
+        request.params.compositionId,
+        request.body,
+      ),
+  );
+
   app.post<{ Params: CompositionParams; Body: CommitCompositionBody }>(
     "/api/compositions/:compositionId/commit",
     { schema: { body: commitCompositionSchema } },
@@ -1203,6 +1252,13 @@ const opaqueRgbaSchema = {
   ],
 } as const;
 
+const restorationRgbaSchema = {
+  type: "array",
+  minItems: 4,
+  maxItems: 4,
+  items: [byteSchema, byteSchema, byteSchema, { const: 255 }],
+} as const;
+
 const repairSpansSchema = {
   type: "array",
   minItems: 1,
@@ -1452,6 +1508,70 @@ const commitCompositionSchema = {
   properties: {
     actorId: { type: "string", minLength: 1, maxLength: 120 },
     summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const generateRestorationCandidatesSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["targetComponentIds"],
+  properties: {
+    targetComponentIds: {
+      type: "array",
+      minItems: 1,
+      maxItems: 256,
+      uniqueItems: true,
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 100,
+        pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+        not: { const: "unknown" },
+      },
+    },
+    donorRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+    manualRgba: restorationRgbaSchema,
+  },
+} as const;
+
+const candidateSetHashSchema = {
+  type: "string",
+  pattern: "^sha256:[0-9a-f]{64}$",
+} as const;
+
+const setRestorationPlanSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "expectedVersion",
+    "candidateSetHash",
+    "candidateIds",
+    "targetComponentIds",
+  ],
+  properties: {
+    expectedVersion: { type: "integer", minimum: 0 },
+    candidateSetHash: candidateSetHashSchema,
+    candidateIds: {
+      type: "array",
+      minItems: 1,
+      maxItems: 512,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 160 },
+    },
+    targetComponentIds:
+      generateRestorationCandidatesSchema.properties.targetComponentIds,
+    donorRevisionId:
+      generateRestorationCandidatesSchema.properties.donorRevisionId,
+    manualRgba: generateRestorationCandidatesSchema.properties.manualRgba,
+  },
+} as const;
+
+const clearRestorationPlanSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["expectedVersion"],
+  properties: {
+    expectedVersion: { type: "integer", minimum: 0 },
   },
 } as const;
 

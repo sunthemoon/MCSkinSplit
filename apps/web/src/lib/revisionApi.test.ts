@@ -5,6 +5,7 @@ import {
   applyPartEditOperation,
   applySemanticOperation,
   commitComposition,
+  clearCompositionRestorationPlan,
   commitRevisionPart,
   compositionPreviewUrl,
   commitPartEdit,
@@ -12,6 +13,7 @@ import {
   createPartEdit,
   exportRevisionPart,
   exportRevisionBundle,
+  generateCompositionRestorationCandidates,
   getAnalyzedSkin,
   importProjectSkin,
   listAnalyzedSkins,
@@ -30,6 +32,7 @@ import {
   removeCompositionLayer,
   reorderCompositionLayers,
   resolveCompositionConflicts,
+  setCompositionRestorationPlan,
   RevisionApiError,
   startAiAnalysis,
 } from "./revisionApi";
@@ -294,6 +297,67 @@ describe("revisionApi", () => {
     expect(compositionPreviewUrl("composition / 1", "2026-08-11T00:00:00Z")).toBe(
       "/api/compositions/composition%20%2F%201/preview.png?v=2026-08-11T00%3A00%3A00Z",
     );
+  });
+
+  it("uses candidate IDs only and repeats trusted generation inputs when setting restoration", async () => {
+    const candidates = {
+      compositionId: "composition / 1",
+      version: 4,
+      candidateSetHash: `sha256:${"a".repeat(64)}`,
+      targetComponentIds: ["shirt/main"],
+      outer: { pixelCount: 12, candidateId: "candidate.outer" },
+      base: { pixelCount: 8, coveredPixelCount: 8, missingPixelCount: 0, candidates: [] },
+    };
+    const detail = {
+      composition: { id: "composition / 1", status: "draft" },
+      layers: [],
+      report: { committable: true },
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(candidates, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 200));
+
+    const input = {
+      targetComponentIds: ["shirt/main"],
+      donorRevisionId: "revision / donor",
+      manualRgba: [220, 169, 140, 255] as [number, number, number, number],
+    };
+    await generateCompositionRestorationCandidates("composition / 1", input, fetcher);
+    await setCompositionRestorationPlan(
+      "composition / 1",
+      {
+        ...input,
+        expectedVersion: 4,
+        candidateSetHash: candidates.candidateSetHash,
+        candidateIds: ["candidate.outer", "candidate.manual"],
+      },
+      fetcher,
+    );
+    await clearCompositionRestorationPlan("composition / 1", 5, fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/compositions/composition%20%2F%201/restoration-candidates",
+      "/api/compositions/composition%20%2F%201/restoration-plan",
+      "/api/compositions/composition%20%2F%201/restoration-plan",
+    ]);
+    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual([
+      "POST",
+      "PUT",
+      "DELETE",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      targetComponentIds: ["shirt/main"],
+      donorRevisionId: "revision / donor",
+      manualRgba: [220, 169, 140, 255],
+      expectedVersion: 4,
+      candidateSetHash: candidates.candidateSetHash,
+      candidateIds: ["candidate.outer", "candidate.manual"],
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      expectedVersion: 5,
+    });
   });
 
   it("loads analyzed skins and persists aggregate bundles without flattening members", async () => {

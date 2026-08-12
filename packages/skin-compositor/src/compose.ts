@@ -14,6 +14,7 @@ import {
   type CompositionLayerInput,
   type CompositionPixelConflict,
   type CompositionPixelWrite,
+  type CompositionRestorationOperation,
   type CompositionResult,
 } from "./types";
 
@@ -23,9 +24,30 @@ interface PreparedLayer extends CompositionLayerInput {
   readonly allowedPixelIds: ReadonlySet<number>;
 }
 
+interface PreparedRestoration {
+  readonly image: RgbaImage;
+  readonly pixelIdsByOperation: Readonly<Record<string, readonly number[]>>;
+  readonly pixelCount: number;
+  readonly outerPixelCount: number;
+  readonly basePixelCount: number;
+}
+
 export function composeSkin(input: ComposeSkinInput): CompositionResult {
   assertImage(input.base, "base");
+  const restorationMissingPixelCount = assertNonNegativeCount(
+    input.restorationAssessment?.missingPixelCount ?? 0,
+    "Restoration missing pixel count",
+  );
+  const restorationIssueCount = assertNonNegativeCount(
+    input.restorationAssessment?.issueCount ?? 0,
+    "Restoration issue count",
+  );
   const layers = prepareLayers(input.layers, input.targetArmType);
+  const restoration = prepareRestoration(
+    input.base,
+    input.restorationPlan?.operations ?? [],
+    input.targetArmType,
+  );
   const resolutionMode = input.resolutionMode ?? "unresolved";
   const conflictWinners = input.conflictWinners ?? {};
   const writesByPixel = Array.from(
@@ -85,7 +107,7 @@ export function composeSkin(input: ComposeSkinInput): CompositionResult {
     }
   }
 
-  const resultData = input.base.data.slice();
+  const resultData = restoration.image.data.slice();
   const winningPixelIds = new Map<string, number[]>();
   let writePixelCount = 0;
   let appliedPixelCount = 0;
@@ -98,7 +120,7 @@ export function composeSkin(input: ComposeSkinInput): CompositionResult {
     if (partWrites.length === 0) continue;
     writePixelCount += 1;
     if (partWrites.length > 1) layerConflictCount += 1;
-    const writes = withBaseWrite(input.base, pixelId, partWrites);
+    const writes = withBaseWrite(restoration.image, pixelId, partWrites);
     let winner = partWrites[partWrites.length - 1]!;
 
     if (writes.length > 1) {
@@ -168,13 +190,115 @@ export function composeSkin(input: ComposeSkinInput): CompositionResult {
       layerConflictCount,
       modelConflictCount,
       unknownConflictCount,
+      restorationPixelCount: restoration.pixelCount,
+      restoredOuterPixelCount: restoration.outerPixelCount,
+      restoredBasePixelCount: restoration.basePixelCount,
+      restorationMissingPixelCount,
+      restorationIssueCount,
       unresolvedConflictCount,
-      committable: layers.length > 0 && unresolvedConflictCount === 0,
+      committable:
+        (layers.length > 0 || restoration.pixelCount > 0) &&
+        unresolvedConflictCount === 0 &&
+        restorationMissingPixelCount === 0 &&
+        restorationIssueCount === 0,
       conflicts,
     },
     winningPixelIdsByLayer: Object.fromEntries(
       [...winningPixelIds].map(([layerId, pixelIds]) => [layerId, pixelIds]),
     ),
+    restoredPixelIdsByOperation: restoration.pixelIdsByOperation,
+  };
+}
+
+function prepareRestoration(
+  base: RgbaImage,
+  operations: readonly CompositionRestorationOperation[],
+  armType: "wide" | "slim",
+): PreparedRestoration {
+  const image = createRgbaImage(64, 64, base.data.slice());
+  const layout = getSkinLayout(armType);
+  const layerByPixel = new Map<number, "base" | "outer">();
+  for (const surfaceKey of layout.surfaceOrder) {
+    const surface = layout.surfaces[surfaceKey];
+    if (!surface) continue;
+    const rect = surface.atlasRect;
+    for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+      for (let x = rect.x; x < rect.x + rect.width; x += 1) {
+        layerByPixel.set(y * 64 + x, surface.layer);
+      }
+    }
+  }
+
+  const operationIds = new Set<string>();
+  const occupied = new Map<number, string>();
+  const pixelIdsByOperation: Record<string, readonly number[]> = {};
+  let outerPixelCount = 0;
+  let basePixelCount = 0;
+
+  for (const operation of operations) {
+    if (!/^[a-z][a-z0-9_-]{2,100}$/u.test(operation.operationId)) {
+      throw new TypeError(`Unsafe restoration operation id: ${operation.operationId}`);
+    }
+    if (operationIds.has(operation.operationId)) {
+      throw new TypeError(`Duplicate restoration operation id: ${operation.operationId}`);
+    }
+    operationIds.add(operation.operationId);
+    assertMask(operation.mask);
+    const pixelIds = maskToPixelIds(operation.mask);
+    if (pixelIds.length === 0) {
+      throw new RangeError(`Restoration operation ${operation.operationId} mask is empty`);
+    }
+
+    if (operation.mode === "fill_base") {
+      assertRgba(operation.rgba, `Restoration operation ${operation.operationId}`);
+      if (operation.rgba[3] !== 255) {
+        throw new RangeError(
+          `Restoration operation ${operation.operationId} must use an opaque Base fill`,
+        );
+      }
+    }
+
+    for (const pixelId of pixelIds) {
+      const previous = occupied.get(pixelId);
+      if (previous) {
+        throw new RangeError(
+          `Restoration operations ${previous} and ${operation.operationId} overlap pixel ${pixelId}`,
+        );
+      }
+      occupied.set(pixelId, operation.operationId);
+      const layer = layerByPixel.get(pixelId);
+      if (!layer) {
+        throw new RangeError(
+          `Restoration operation ${operation.operationId} targets unused UV pixel ${pixelId}`,
+        );
+      }
+      if (operation.mode === "clear_outer") {
+        if (layer !== "outer") {
+          throw new RangeError(
+            `Restoration operation ${operation.operationId} cannot clear Base pixel ${pixelId}`,
+          );
+        }
+        writeRgba(image.data, pixelId, [0, 0, 0, 0]);
+        outerPixelCount += 1;
+      } else {
+        if (layer !== "base") {
+          throw new RangeError(
+            `Restoration operation ${operation.operationId} cannot fill Outer pixel ${pixelId}`,
+          );
+        }
+        writeRgba(image.data, pixelId, operation.rgba);
+        basePixelCount += 1;
+      }
+    }
+    pixelIdsByOperation[operation.operationId] = pixelIds;
+  }
+
+  return {
+    image,
+    pixelIdsByOperation,
+    pixelCount: occupied.size,
+    outerPixelCount,
+    basePixelCount,
   };
 }
 
@@ -262,6 +386,24 @@ function assertImage(image: RgbaImage, label: string): void {
   if (image.width !== 64 || image.height !== 64 || image.data.length !== PIXEL_COUNT * 4) {
     throw new RangeError(`Composition ${label} image must be 64x64 RGBA`);
   }
+}
+
+function assertRgba(rgba: Rgba, label: string): void {
+  if (
+    rgba.length !== 4 ||
+    rgba.some(
+      (value) => !Number.isInteger(value) || value < 0 || value > 255,
+    )
+  ) {
+    throw new RangeError(`${label} RGBA values must be integers from 0 to 255`);
+  }
+}
+
+function assertNonNegativeCount(value: number, label: string): number {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative integer`);
+  }
+  return value;
 }
 
 function readRgba(image: RgbaImage, pixelId: number): Rgba {

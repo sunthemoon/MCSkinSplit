@@ -8,6 +8,7 @@ export * from "./semantic/editor";
 export * from "./semantic/mask";
 export * from "./semantic/part-repair";
 export * from "./semantic/parts";
+export * from "./semantic/restoration-candidates";
 export * from "./semantic/taxonomy";
 export * from "./semantic/types";
 export * from "./types";

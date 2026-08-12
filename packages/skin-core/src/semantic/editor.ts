@@ -13,7 +13,9 @@ import type {
   SegmentationDocument,
   SemanticComponent,
   SemanticComponentInput,
+  SemanticComponentProvenance,
   SemanticState,
+  ProvenanceSemanticAssignment,
 } from "./types";
 
 const INSTANCE_ID_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -87,6 +89,30 @@ export function applyManualSemanticOperation(
         layout,
       );
   }
+}
+
+/**
+ * Assigns deterministic result pixels while preserving explicit origin evidence.
+ * This is intended for host-validated workflows such as composition restoration;
+ * ordinary editor gestures continue through applyManualSemanticOperation.
+ */
+export function assignSemanticPixelsWithProvenance(
+  state: SemanticState,
+  assignment: ProvenanceSemanticAssignment,
+  image: RgbaImage,
+): SemanticState {
+  const layout = getSkinLayout(state.document.source.armType);
+  validateSemanticState(state, image, layout);
+  validateProvenance(assignment.provenance);
+  return assignPixels(
+    state,
+    assignment.target,
+    spansToPixelIds(assignment.spans, layout),
+    image,
+    layout,
+    assignment.provenance,
+    false,
+  );
 }
 
 export function createInitialSemanticState(input: {
@@ -215,6 +241,7 @@ export function validateSemanticState(
         `Component ${component.instanceId} palette is not deterministic`,
       );
     }
+    validateProvenance(component.provenance);
     for (const pixelId of pixelIds) {
       if (image.data[pixelId * 4 + 3] === 0) {
         throw new SemanticEditError(
@@ -299,6 +326,8 @@ function assignPixels(
   pixelIds: readonly number[],
   image: RgbaImage,
   layout: SkinLayout,
+  provenance: SemanticComponentProvenance = userProvenance(),
+  inheritDisplacedProvenance = true,
 ): SemanticState {
   validateComponentInput(target);
   if (pixelIds.length === 0) {
@@ -308,6 +337,7 @@ function assignPixels(
   const selection = new Set(pixelIds);
   const masks: Record<string, Uint8Array> = {};
   const components: SemanticComponent[] = [];
+  const displacedProvenance: SemanticComponentProvenance[] = [];
   let existingTarget: SemanticComponent | undefined;
 
   for (const component of state.document.components) {
@@ -319,6 +349,9 @@ function assignPixels(
     const remaining = maskToPixelIds(currentMask).filter(
       (pixelId) => !selection.has(pixelId),
     );
+    if (remaining.length !== maskToPixelIds(currentMask).length) {
+      displacedProvenance.push(component.provenance);
+    }
     if (remaining.length > 0) {
       const mask = pixelIdsToMask(remaining);
       masks[component.instanceId] = mask;
@@ -333,14 +366,22 @@ function assignPixels(
     }
   }
   const targetMask = pixelIdsToMask(targetPixelIds);
+  const targetProvenance = inheritDisplacedProvenance
+    ? combineProvenance([
+        ...(existingTarget ? [existingTarget.provenance] : []),
+        ...displacedProvenance,
+        provenance,
+      ])
+    : provenance;
   masks[target.instanceId] = targetMask;
   components.push(
     refreshComponent(
-      existingTarget ?? createComponent(target),
+      existingTarget ?? createComponent(target, targetProvenance),
       targetMask,
       image,
       layout,
       target,
+      targetProvenance,
     ),
   );
   return finalizeState(state.document, components, masks, image, layout);
@@ -421,7 +462,14 @@ function mergeComponents(
   const targetMask = pixelIdsToMask(mergedPixels);
   masks[target.instanceId] = targetMask;
   components.push(
-    refreshComponent(sourceComponents[0]!, targetMask, image, layout, target),
+    refreshComponent(
+      sourceComponents[0]!,
+      targetMask,
+      image,
+      layout,
+      target,
+      combineProvenance(sourceComponents.map((component) => component.provenance)),
+    ),
   );
   return finalizeState(state.document, components, masks, image, layout);
 }
@@ -472,7 +520,14 @@ function splitComponent(
     .filter((component) => component.instanceId !== sourceComponentId)
     .concat(
       refreshComponent(source, sourceMask, image, layout),
-      refreshComponent(createComponent(target), targetMask, image, layout),
+      refreshComponent(
+        createComponent(target, source.provenance),
+        targetMask,
+        image,
+        layout,
+        undefined,
+        source.provenance,
+      ),
     );
   return finalizeState(state.document, components, masks, image, layout);
 }
@@ -497,6 +552,8 @@ function reclassifyComponent(
           mask,
           image,
           layout,
+          undefined,
+          source.provenance,
         )
       : component,
   );
@@ -542,7 +599,10 @@ function finalizeState(
   return state;
 }
 
-function createComponent(input: SemanticComponentInput): SemanticComponent {
+function createComponent(
+  input: SemanticComponentInput,
+  provenance: SemanticComponentProvenance = userProvenance(),
+): SemanticComponent {
   return {
     ...input,
     confidence: 1,
@@ -555,7 +615,7 @@ function createComponent(input: SemanticComponentInput): SemanticComponent {
       pairedWith: [],
       sameOutfitGroup: null,
     },
-    provenance: { actorType: "user", containsGeneratedPixels: false },
+    provenance,
   };
 }
 
@@ -565,6 +625,7 @@ function refreshComponent(
   image: RgbaImage,
   layout: SkinLayout,
   override?: SemanticComponentInput,
+  provenance?: SemanticComponentProvenance,
 ): SemanticComponent {
   return {
     ...source,
@@ -574,8 +635,91 @@ function refreshComponent(
     maskFile: componentMaskFile(override?.instanceId ?? source.instanceId),
     spans: pixelIdsToSpans(maskToPixelIds(mask), layout),
     palette: paletteForMask(image, mask),
-    provenance: { actorType: "user", containsGeneratedPixels: false },
+    provenance: provenance ?? source.provenance,
   };
+}
+
+function userProvenance(): SemanticComponentProvenance {
+  return { actorType: "user", containsGeneratedPixels: false };
+}
+
+function combineProvenance(
+  values: readonly SemanticComponentProvenance[],
+): SemanticComponentProvenance {
+  const containsGeneratedPixels = values.some(
+    (value) => value.containsGeneratedPixels,
+  );
+  const restorations = values.flatMap((value) =>
+    value.restoration ? [value.restoration] : [],
+  );
+  const planHashes = [...new Set(restorations.map((value) => value.planHash))];
+  if (restorations.length === 0 || planHashes.length !== 1) {
+    return { actorType: "user", containsGeneratedPixels };
+  }
+  return {
+    actorType: "user",
+    containsGeneratedPixels,
+    restoration: {
+      kind: "composition_restoration",
+      planHash: planHashes[0]!,
+      candidateIds: sortedUniqueEvidenceIds(
+        restorations.flatMap((value) => value.candidateIds),
+      ),
+      sourceRevisionIds: sortedUniqueEvidenceIds(
+        restorations.flatMap((value) => value.sourceRevisionIds),
+      ),
+      sourceComponentIds: sortedUniqueEvidenceIds(
+        restorations.flatMap((value) => value.sourceComponentIds),
+      ),
+    },
+  };
+}
+
+function sortedUniqueEvidenceIds(values: readonly string[]): string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function validateProvenance(provenance: SemanticComponentProvenance): void {
+  if (
+    !["user", "ai", "system"].includes(provenance.actorType) ||
+    typeof provenance.containsGeneratedPixels !== "boolean"
+  ) {
+    throw new SemanticEditError("INVALID_COMPONENT", "Component provenance is invalid");
+  }
+  if (
+    provenance.aiRunId !== undefined &&
+    (provenance.aiRunId.trim().length === 0 || provenance.aiRunId.length > 160)
+  ) {
+    throw new SemanticEditError("INVALID_COMPONENT", "AI provenance run id is invalid");
+  }
+  const restoration = provenance.restoration;
+  if (!restoration) return;
+  if (
+    restoration.kind !== "composition_restoration" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(restoration.planHash) ||
+    !validEvidenceIds(restoration.candidateIds, true) ||
+    !validEvidenceIds(restoration.sourceRevisionIds, false) ||
+    !validEvidenceIds(restoration.sourceComponentIds, false)
+  ) {
+    throw new SemanticEditError(
+      "INVALID_COMPONENT",
+      "Composition restoration provenance is invalid",
+    );
+  }
+}
+
+function validEvidenceIds(
+  values: readonly string[],
+  requireOne: boolean,
+): boolean {
+  return (
+    Array.isArray(values) &&
+    (!requireOne || values.length > 0) &&
+    new Set(values).size === values.length &&
+    values.every((value) =>
+      typeof value === "string" && value.trim().length > 0 && value.length <= 200
+    )
+  );
 }
 
 function findComponent(state: SemanticState, componentId: string): SemanticComponent {

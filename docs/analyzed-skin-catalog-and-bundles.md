@@ -97,7 +97,9 @@ hash checks.
 - A Bundle captures one immutable source Revision. Later semantic corrections or
   re-analysis require exporting a new Bundle; existing Bundles are not rewritten.
 - The grouping layer does not synthesize occluded content, erase unrelated pixels
-  from a target skin, or fill newly exposed base pixels. Those operations require
-  an explicit repair or replacement plan.
+  from a target skin, or fill newly exposed Base pixels. Component repair and
+  Composition restoration remain explicit separate workflows; see
+  [`component-repair-workflow.md`](component-repair-workflow.md) and
+  [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 - Bundle compatibility is the intersection of its member manifests. A Bundle with
   no common arm model is rejected during export.

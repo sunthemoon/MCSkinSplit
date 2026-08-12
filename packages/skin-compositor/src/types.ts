@@ -18,6 +18,28 @@ export interface CompositionLayerInput {
   readonly manifest: PartManifest;
 }
 
+/**
+ * Deterministic pixels that replace selected pixels of the fixed base before
+ * ordinary part layers are evaluated. A transparent result is only valid on an
+ * Outer UV surface; Base UV surfaces must always receive an opaque RGBA fill.
+ */
+export interface CompositionRestorationPlan {
+  readonly operations: readonly CompositionRestorationOperation[];
+}
+
+export type CompositionRestorationOperation =
+  | {
+      readonly operationId: string;
+      readonly mode: "clear_outer";
+      readonly mask: Uint8Array;
+    }
+  | {
+      readonly operationId: string;
+      readonly mode: "fill_base";
+      readonly mask: Uint8Array;
+      readonly rgba: Rgba;
+    };
+
 export interface CompositionPixelWrite {
   readonly layerId: string;
   readonly partId: string | null;
@@ -74,6 +96,13 @@ export interface CompositionReport {
   readonly layerConflictCount: number;
   readonly modelConflictCount: number;
   readonly unknownConflictCount: number;
+  readonly restorationPixelCount: number;
+  readonly restoredOuterPixelCount: number;
+  readonly restoredBasePixelCount: number;
+  /** Requested cleanup pixels not covered by the materialized restoration plan. */
+  readonly restorationMissingPixelCount: number;
+  /** Non-conflict restoration validation or coverage issues. */
+  readonly restorationIssueCount: number;
   readonly unresolvedConflictCount: number;
   readonly committable: boolean;
   readonly conflicts: readonly CompositionConflict[];
@@ -83,12 +112,18 @@ export interface CompositionResult {
   readonly image: RgbaImage;
   readonly report: CompositionReport;
   readonly winningPixelIdsByLayer: Readonly<Record<string, readonly number[]>>;
+  readonly restoredPixelIdsByOperation: Readonly<Record<string, readonly number[]>>;
 }
 
 export interface ComposeSkinInput {
   readonly base: RgbaImage;
   readonly targetArmType: ArmType;
   readonly layers: readonly CompositionLayerInput[];
+  readonly restorationPlan?: CompositionRestorationPlan;
+  readonly restorationAssessment?: {
+    readonly missingPixelCount: number;
+    readonly issueCount: number;
+  };
   readonly resolutionMode?: CompositionResolutionMode;
   readonly conflictWinners?: Readonly<Record<string, string>>;
 }

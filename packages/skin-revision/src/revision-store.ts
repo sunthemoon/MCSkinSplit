@@ -5,6 +5,7 @@ import {
   composeSkin,
   type CompositionLayerInput as PixelCompositionLayer,
   type CompositionReport,
+  type CompositionRestorationPlan as PixelCompositionRestorationPlan,
   type CompositionResult as PixelCompositionResult,
 } from "@mc-skin-split/skin-compositor";
 import {
@@ -14,6 +15,7 @@ import {
   applyManualSemanticOperation,
   applyPartRepairOperation,
   applyPartPixels,
+  assignSemanticPixelsWithProvenance,
   assessArmType,
   createPartMannequinTexture,
   derivePartWriteMask,
@@ -26,10 +28,14 @@ import {
   isSemanticCategory,
   maskToRgbaImage,
   maskToPixelIds,
+  pixelIdsToMask,
   pixelIdsToSpans,
   rgbaImageToMask,
   rebaseSemanticStateImage,
   validateSemanticState,
+  canonicalRestorationJson,
+  generateRestorationCandidates as generateCoreRestorationCandidates,
+  createRestorationPlanFromCandidates as createCoreRestorationPlanFromCandidates,
   type ManualSemanticOperation,
   type AggregateKind,
   type PartManifest,
@@ -37,6 +43,9 @@ import {
   type PartRepairState,
   type SegmentationDocument,
   type SemanticState,
+  type RestorationCandidatePlan as CoreRestorationCandidatePlan,
+  type RestorationCandidateSet as CoreRestorationCandidateSet,
+  type RestorationSemanticRevision as CoreRestorationSemanticRevision,
 } from "@mc-skin-split/skin-core";
 import type Database from "better-sqlite3";
 import { openRevisionDatabase } from "./database";
@@ -80,15 +89,19 @@ import {
   type CommitCompositionResult,
   type CommitPartEditProjectInput,
   type CommitPartEditProjectResult,
+  type ClearCompositionRestorationPlanInput,
   type CompositionDetail,
   type CompositionLayer,
   type CompositionProject,
+  type CompositionRestorationCandidates,
+  type CompositionRestorationEvent,
   type CreateCompositionInput,
   type CreateProjectInput,
   type CreateProjectResult,
   type CreatePartEditProjectInput,
   type ExportPartInput,
   type ExportPartBundleInput,
+  type GenerateCompositionRestorationCandidatesInput,
   type ImportProjectInput,
   type ImportProjectResult,
   type ImportSkinInput,
@@ -102,6 +115,7 @@ import {
   type PartEditRevision,
   type PartBundle,
   type PartBundleMember,
+  type PersistedCompositionRestorationPlan,
   type RevisionDiff,
   type RevisionIdKind,
   type RevisionMutationResult,
@@ -111,6 +125,7 @@ import {
   type SerializedPartRepairOperation,
   type ReorderCompositionLayersInput,
   type ResolveCompositionConflictInput,
+  type SetCompositionRestorationPlanInput,
   type SegmentationSnapshot,
   type SkinAsset,
   type SkinBranch,
@@ -295,10 +310,23 @@ interface CompositionProjectRow {
   readonly resolution_mode: string;
   readonly conflict_winners_json: string;
   readonly report_json: string;
+  readonly restoration_version: number;
+  readonly restoration_plan_json: string | null;
   readonly result_revision_id: string | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly committed_at: string | null;
+}
+
+interface CompositionRestorationEventRow {
+  readonly id: number;
+  readonly composition_id: string;
+  readonly version: number;
+  readonly event_type: string;
+  readonly candidate_set_hash: string | null;
+  readonly candidate_ids_json: string;
+  readonly payload_json: string;
+  readonly created_at: string;
 }
 
 interface CompositionLayerRow {
@@ -629,7 +657,7 @@ export class RevisionStore {
             "SELECT * FROM composition_project WHERE base_revision_id = ? ORDER BY created_at, id",
           )
           .all(baseRevisionId)) as CompositionProjectRow[];
-    return rows.map(mapCompositionProject);
+    return rows.map((row) => mapCompositionProject(row));
   }
 
   getComposition(compositionId: string): CompositionProject {
@@ -764,6 +792,49 @@ export class RevisionStore {
     const layers = this.listCompositionLayers(composition.id);
     const evaluated = await this.evaluateComposition(composition, layers);
     return { composition, layers, report: evaluated.report };
+  }
+
+  async generateCompositionRestorationCandidates(
+    compositionId: string,
+    input: GenerateCompositionRestorationCandidatesInput,
+  ): Promise<CompositionRestorationCandidates> {
+    return this.generateCompositionRestorationCandidatesUnlocked(
+      compositionId,
+      input,
+    );
+  }
+
+  async setCompositionRestorationPlan(
+    compositionId: string,
+    input: SetCompositionRestorationPlanInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.setCompositionRestorationPlanUnlocked(compositionId, input),
+    );
+  }
+
+  async clearCompositionRestorationPlan(
+    compositionId: string,
+    input: ClearCompositionRestorationPlanInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.clearCompositionRestorationPlanUnlocked(compositionId, input),
+    );
+  }
+
+  listCompositionRestorationEvents(
+    compositionId: string,
+  ): CompositionRestorationEvent[] {
+    this.getComposition(compositionId);
+    return (this.database
+      .prepare(`
+        SELECT * FROM composition_restoration_event
+        WHERE composition_id = ?
+        ORDER BY version, id
+      `)
+      .all(compositionId) as CompositionRestorationEventRow[]).map(
+      mapCompositionRestorationEvent,
+    );
   }
 
   async listAnalyzedSkins(
@@ -1962,6 +2033,195 @@ export class RevisionStore {
     };
   }
 
+  private async generateCompositionRestorationCandidatesUnlocked(
+    compositionId: string,
+    input: GenerateCompositionRestorationCandidatesInput,
+  ): Promise<CompositionRestorationCandidates> {
+    const composition = this.requireDraftComposition(compositionId);
+    const candidateSet = await this.buildCompositionRestorationCandidateSet(
+      composition,
+      input,
+    );
+    return summarizeCompositionRestorationCandidates(
+      composition.id,
+      this.compositionRestorationVersion(composition.id),
+      candidateSet,
+    );
+  }
+
+  private async setCompositionRestorationPlanUnlocked(
+    compositionId: string,
+    input: SetCompositionRestorationPlanInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    assertRestorationVersion(input.expectedVersion);
+    if (input.expectedVersion !== this.compositionRestorationVersion(composition.id)) {
+      throw conflict("还原方案版本已变化，请重新生成候选", {
+        compositionId,
+        expectedVersion: input.expectedVersion,
+        actualVersion: this.compositionRestorationVersion(composition.id),
+      });
+    }
+    if (!/^sha256:[0-9a-f]{64}$/u.test(input.candidateSetHash)) {
+      throw invalidInput("candidateSetHash 无效");
+    }
+    const candidateIds = validateUniqueSafeIds(
+      "candidateIds",
+      input.candidateIds,
+      512,
+    );
+    const generationInput: GenerateCompositionRestorationCandidatesInput = {
+      targetComponentIds: input.targetComponentIds,
+      ...(input.donorRevisionId ? { donorRevisionId: input.donorRevisionId } : {}),
+      ...(input.manualRgba ? { manualRgba: input.manualRgba } : {}),
+    };
+    const candidateSet = await this.buildCompositionRestorationCandidateSet(
+      composition,
+      generationInput,
+    );
+    if (candidateSet.candidateSetHash !== input.candidateSetHash) {
+      throw conflict("还原候选已经变化，请重新生成候选", {
+        compositionId,
+        expectedCandidateSetHash: input.candidateSetHash,
+        actualCandidateSetHash: candidateSet.candidateSetHash,
+      });
+    }
+    let candidatePlan: CoreRestorationCandidatePlan;
+    try {
+      candidatePlan = createCoreRestorationPlanFromCandidates(
+        candidateSet,
+        candidateIds,
+        sha256,
+      );
+    } catch (error) {
+      throw invalidInput("还原候选选择无效", {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const nextVersion = input.expectedVersion + 1;
+    const persisted = persistableRestorationPlan(
+      nextVersion,
+      candidateSet,
+      candidatePlan,
+    );
+    const candidateComposition: CompositionProject = {
+      ...composition,
+      resolutionMode: "unresolved",
+      conflictWinners: {},
+      restorationPlan: persisted.summary,
+    };
+    const layers = this.listCompositionLayers(composition.id);
+    const evaluated = await this.evaluateComposition(
+      candidateComposition,
+      layers,
+      persisted,
+    );
+    const createdAt = this.now();
+    const persist = this.database.transaction(() => {
+      const updated = this.database.prepare(`
+        UPDATE composition_project
+        SET restoration_version = ?, restoration_plan_json = ?,
+            resolution_mode = 'unresolved', conflict_winners_json = '{}',
+            report_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'draft' AND restoration_version = ?
+      `).run(
+        nextVersion,
+        compactCanonicalJson(persisted),
+        compactCanonicalJson(evaluated.report),
+        createdAt,
+        composition.id,
+        input.expectedVersion,
+      );
+      if (updated.changes !== 1) {
+        throw conflict("还原方案版本已变化，请重新载入", { compositionId });
+      }
+      this.insertCompositionRestorationEvent({
+        compositionId: composition.id,
+        version: nextVersion,
+        eventType: "plan_set",
+        candidateSetHash: candidateSet.candidateSetHash,
+        candidateIds: persisted.summary.candidateIds,
+        payload: {
+          planHash: persisted.summary.planHash,
+          targetComponentIds: persisted.summary.targetComponentIds,
+          outerPixelCount: persisted.summary.outerPixelCount,
+          basePixelCount: persisted.summary.basePixelCount,
+          coveredPixelCount: persisted.summary.coveredPixelCount,
+          missingPixelCount: persisted.summary.missingPixelCount,
+        },
+        createdAt,
+      });
+    });
+    persist.immediate();
+    return {
+      composition: this.getComposition(composition.id),
+      layers,
+      report: evaluated.report,
+    };
+  }
+
+  private async clearCompositionRestorationPlanUnlocked(
+    compositionId: string,
+    input: ClearCompositionRestorationPlanInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    assertRestorationVersion(input.expectedVersion);
+    if (input.expectedVersion !== this.compositionRestorationVersion(composition.id)) {
+      throw conflict("还原方案版本已变化，请重新载入", {
+        compositionId,
+        expectedVersion: input.expectedVersion,
+        actualVersion: this.compositionRestorationVersion(composition.id),
+      });
+    }
+    const nextVersion = input.expectedVersion + 1;
+    const layers = this.listCompositionLayers(composition.id);
+    const evaluated = await this.evaluateComposition(
+      {
+        ...composition,
+        resolutionMode: "unresolved",
+        conflictWinners: {},
+        restorationPlan: null,
+      },
+      layers,
+      null,
+    );
+    const createdAt = this.now();
+    const previousPlanHash = composition.restorationPlan?.planHash ?? null;
+    const persist = this.database.transaction(() => {
+      const updated = this.database.prepare(`
+        UPDATE composition_project
+        SET restoration_version = ?, restoration_plan_json = NULL,
+            resolution_mode = 'unresolved', conflict_winners_json = '{}',
+            report_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'draft' AND restoration_version = ?
+      `).run(
+        nextVersion,
+        compactCanonicalJson(evaluated.report),
+        createdAt,
+        composition.id,
+        input.expectedVersion,
+      );
+      if (updated.changes !== 1) {
+        throw conflict("还原方案版本已变化，请重新载入", { compositionId });
+      }
+      this.insertCompositionRestorationEvent({
+        compositionId: composition.id,
+        version: nextVersion,
+        eventType: "plan_cleared",
+        candidateSetHash: composition.restorationPlan?.candidateSetHash ?? null,
+        candidateIds: composition.restorationPlan?.candidateIds ?? [],
+        payload: { previousPlanHash },
+        createdAt,
+      });
+    });
+    persist.immediate();
+    return {
+      composition: this.getComposition(composition.id),
+      layers,
+      report: evaluated.report,
+    };
+  }
+
   private async commitCompositionUnlocked(
     compositionId: string,
     input: CommitCompositionInput,
@@ -2004,8 +2264,58 @@ export class RevisionStore {
       resultImage: evaluated.image,
       sourceHash: sha256(skinPng),
     });
+    const persistedPlan = this.readPersistedCompositionRestorationPlan(composition.id);
     const affectedComponents: string[] = [];
     const affectedPixelIds = new Set<number>();
+    const winningPartPixelIds = new Set(
+      Object.values(evaluated.winningPixelIdsByLayer).flat(),
+    );
+    if (persistedPlan) {
+      for (const pixelId of persistedPlan.coveredPixelIds) {
+        affectedPixelIds.add(pixelId);
+      }
+      for (const candidate of persistedPlan.selectedCandidates) {
+        const restoredPixelIds = candidate.coveredPixelIds.filter(
+          (pixelId) =>
+            !winningPartPixelIds.has(pixelId) &&
+            evaluated.image.data[pixelId * 4 + 3] !== 0,
+        );
+        if (restoredPixelIds.length === 0) continue;
+        const componentId = restoredCandidateComponentId(candidate.candidateId);
+        state = assignSemanticPixelsWithProvenance(
+          state,
+          {
+            target: {
+              instanceId: componentId,
+              displayName: restorationComponentDisplayName(candidate.kind),
+              category: "skin",
+            },
+            spans: pixelIdsToSpans(
+              restoredPixelIds,
+              getSkinLayout(composition.armType),
+            ),
+            provenance: {
+              actorType: candidate.kind === "manual_rgba" ? "user" : "system",
+              containsGeneratedPixels: candidate.kind === "manual_rgba",
+              restoration: {
+                kind: "composition_restoration",
+                planHash: persistedPlan.summary.planHash,
+                candidateIds: [candidate.candidateId],
+                sourceRevisionIds: candidate.kind === "manual_rgba"
+                  ? []
+                  : candidate.sampleRevisionId
+                    ? [candidate.sampleRevisionId]
+                    : [sourceRevision.id],
+                sourceComponentIds: candidate.sourceComponentIds,
+              },
+            },
+          },
+          evaluated.image,
+        );
+        affectedComponents.push(componentId);
+        for (const pixelId of restoredPixelIds) affectedPixelIds.add(pixelId);
+      }
+    }
     for (const layer of layers) {
       const pixelIds = evaluated.winningPixelIdsByLayer[layer.id] ?? [];
       if (pixelIds.length === 0) continue;
@@ -2050,6 +2360,19 @@ export class RevisionStore {
         position: layer.position,
       })),
       conflictSummary: compositionConflictSummary(evaluated.report),
+      ...(persistedPlan
+        ? {
+            restoration: {
+              version: persistedPlan.summary.version,
+              planHash: persistedPlan.summary.planHash,
+              candidateSetHash: persistedPlan.summary.candidateSetHash,
+              candidateIds: persistedPlan.summary.candidateIds,
+              requestedPixelCount: persistedPlan.requestedPixelIds.length,
+              coveredPixelCount: persistedPlan.coveredPixelIds.length,
+              missingPixelCount: persistedPlan.missingPixelIds.length,
+            },
+          }
+        : {}),
     };
     const operation = createOperation({
       type: "compose",
@@ -2081,17 +2404,23 @@ export class RevisionStore {
       const commit = this.database.transaction(() => {
         const current = this.database
           .prepare(`
-            SELECT composition.status, branch.head_revision_id
+            SELECT composition.status, composition.restoration_version,
+                   branch.head_revision_id
             FROM composition_project AS composition
             JOIN skin_branch AS branch ON branch.id = composition.branch_id
             WHERE composition.id = ?
           `)
           .get(composition.id) as
-          | { readonly status: string; readonly head_revision_id: string | null }
+          | {
+              readonly status: string;
+              readonly restoration_version: number;
+              readonly head_revision_id: string | null;
+            }
           | undefined;
         if (
           current?.status !== "draft" ||
-          current.head_revision_id !== sourceRevision.id
+          current.head_revision_id !== sourceRevision.id ||
+          current.restoration_version !== composition.restorationVersion
         ) {
           throw conflict("混搭工程或 Branch 已发生变化，请重新载入", {
             compositionId,
@@ -2141,7 +2470,7 @@ export class RevisionStore {
             UPDATE composition_project
             SET status = 'committed', result_revision_id = ?,
                 report_json = ?, updated_at = ?, committed_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'draft' AND restoration_version = ?
           `)
           .run(
             ids.revisionId,
@@ -2149,6 +2478,7 @@ export class RevisionStore {
             createdAt,
             createdAt,
             composition.id,
+            composition.restorationVersion,
           );
       });
       commit.immediate();
@@ -2177,6 +2507,8 @@ export class RevisionStore {
   private async evaluateComposition(
     composition: CompositionProject,
     layers: readonly CompositionLayer[],
+    persistedPlan: PersistedCompositionRestorationPlan | null =
+      this.readPersistedCompositionRestorationPlan(composition.id),
   ): Promise<PixelCompositionResult> {
     const sourceRevision = this.getRevision(composition.baseRevisionId);
     if (sourceRevision.projectId !== composition.projectId) {
@@ -2210,6 +2542,15 @@ export class RevisionStore {
         base: decodeSkinPng(snapshot.files["skin.png"].bytes),
         targetArmType: composition.armType,
         layers: pixelLayers,
+        ...(persistedPlan
+          ? {
+              restorationPlan: materializeCompositionRestorationPlan(persistedPlan),
+              restorationAssessment: {
+                missingPixelCount: persistedPlan.summary.missingPixelCount,
+                issueCount: restorationPlanIssueCount(persistedPlan),
+              },
+            }
+          : {}),
         resolutionMode: composition.resolutionMode,
         conflictWinners: composition.conflictWinners,
       });
@@ -2219,6 +2560,149 @@ export class RevisionStore {
         cause: error,
       });
     }
+  }
+
+  private readPersistedCompositionRestorationPlan(
+    compositionId: string,
+  ): PersistedCompositionRestorationPlan | null {
+    const row = this.database.prepare(`
+      SELECT base_revision_id, arm_type, restoration_version, restoration_plan_json
+      FROM composition_project
+      WHERE id = ?
+    `).get(compositionId) as
+      | {
+          readonly arm_type: string;
+          readonly base_revision_id: string;
+          readonly restoration_version: number;
+          readonly restoration_plan_json: string | null;
+        }
+      | undefined;
+    if (!row) throw notFound("Composition", compositionId);
+    if (!isNonNegativeInteger(row.restoration_version)) {
+      throw snapshotCorrupt(compositionId, "混搭还原方案版本无效");
+    }
+    if (!['wide', 'slim'].includes(row.arm_type)) {
+      throw snapshotCorrupt(compositionId, "混搭工程手臂模型无效");
+    }
+    if (row.restoration_plan_json === null) return null;
+    const plan = parsePersistedCompositionRestorationPlan(
+      row.restoration_plan_json,
+      compositionId,
+      row.arm_type as "wide" | "slim",
+      row.base_revision_id,
+    );
+    if (plan.summary.version !== row.restoration_version) {
+      throw snapshotCorrupt(compositionId, "混搭还原方案版本与工程不一致");
+    }
+    return plan;
+  }
+
+  private compositionRestorationVersion(compositionId: string): number {
+    const row = this.database.prepare(`
+      SELECT restoration_version FROM composition_project WHERE id = ?
+    `).get(compositionId) as { readonly restoration_version: number } | undefined;
+    if (!row) throw notFound("Composition", compositionId);
+    if (!isNonNegativeInteger(row.restoration_version)) {
+      throw snapshotCorrupt(compositionId, "混搭还原方案版本无效");
+    }
+    return row.restoration_version;
+  }
+
+  private async buildCompositionRestorationCandidateSet(
+    composition: CompositionProject,
+    input: GenerateCompositionRestorationCandidatesInput,
+  ): Promise<CoreRestorationCandidateSet> {
+    const targetComponentIds = validateUniqueSemanticComponentIds(
+      "targetComponentIds",
+      input.targetComponentIds,
+      256,
+    );
+    if (targetComponentIds.length === 0) {
+      throw invalidInput("targetComponentIds 不能为空");
+    }
+    const source = await this.restorationSemanticRevision(
+      composition.baseRevisionId,
+      composition.projectId,
+      composition.armType,
+    );
+    const donorId = input.donorRevisionId;
+    const donors = donorId
+      ? [await this.restorationSemanticRevision(
+          validateReferenceId("donorRevisionId", donorId),
+          undefined,
+          composition.armType,
+        )]
+      : undefined;
+    const manualColors = input.manualRgba
+      ? [[...validateOpaqueRgba("manualRgba", input.manualRgba)] as [number, number, number, number]]
+      : undefined;
+    try {
+      return generateCoreRestorationCandidates({
+        source,
+        cleanupComponentIds: targetComponentIds,
+        ...(donors ? { donors } : {}),
+        ...(manualColors ? { manualColors } : {}),
+        hashCanonical: sha256,
+      });
+    } catch (error) {
+      if (error instanceof RevisionStoreError) throw error;
+      throw invalidInput("无法生成可信还原候选", {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async restorationSemanticRevision(
+    revisionId: string,
+    expectedProjectId: string | undefined,
+    expectedArmType: CompositionProject["armType"],
+  ): Promise<CoreRestorationSemanticRevision> {
+    const revision = this.getRevision(revisionId);
+    if (expectedProjectId !== undefined && revision.projectId !== expectedProjectId) {
+      throw invalidInput("还原来源 Revision 与混搭 Project 不一致", { revisionId });
+    }
+    const snapshot = await this.verifyRevisionSnapshot(revision.id);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      revision.id,
+    );
+    if (segmentation.source.armType !== expectedArmType) {
+      throw invalidInput("还原来源 Revision 手臂模型不兼容", {
+        revisionId,
+        expectedArmType,
+        actualArmType: segmentation.source.armType,
+      });
+    }
+    return {
+      revisionId: revision.id,
+      image: decodeSkinPng(snapshot.files["skin.png"].bytes),
+      semanticState: semanticStateFromSnapshot(snapshot, segmentation, revision.id),
+    };
+  }
+
+  private insertCompositionRestorationEvent(input: {
+    readonly compositionId: string;
+    readonly version: number;
+    readonly eventType: CompositionRestorationEvent["eventType"];
+    readonly candidateSetHash: string | null;
+    readonly candidateIds: readonly string[];
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly createdAt: string;
+  }): void {
+    this.database.prepare(`
+      INSERT INTO composition_restoration_event (
+        composition_id, version, event_type, candidate_set_hash,
+        candidate_ids_json, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.compositionId,
+      input.version,
+      input.eventType,
+      input.candidateSetHash,
+      compactCanonicalJson(input.candidateIds),
+      compactCanonicalJson(input.payload),
+      input.createdAt,
+    );
   }
 
   private persistCompositionDraft(
@@ -4237,6 +4721,23 @@ function mapCompositionProject(row: CompositionProjectRow): CompositionProject {
   ) {
     throw snapshotCorrupt(row.id, "混搭提交状态与结果 Revision 不一致");
   }
+  if (!isNonNegativeInteger(row.restoration_version)) {
+    throw snapshotCorrupt(row.id, "混搭还原方案版本无效");
+  }
+  const persistedRestorationPlan = row.restoration_plan_json === null
+    ? null
+    : parsePersistedCompositionRestorationPlan(
+        row.restoration_plan_json,
+        row.id,
+        row.arm_type as "wide" | "slim",
+        row.base_revision_id,
+      );
+  if (
+    persistedRestorationPlan !== null &&
+    persistedRestorationPlan.summary.version !== row.restoration_version
+  ) {
+    throw snapshotCorrupt(row.id, "混搭还原方案版本与工程不一致");
+  }
   return {
     id: row.id,
     projectId: row.project_id,
@@ -4248,6 +4749,8 @@ function mapCompositionProject(row: CompositionProjectRow): CompositionProject {
     resolutionMode: row.resolution_mode as "unresolved" | "layer_order",
     conflictWinners: rawWinners as Readonly<Record<string, string>>,
     report: parseCompositionReport(row.report_json, row.id),
+    restorationVersion: row.restoration_version,
+    restorationPlan: persistedRestorationPlan?.summary ?? null,
     resultRevisionId: row.result_revision_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -4272,6 +4775,205 @@ function mapCompositionLayer(
   };
 }
 
+function mapCompositionRestorationEvent(
+  row: CompositionRestorationEventRow,
+): CompositionRestorationEvent {
+  if (
+    !isNonNegativeInteger(row.id) ||
+    !isNonNegativeInteger(row.version) ||
+    !["plan_set", "plan_cleared"].includes(row.event_type) ||
+    (row.candidate_set_hash !== null &&
+      !/^sha256:[0-9a-f]{64}$/u.test(row.candidate_set_hash))
+  ) {
+    throw snapshotCorrupt(row.composition_id, "混搭还原审计事件无效");
+  }
+  const parsedCandidateIds = JSON.parse(row.candidate_ids_json) as unknown;
+  const candidateIds = Array.isArray(parsedCandidateIds) &&
+    parsedCandidateIds.every((value): value is string => typeof value === "string")
+    ? parsedCandidateIds
+    : [];
+  if (
+    new Set(candidateIds).size !== candidateIds.length ||
+    candidateIds.some((id) => !isSafeReferenceId(id))
+  ) {
+    throw snapshotCorrupt(row.composition_id, "混搭还原审计候选 ID 无效");
+  }
+  return {
+    id: row.id,
+    compositionId: row.composition_id,
+    version: row.version,
+    eventType: row.event_type as CompositionRestorationEvent["eventType"],
+    candidateSetHash: row.candidate_set_hash,
+    candidateIds,
+    payload: parseObjectJson(
+      row.payload_json,
+      `Composition ${row.composition_id} restoration event payload`,
+    ),
+    createdAt: row.created_at,
+  };
+}
+
+function summarizeCompositionRestorationCandidates(
+  compositionId: string,
+  version: number,
+  candidateSet: CoreRestorationCandidateSet,
+): CompositionRestorationCandidates {
+  const outerCandidate = candidateSet.candidates.find(
+    (candidate) => candidate.kind === "outer_transparent",
+  );
+  const outerPixelCount = candidateSet.targetGroups
+    .filter((group) => group.layer === "outer")
+    .reduce((total, group) => total + group.pixelCount, 0);
+  const basePixelCount = candidateSet.targetGroups
+    .filter((group) => group.layer === "base")
+    .reduce((total, group) => total + group.pixelCount, 0);
+  const baseCandidates = candidateSet.candidates.filter(
+    (candidate) => candidate.kind !== "outer_transparent",
+  );
+  const baseCovered = new Set(
+    baseCandidates.flatMap((candidate) => candidate.coveredPixelIds),
+  );
+  return {
+    compositionId,
+    version,
+    candidateSetHash: candidateSet.candidateSetHash,
+    targetComponentIds: candidateSet.cleanupComponentIds,
+    outer: {
+      pixelCount: outerPixelCount,
+      candidateId: outerCandidate?.candidateId ?? null,
+    },
+    base: {
+      pixelCount: basePixelCount,
+      coveredPixelCount: baseCovered.size,
+      missingPixelCount: Math.max(0, basePixelCount - baseCovered.size),
+      candidates: baseCandidates.map((candidate) => ({
+        id: candidate.candidateId,
+        kind: candidate.kind,
+        targetGroupId: candidate.targetGroupId,
+        label: restorationCandidateLabel(candidate.kind),
+        description: restorationCandidateDescription(candidate),
+        pixelCount: candidate.requestedPixelCount,
+        coveragePixelCount: candidate.coveredPixelCount,
+        ...(candidate.sampleRevisionId
+          ? { sourceRevisionId: candidate.sampleRevisionId }
+          : {}),
+        ...(candidate.manualRgba ? { rgba: candidate.manualRgba } : {}),
+        ...(candidate.complete ? { selectedByDefault: true } : {}),
+      })),
+    },
+  };
+}
+
+function restorationCandidateLabel(
+  kind: CompositionRestorationCandidates["base"]["candidates"][number]["kind"],
+): string {
+  const labels = {
+    outer_transparent: "清除外层残留",
+    current_same_surface: "当前皮肤同表面",
+    current_same_body_part: "当前皮肤同部位",
+    mirrored_counterpart: "镜像对应部位",
+    donor_revision: "其他皮肤参考",
+    manual_rgba: "指定肤色补全",
+  } as const;
+  return labels[kind];
+}
+
+function restorationCandidateDescription(
+  candidate: CoreRestorationCandidateSet["candidates"][number],
+): string {
+  return candidate.complete
+    ? `可覆盖 ${candidate.coveredPixelCount} px`
+    : `可覆盖 ${candidate.coveredPixelCount} px，缺少 ${candidate.missingPixelCount} px`;
+}
+
+function persistableRestorationPlan(
+  version: number,
+  candidateSet: CoreRestorationCandidateSet,
+  plan: CoreRestorationCandidatePlan,
+): PersistedCompositionRestorationPlan {
+  const selectedById = new Map(
+    candidateSet.candidates.map((candidate) => [candidate.candidateId, candidate]),
+  );
+  const outerPixelCount = candidateSet.targetGroups
+    .filter((group) => group.layer === "outer")
+    .reduce((total, group) => total + group.pixelCount, 0);
+  const basePixelCount = candidateSet.targetGroups
+    .filter((group) => group.layer === "base")
+    .reduce((total, group) => total + group.pixelCount, 0);
+  const body = {
+    summary: {
+      version,
+      candidateSetHash: candidateSet.candidateSetHash,
+      targetComponentIds: [...candidateSet.cleanupComponentIds],
+      candidateIds: [...plan.selectedCandidateIds],
+      outerPixelCount,
+      basePixelCount,
+      coveredPixelCount: plan.coveredPixelCount,
+      missingPixelCount: plan.missingPixelCount,
+      planHash: plan.planHash,
+    },
+    operations: plan.operationDescriptors.map((operation) => ({
+      ...operation,
+      pixelIds: [...operation.pixelIds],
+      ...(operation.mode === "fill_base" ? { rgba: [...operation.rgba] as [number, number, number, number] } : {}),
+    })),
+    selectedCandidates: plan.selectedCandidateIds.map((candidateId) => {
+      const candidate = selectedById.get(candidateId)!;
+      return {
+        candidateId,
+        kind: candidate.kind,
+        targetGroupIds: [...candidate.targetGroupIds],
+        sampleRevisionId: candidate.sampleRevisionId,
+        sourceComponentIds: [...candidate.sourceComponentIds],
+        evidenceHash: candidate.evidenceHash,
+        coveredPixelIds: [...candidate.coveredPixelIds],
+      };
+    }),
+    requestedPixelIds: [...plan.requestedPixelIds],
+    coveredPixelIds: [...plan.coveredPixelIds],
+    missingPixelIds: [...plan.missingPixelIds],
+  };
+  return {
+    ...body,
+    storageHash: persistedRestorationPlanHash(body),
+  };
+}
+
+function materializeCompositionRestorationPlan(
+  plan: PersistedCompositionRestorationPlan,
+): PixelCompositionRestorationPlan {
+  return {
+    operations: plan.operations.map((operation) =>
+      operation.mode === "clear_outer"
+        ? {
+            operationId: operation.operationId,
+            mode: "clear_outer" as const,
+            mask: pixelIdsToMask(operation.pixelIds),
+          }
+        : {
+            operationId: operation.operationId,
+            mode: "fill_base" as const,
+            mask: pixelIdsToMask(operation.pixelIds),
+            rgba: [...operation.rgba] as [number, number, number, number],
+          },
+    ),
+  };
+}
+
+function restorationPlanIssueCount(
+  plan: PersistedCompositionRestorationPlan,
+): number {
+  return plan.storageHash === persistedRestorationPlanHash(plan) ? 0 : 1;
+}
+
+function persistedRestorationPlanHash(
+  plan: Omit<PersistedCompositionRestorationPlan, "storageHash"> |
+    PersistedCompositionRestorationPlan,
+): string {
+  const { storageHash: _storageHash, ...body } = plan as PersistedCompositionRestorationPlan;
+  return sha256(compactCanonicalJson(body));
+}
+
 function parseCompositionReport(
   source: string,
   compositionId: string,
@@ -4288,16 +4990,410 @@ function parseCompositionReport(
       !isNonNegativeInteger(value.layerConflictCount) ||
       !isNonNegativeInteger(value.modelConflictCount) ||
       !isNonNegativeInteger(value.unknownConflictCount) ||
+      (value.restorationPixelCount !== undefined &&
+        !isNonNegativeInteger(value.restorationPixelCount)) ||
+      (value.restoredOuterPixelCount !== undefined &&
+        !isNonNegativeInteger(value.restoredOuterPixelCount)) ||
+      (value.restoredBasePixelCount !== undefined &&
+        !isNonNegativeInteger(value.restoredBasePixelCount)) ||
+      (value.restorationMissingPixelCount !== undefined &&
+        !isNonNegativeInteger(value.restorationMissingPixelCount)) ||
+      (value.restorationIssueCount !== undefined &&
+        !isNonNegativeInteger(value.restorationIssueCount)) ||
       !isNonNegativeInteger(value.unresolvedConflictCount) ||
       typeof value.committable !== "boolean" ||
       !Array.isArray(value.conflicts)
     ) {
       throw new TypeError("report 结构无效");
     }
-    return value as CompositionReport;
+    return {
+      ...value,
+      restorationPixelCount: value.restorationPixelCount ?? 0,
+      restoredOuterPixelCount: value.restoredOuterPixelCount ?? 0,
+      restoredBasePixelCount: value.restoredBasePixelCount ?? 0,
+      restorationMissingPixelCount: value.restorationMissingPixelCount ?? 0,
+      restorationIssueCount: value.restorationIssueCount ?? 0,
+    } as CompositionReport;
   } catch (error) {
     throw snapshotCorrupt(compositionId, "混搭冲突报告无效", { cause: error });
   }
+}
+
+function parsePersistedCompositionRestorationPlan(
+  source: string,
+  compositionId: string,
+  armType: "wide" | "slim",
+  baseRevisionId: string,
+): PersistedCompositionRestorationPlan {
+  try {
+    const value = JSON.parse(source) as Partial<PersistedCompositionRestorationPlan>;
+    const summary = value.summary;
+    if (
+      typeof value.storageHash !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(value.storageHash) ||
+      summary === undefined ||
+      !isNonNegativeInteger(summary.version) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(summary.candidateSetHash) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(summary.planHash) ||
+      !validSemanticComponentIdArray(summary.targetComponentIds, true) ||
+      !validPersistedIdArray(summary.candidateIds, false) ||
+      !isNonNegativeInteger(summary.outerPixelCount) ||
+      !isNonNegativeInteger(summary.basePixelCount) ||
+      !isNonNegativeInteger(summary.coveredPixelCount) ||
+      !isNonNegativeInteger(summary.missingPixelCount) ||
+      !validPixelIdArray(value.requestedPixelIds) ||
+      !validPixelIdArray(value.coveredPixelIds) ||
+      !validPixelIdArray(value.missingPixelIds) ||
+      !Array.isArray(value.operations) ||
+      !Array.isArray(value.selectedCandidates)
+    ) {
+      throw new TypeError("plan 结构无效");
+    }
+    const plan = value as PersistedCompositionRestorationPlan;
+    const pixelTargetGroups = restorationTargetGroupsByPixel(armType);
+    const operationIds = plan.operations.map((operation) => operation.operationId);
+    const selectedCandidateIds = plan.selectedCandidates.map(
+      (candidate) => candidate.candidateId,
+    );
+    const selectedTargetGroupIds = plan.selectedCandidates.flatMap(
+      (candidate) => candidate.targetGroupIds,
+    );
+    const outerCandidates = plan.selectedCandidates.filter(
+      (candidate) => candidate.kind === "outer_transparent",
+    );
+    const baseCandidates = plan.selectedCandidates.filter(
+      (candidate) => candidate.kind !== "outer_transparent",
+    );
+    const clearOperations = plan.operations.filter(
+      (operation) => operation.mode === "clear_outer",
+    );
+    const fillOperations = plan.operations.filter(
+      (operation) => operation.mode === "fill_base",
+    );
+    const requestedOuterPixelIds = plan.requestedPixelIds.filter(
+      (pixelId) => restorationPixelLayer(pixelTargetGroups, pixelId) === "outer",
+    );
+    const requestedBasePixelIds = plan.requestedPixelIds.filter(
+      (pixelId) => restorationPixelLayer(pixelTargetGroups, pixelId) === "base",
+    );
+    const coveredOuterPixelIds = plan.coveredPixelIds.filter(
+      (pixelId) => restorationPixelLayer(pixelTargetGroups, pixelId) === "outer",
+    );
+    const coveredBasePixelIds = plan.coveredPixelIds.filter(
+      (pixelId) => restorationPixelLayer(pixelTargetGroups, pixelId) === "base",
+    );
+    const missingOuterPixelIds = plan.missingPixelIds.filter(
+      (pixelId) => restorationPixelLayer(pixelTargetGroups, pixelId) === "outer",
+    );
+    const selectedOperationPrefixes = new Set(
+      plan.selectedCandidates.map((candidate) =>
+        `rest_${candidate.evidenceHash.slice("sha256:".length)}_`
+      ),
+    );
+    const expectedPlanHash = sha256(canonicalRestorationJson({
+      schemaVersion: "1.0",
+      candidateSetHash: summary.candidateSetHash,
+      selectedCandidateIds: summary.candidateIds,
+      operationDescriptors: plan.operations,
+      requestedPixelIds: plan.requestedPixelIds,
+      coveredPixelIds: plan.coveredPixelIds,
+      missingPixelIds: plan.missingPixelIds,
+      evidence: {
+        sourceRevisionId: baseRevisionId,
+        candidateEvidenceHashes: plan.selectedCandidates.map(
+          (candidate) => candidate.evidenceHash,
+        ),
+      },
+    }));
+    if (
+      summary.coveredPixelCount !== plan.coveredPixelIds.length ||
+      summary.missingPixelCount !== plan.missingPixelIds.length ||
+      summary.outerPixelCount + summary.basePixelCount !== plan.requestedPixelIds.length ||
+      summary.planHash !== expectedPlanHash ||
+      summary.coveredPixelCount + summary.missingPixelCount !== plan.requestedPixelIds.length ||
+      summary.outerPixelCount !== requestedOuterPixelIds.length ||
+      summary.basePixelCount !== requestedBasePixelIds.length ||
+      missingOuterPixelIds.length !== 0 ||
+      plan.requestedPixelIds.some((pixelId) => !pixelTargetGroups.has(pixelId)) ||
+      !hasExactDisjointPixelUnion(
+        plan.requestedPixelIds,
+        [plan.coveredPixelIds, plan.missingPixelIds],
+      ) ||
+      !sameStringArray(summary.candidateIds, selectedCandidateIds) ||
+      new Set(selectedCandidateIds).size !== selectedCandidateIds.length ||
+      new Set(selectedTargetGroupIds).size !== selectedTargetGroupIds.length ||
+      outerCandidates.length !== (summary.outerPixelCount > 0 ? 1 : 0) ||
+      new Set(operationIds).size !== operationIds.length ||
+      plan.operations.some((operation) =>
+        ![...selectedOperationPrefixes].some((prefix) =>
+          operation.operationId.startsWith(prefix)
+        )
+      ) ||
+      !hasExactDisjointPixelUnion(
+        plan.coveredPixelIds,
+        plan.operations.map((operation) => operation.pixelIds),
+      ) ||
+      !hasExactDisjointPixelUnion(
+        plan.coveredPixelIds,
+        plan.selectedCandidates.map((candidate) => candidate.coveredPixelIds),
+      ) ||
+      !hasExactDisjointPixelUnion(
+        coveredOuterPixelIds,
+        clearOperations.map((operation) => operation.pixelIds),
+      ) ||
+      !hasExactDisjointPixelUnion(
+        coveredBasePixelIds,
+        fillOperations.map((operation) => operation.pixelIds),
+      ) ||
+      !hasExactDisjointPixelUnion(
+        coveredOuterPixelIds,
+        outerCandidates.map((candidate) => candidate.coveredPixelIds),
+      ) ||
+      !hasExactDisjointPixelUnion(
+        coveredBasePixelIds,
+        baseCandidates.map((candidate) => candidate.coveredPixelIds),
+      ) ||
+      coveredOuterPixelIds.length !== summary.outerPixelCount ||
+      plan.operations.some((operation) =>
+        !isSafeReferenceId(operation.operationId) ||
+        !validPixelIdArray(operation.pixelIds) ||
+        operation.pixelIds.length === 0 ||
+        (operation.mode !== "clear_outer" && operation.mode !== "fill_base") ||
+        (operation.mode === "fill_base" && !isOpaqueRgba(operation.rgba)) ||
+        !restorationOperationMatchesUvLayer(operation, pixelTargetGroups)
+      ) ||
+      plan.selectedCandidates.some((candidate) =>
+        !isSafeReferenceId(candidate.candidateId) ||
+        !isRestorationCandidateKind(candidate.kind) ||
+        !validRestorationTargetGroupIds(candidate.targetGroupIds) ||
+        !validSemanticComponentIdArray(candidate.sourceComponentIds, false) ||
+        (candidate.sampleRevisionId !== null && !isSafeReferenceId(candidate.sampleRevisionId)) ||
+        !/^sha256:[0-9a-f]{64}$/u.test(candidate.evidenceHash) ||
+        !validPixelIdArray(candidate.coveredPixelIds) ||
+        candidate.coveredPixelIds.length === 0 ||
+        !restorationCandidateMatchesTargetGroups(candidate, pixelTargetGroups) ||
+        !restorationCandidateSourceIsConsistent(candidate, baseRevisionId) ||
+        !restorationCandidateOperationsAreConsistent(candidate, plan.operations)
+      )
+    ) {
+      throw new TypeError("plan 内容或校验值无效");
+    }
+    if (plan.storageHash !== persistedRestorationPlanHash(plan)) {
+      throw new TypeError("plan storageHash 校验失败");
+    }
+    return plan;
+  } catch (error) {
+    throw snapshotCorrupt(compositionId, "混搭还原方案无效", { cause: error });
+  }
+}
+
+function validSemanticComponentIdArray(
+  values: readonly string[] | undefined,
+  requireOne: boolean,
+): values is readonly string[] {
+  return (
+    Array.isArray(values) &&
+    (!requireOne || values.length > 0) &&
+    new Set(values).size === values.length &&
+    values.every((value) =>
+      value !== "unknown" &&
+      value.length <= 100 &&
+      /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u.test(value)
+    )
+  );
+}
+
+function validPersistedIdArray(
+  values: readonly string[] | undefined,
+  requireOne: boolean,
+): values is readonly string[] {
+  return (
+    Array.isArray(values) &&
+    (!requireOne || values.length > 0) &&
+    new Set(values).size === values.length &&
+    values.every(isSafeReferenceId)
+  );
+}
+
+function validRestorationTargetGroupIds(
+  values: readonly string[] | undefined,
+): values is readonly string[] {
+  return (
+    Array.isArray(values) &&
+    values.length > 0 &&
+    new Set(values).size === values.length &&
+    values.every((value) =>
+      /^(?:head|torso|leftArm|rightArm|leftLeg|rightLeg)_(?:base|outer)$/u.test(
+        value,
+      ),
+    )
+  );
+}
+
+function validPixelIdArray(
+  values: readonly number[] | undefined,
+): values is readonly number[] {
+  return (
+    Array.isArray(values) &&
+    new Set(values).size === values.length &&
+    values.every((value) => Number.isInteger(value) && value >= 0 && value < 4096) &&
+    values.every((value, index) => index === 0 || values[index - 1]! < value)
+  );
+}
+
+function hasExactDisjointPixelUnion(
+  expected: readonly number[],
+  groups: readonly (readonly number[])[],
+): boolean {
+  const combined = groups.flatMap((group) => group);
+  return (
+    combined.length === expected.length &&
+    new Set(combined).size === combined.length &&
+    JSON.stringify(expected) === JSON.stringify([...combined].sort((a, b) => a - b))
+  );
+}
+
+function sameStringArray(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function restorationTargetGroupsByPixel(
+  armType: "wide" | "slim",
+): ReadonlyMap<number, string> {
+  const layout = getSkinLayout(armType);
+  const groups = new Map<number, string>();
+  for (const surfaceKey of layout.surfaceOrder) {
+    const surface = layout.surfaces[surfaceKey];
+    const groupId = `${surface.bodyPart}_${surface.layer}`;
+    const { atlasRect } = surface;
+    for (let y = atlasRect.y; y < atlasRect.y + atlasRect.height; y += 1) {
+      for (let x = atlasRect.x; x < atlasRect.x + atlasRect.width; x += 1) {
+        groups.set(y * 64 + x, groupId);
+      }
+    }
+  }
+  return groups;
+}
+
+function restorationPixelLayer(
+  targetGroups: ReadonlyMap<number, string>,
+  pixelId: number,
+): "base" | "outer" | null {
+  const targetGroupId = targetGroups.get(pixelId);
+  if (targetGroupId?.endsWith("_base")) return "base";
+  if (targetGroupId?.endsWith("_outer")) return "outer";
+  return null;
+}
+
+function restorationOperationMatchesUvLayer(
+  operation: PersistedCompositionRestorationPlan["operations"][number],
+  targetGroups: ReadonlyMap<number, string>,
+): boolean {
+  const expectedSuffix = operation.mode === "clear_outer" ? "_outer" : "_base";
+  const operationGroups = operation.pixelIds.map((pixelId) => targetGroups.get(pixelId));
+  return (
+    operationGroups.every((groupId) => groupId?.endsWith(expectedSuffix)) &&
+    new Set(operationGroups).size === 1
+  );
+}
+
+function restorationCandidateMatchesTargetGroups(
+  candidate: PersistedCompositionRestorationPlan["selectedCandidates"][number],
+  targetGroups: ReadonlyMap<number, string>,
+): boolean {
+  const expectedSuffix = candidate.kind === "outer_transparent" ? "_outer" : "_base";
+  if (
+    candidate.targetGroupIds.some((groupId) => !groupId.endsWith(expectedSuffix)) ||
+    (candidate.kind !== "outer_transparent" && candidate.targetGroupIds.length !== 1)
+  ) {
+    return false;
+  }
+  const candidateGroups = new Set(candidate.targetGroupIds);
+  const coveredGroups = new Set(
+    candidate.coveredPixelIds.map((pixelId) => targetGroups.get(pixelId)),
+  );
+  return (
+    coveredGroups.size === candidateGroups.size &&
+    [...coveredGroups].every(
+      (groupId) => groupId !== undefined && candidateGroups.has(groupId),
+    )
+  );
+}
+
+function isRestorationCandidateKind(
+  value: unknown,
+): value is PersistedCompositionRestorationPlan["selectedCandidates"][number]["kind"] {
+  return [
+    "outer_transparent",
+    "current_same_surface",
+    "current_same_body_part",
+    "mirrored_counterpart",
+    "donor_revision",
+    "manual_rgba",
+  ].includes(value as string);
+}
+
+function restorationCandidateSourceIsConsistent(
+  candidate: PersistedCompositionRestorationPlan["selectedCandidates"][number],
+  baseRevisionId: string,
+): boolean {
+  if (candidate.kind === "outer_transparent" || candidate.kind === "manual_rgba") {
+    return candidate.sampleRevisionId === null && candidate.sourceComponentIds.length === 0;
+  }
+  if (candidate.sampleRevisionId === null || candidate.sourceComponentIds.length === 0) {
+    return false;
+  }
+  return candidate.kind === "donor_revision"
+    ? candidate.sampleRevisionId !== baseRevisionId
+    : candidate.sampleRevisionId === baseRevisionId;
+}
+
+function restorationCandidateOperationsAreConsistent(
+  candidate: PersistedCompositionRestorationPlan["selectedCandidates"][number],
+  operations: PersistedCompositionRestorationPlan["operations"],
+): boolean {
+  const token = /^sha256:([0-9a-f]{64})$/u.exec(candidate.evidenceHash)?.[1];
+  if (!token || candidate.candidateId !== `restore_${token}`) return false;
+  const prefix = `rest_${token}_`;
+  if (
+    operations.some((operation) =>
+      operation.operationId.startsWith("rest_") &&
+      !operation.operationId.startsWith(prefix) &&
+      candidate.coveredPixelIds.some((pixelId) => operation.pixelIds.includes(pixelId))
+    )
+  ) {
+    return false;
+  }
+  const candidateOperations = operations.filter((operation) =>
+    operation.operationId.startsWith(prefix),
+  );
+  if (
+    candidateOperations.length === 0 ||
+    candidateOperations.some((operation, index) =>
+      operation.operationId !== `${prefix}${index.toString().padStart(3, "0")}` ||
+      (candidate.kind === "outer_transparent"
+        ? operation.mode !== "clear_outer"
+        : operation.mode !== "fill_base")
+    )
+  ) {
+    return false;
+  }
+  return hasExactDisjointPixelUnion(
+    candidate.coveredPixelIds,
+    candidateOperations.map((operation) => operation.pixelIds),
+  );
+}
+
+function isOpaqueRgba(value: readonly number[] | undefined): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === 4 &&
+    value.every((channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255) &&
+    value[3] === 255
+  );
 }
 
 function normalizeCompositionLayers(
@@ -4323,6 +5419,11 @@ function compositionConflictSummary(report: CompositionReport) {
     layerConflictCount: report.layerConflictCount,
     modelConflictCount: report.modelConflictCount,
     unknownConflictCount: report.unknownConflictCount,
+    restorationPixelCount: report.restorationPixelCount,
+    restoredOuterPixelCount: report.restoredOuterPixelCount,
+    restoredBasePixelCount: report.restoredBasePixelCount,
+    restorationMissingPixelCount: report.restorationMissingPixelCount,
+    restorationIssueCount: report.restorationIssueCount,
     unresolvedConflictCount: report.unresolvedConflictCount,
   };
 }
@@ -4759,6 +5860,16 @@ function composedPartComponentId(layerId: string): string {
   return `composed.${layerId.slice(0, 89)}`;
 }
 
+function restoredCandidateComponentId(candidateId: string): string {
+  return `restored.${candidateId.slice(0, 90)}`;
+}
+
+function restorationComponentDisplayName(
+  kind: CompositionRestorationCandidates["base"]["candidates"][number]["kind"],
+): string {
+  return `${restorationCandidateLabel(kind)} · 还原`;
+}
+
 function computeResultHash(
   skinPng: Uint8Array,
   segmentation: SegmentationSnapshot,
@@ -5065,6 +6176,67 @@ function byteHex(value: number): string {
 function assertSafeReferenceId(label: string, value: string): void {
   if (!isSafeReferenceId(value)) {
     throw invalidInput(`${label} 不是安全 ID`, { value });
+  }
+}
+
+function validateReferenceId(label: string, value: string): string {
+  assertSafeReferenceId(label, value);
+  return value;
+}
+
+function validateUniqueSafeIds(
+  label: string,
+  values: readonly string[],
+  maximum: number,
+): string[] {
+  if (
+    !Array.isArray(values) ||
+    values.length > maximum ||
+    new Set(values).size !== values.length
+  ) {
+    throw invalidInput(`${label} 必须唯一且不超过 ${maximum} 项`);
+  }
+  for (const value of values) assertSafeReferenceId(label, value);
+  return [...values];
+}
+
+function validateUniqueSemanticComponentIds(
+  label: string,
+  values: readonly string[],
+  maximum: number,
+): string[] {
+  if (
+    !Array.isArray(values) ||
+    values.length > maximum ||
+    new Set(values).size !== values.length ||
+    values.some((value) =>
+      value === "unknown" ||
+      value.length > 100 ||
+      !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u.test(value)
+    )
+  ) {
+    throw invalidInput(`${label} 包含无效语义组件 ID`);
+  }
+  return [...values];
+}
+
+function validateOpaqueRgba(
+  label: string,
+  value: readonly number[],
+): readonly [number, number, number, number] {
+  if (
+    value.length !== 4 ||
+    value.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255) ||
+    value[3] !== 255
+  ) {
+    throw invalidInput(`${label} 必须是 alpha=255 的 RGBA 字节`);
+  }
+  return [value[0]!, value[1]!, value[2]!, value[3]!];
+}
+
+function assertRestorationVersion(value: number): void {
+  if (!isNonNegativeInteger(value)) {
+    throw invalidInput("expectedVersion 必须是非负整数");
   }
 }
 

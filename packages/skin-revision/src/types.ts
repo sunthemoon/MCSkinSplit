@@ -401,10 +401,126 @@ export interface CompositionProject {
   readonly resolutionMode: CompositionResolutionMode;
   readonly conflictWinners: Readonly<Record<string, string>>;
   readonly report: CompositionReport;
+  /** Monotonic optimistic-concurrency version, including cleared plans. */
+  readonly restorationVersion: number;
+  readonly restorationPlan: CompositionRestorationPlanSummary | null;
   readonly resultRevisionId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly committedAt: string | null;
+}
+
+export type CompositionRestorationCandidateKind =
+  | "outer_transparent"
+  | "current_same_surface"
+  | "current_same_body_part"
+  | "mirrored_counterpart"
+  | "donor_revision"
+  | "manual_rgba";
+
+export interface CompositionRestorationCandidateSummary {
+  readonly id: string;
+  readonly kind: CompositionRestorationCandidateKind;
+  readonly targetGroupId: string;
+  readonly label: string;
+  readonly description: string;
+  readonly pixelCount: number;
+  readonly coveragePixelCount: number;
+  readonly sourceRevisionId?: string;
+  readonly rgba?: readonly [number, number, number, number];
+  readonly selectedByDefault?: boolean;
+}
+
+export interface CompositionRestorationCandidates {
+  readonly compositionId: string;
+  readonly version: number;
+  readonly candidateSetHash: string;
+  readonly targetComponentIds: readonly string[];
+  readonly outer: {
+    readonly pixelCount: number;
+    readonly candidateId: string | null;
+  };
+  readonly base: {
+    readonly pixelCount: number;
+    readonly coveredPixelCount: number;
+    readonly missingPixelCount: number;
+    readonly candidates: readonly CompositionRestorationCandidateSummary[];
+  };
+}
+
+export interface CompositionRestorationPlanSummary {
+  readonly version: number;
+  readonly candidateSetHash: string;
+  readonly targetComponentIds: readonly string[];
+  readonly candidateIds: readonly string[];
+  readonly outerPixelCount: number;
+  readonly basePixelCount: number;
+  readonly coveredPixelCount: number;
+  readonly missingPixelCount: number;
+  readonly planHash: string;
+}
+
+export interface PersistedCompositionRestorationPlan {
+  readonly storageHash: string;
+  readonly summary: CompositionRestorationPlanSummary;
+  readonly operations: readonly PersistedCompositionRestorationOperation[];
+  readonly selectedCandidates: readonly PersistedCompositionRestorationCandidate[];
+  readonly requestedPixelIds: readonly number[];
+  readonly coveredPixelIds: readonly number[];
+  readonly missingPixelIds: readonly number[];
+}
+
+export type PersistedCompositionRestorationOperation =
+  | {
+      readonly operationId: string;
+      readonly mode: "clear_outer";
+      readonly pixelIds: readonly number[];
+    }
+  | {
+      readonly operationId: string;
+      readonly mode: "fill_base";
+      readonly pixelIds: readonly number[];
+      readonly rgba: readonly [number, number, number, number];
+    };
+
+export interface GenerateCompositionRestorationCandidatesInput {
+  readonly targetComponentIds: readonly string[];
+  readonly donorRevisionId?: string;
+  readonly manualRgba?: readonly [number, number, number, number];
+}
+
+export interface SetCompositionRestorationPlanInput {
+  readonly expectedVersion: number;
+  readonly candidateSetHash: string;
+  readonly candidateIds: readonly string[];
+  readonly targetComponentIds: readonly string[];
+  readonly donorRevisionId?: string;
+  readonly manualRgba?: readonly [number, number, number, number];
+}
+
+export interface ClearCompositionRestorationPlanInput {
+  readonly expectedVersion: number;
+}
+
+export interface CompositionRestorationEvent {
+  readonly id: number;
+  readonly compositionId: string;
+  readonly version: number;
+  readonly eventType: "plan_set" | "plan_cleared";
+  readonly candidateSetHash: string | null;
+  readonly candidateIds: readonly string[];
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+export interface PersistedCompositionRestorationCandidate {
+  readonly candidateId: string;
+  readonly kind: CompositionRestorationCandidateKind;
+  readonly targetGroupIds: readonly string[];
+  readonly sampleRevisionId: string | null;
+  readonly sourceComponentIds: readonly string[];
+  readonly evidenceHash: string;
+  readonly coveredPixelIds: readonly number[];
 }
 
 export interface CompositionLayer {

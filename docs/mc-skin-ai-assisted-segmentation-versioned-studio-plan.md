@@ -2332,13 +2332,31 @@ Codex 任务：
 - 修补 Revision 只能引用同一修补工程内的历史 Revision；跨工程复用须通过已提交的不可变部件。
 - 换色输出必须保持非透明；删除像素须使用明确的擦除操作。
 - 修补来源、操作和提交结果可追溯；人工绘制像素明确记录为非 AI 生成。
-- 本阶段不宣称恢复被遮挡的真实原图像素，也不负责清除目标皮肤中超出新部件 write mask 的残留；后者进入 M9 替换/还原流程。
+- 本阶段不宣称恢复被遮挡的真实原图像素，也不负责清除目标皮肤中超出新部件 write mask 的残留；已实现的 M9 Composition 还原流程负责显式选择清理与肤色候选。
 
 建议提交：
 
 ```text
 feat(parts): add immutable component repair studio
 ```
+
+---
+
+## M9：混搭残留清理与 Base 肤色候选还原
+
+目标：在不改变 23 个精细语义分类的前提下，从目标 Revision 已存储的语义组件派生清理范围，清除换装后遗留的 Outer 像素，并为新暴露的 Base 像素选择可审计的非透明肤色来源。
+
+实现：
+
+1. 精细组件仍是持久化与证据单元；完整头发、衣服、饰品只是将选择展开为对应精细组件 ID 的视图。
+2. Host 从不可变语义快照确定性生成候选。Outer 汇总为一个强制透明清理候选；Base 按身体部位分别提供当前同表面、当前同身体部位、镜像对应位置、兼容 donor Revision 或手动不透明 RGBA 候选。
+3. 候选生成不修改 Composition Project。公开响应只包含 ID、hash、标签和覆盖统计，不输出 mask、像素列表、compositor operation 或模型生成 PNG。
+4. 应用计划时客户端提交 `expectedVersion`、候选集 hash、候选 ID，并重复目标组件、donor 与手动颜色输入。服务端重新生成候选并校验，不能依赖先前 POST 或客户端缓存。
+5. Plan set/clear 使用单调版本与追加审计事件；预览和 commit 均从经过存储 hash 校验的 plan 派生。Base 缺失像素或还原完整性问题阻止提交。
+6. Compose Revision 记录 plan/hash/coverage 元数据。采样还原像素记录来源 Revision 与肤色组件；手动颜色记录为无来源 texel 的用户创作像素，Outer 透明清理不伪造成非透明语义组件。
+7. 本阶段未接入 AI。肤色候选不声称恢复被遮挡的事实像素，聚合选择也不合并或删除精细分类。
+
+详细合同见 [`composition-restoration-workflow.md`](composition-restoration-workflow.md)。
 
 ---
 

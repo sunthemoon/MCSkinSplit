@@ -5,6 +5,7 @@ import {
   SemanticEditError,
   analyzePartApplication,
   applyManualSemanticOperation,
+  assignSemanticPixelsWithProvenance,
   applyPartPixels,
   componentMaskFile,
   createInitialSemanticState,
@@ -25,6 +26,7 @@ import {
   type ArmType,
   type Rgba,
   type RgbaImage,
+  type SemanticCategory,
   type SemanticPixelSpan,
   type SemanticState,
   type SurfaceKey,
@@ -301,6 +303,183 @@ describe("manual semantic transactions", () => {
     expect(maskToPixelIds(rebased.unknownMask)).toContain(8 * 64 + 13);
     expect(() => validateSemanticState(rebased, resultImage)).not.toThrow();
   });
+
+  it("records explicit generated and sourced restoration provenance", () => {
+    const image = semanticFixture();
+    const planHash = `sha256:${"a".repeat(64)}`;
+    const classified = applyManualSemanticOperation(
+      initialState(image),
+      {
+        type: "assign_pixels",
+        target: component("outfit.old", "Old outfit", "upper_clothing"),
+        spans: [headSpan(8, 8)],
+      },
+      image,
+    );
+    const sourced = assignSemanticPixelsWithProvenance(
+      classified,
+      {
+        target: {
+          instanceId: "skin.restored.copy",
+          displayName: "Restored skin",
+          category: "skin",
+        },
+        spans: [headSpan(8, 8)],
+        provenance: {
+          actorType: "system",
+          containsGeneratedPixels: false,
+          restoration: {
+            kind: "composition_restoration",
+            planHash,
+            candidateIds: ["candidate_same_surface"],
+            sourceRevisionIds: ["revision_source"],
+            sourceComponentIds: ["skin.exposed"],
+          },
+        },
+      },
+      image,
+    );
+    const generated = assignSemanticPixelsWithProvenance(
+      sourced,
+      {
+        target: {
+          instanceId: "skin.restored.manual",
+          displayName: "Authored skin",
+          category: "skin",
+        },
+        spans: [headSpan(9, 9)],
+        provenance: {
+          actorType: "user",
+          containsGeneratedPixels: true,
+          restoration: {
+            kind: "composition_restoration",
+            planHash,
+            candidateIds: ["candidate_manual_rgba"],
+            sourceRevisionIds: [],
+            sourceComponentIds: [],
+          },
+        },
+      },
+      image,
+    );
+
+    expect(
+      generated.document.components.find(
+        (item) => item.instanceId === "skin.restored.copy",
+      )?.provenance,
+    ).toMatchObject({
+      actorType: "system",
+      containsGeneratedPixels: false,
+    });
+    expect(
+      generated.document.components.find(
+        (item) => item.instanceId === "skin.restored.manual",
+      )?.provenance,
+    ).toMatchObject({ containsGeneratedPixels: true });
+    expect(() => validateSemanticState(generated, image)).not.toThrow();
+    expect(() =>
+      assignSemanticPixelsWithProvenance(
+        initialState(image),
+        {
+          target: {
+            instanceId: "skin.invalid",
+            displayName: "Invalid",
+            category: "skin",
+          },
+          spans: [headSpan(8, 8)],
+          provenance: {
+            actorType: "system",
+            containsGeneratedPixels: false,
+            restoration: {
+              kind: "composition_restoration",
+              planHash: "invalid",
+              candidateIds: ["candidate"],
+              sourceRevisionIds: [],
+              sourceComponentIds: [],
+            },
+          },
+        },
+        image,
+      ),
+    ).toThrow(/provenance is invalid/u);
+  });
+
+  it("preserves generated restoration origin through later semantic edits", () => {
+    const image = semanticFixture();
+    const planHash = `sha256:${"b".repeat(64)}`;
+    const generated = assignSemanticPixelsWithProvenance(
+      initialState(image),
+      {
+        target: {
+          instanceId: "skin.restored.manual",
+          displayName: "Authored skin",
+          category: "skin",
+        },
+        spans: [headSpan(8, 9)],
+        provenance: {
+          actorType: "system",
+          containsGeneratedPixels: true,
+          restoration: {
+            kind: "composition_restoration",
+            planHash,
+            candidateIds: ["candidate_manual"],
+            sourceRevisionIds: [],
+            sourceComponentIds: [],
+          },
+        },
+      },
+      image,
+    );
+    const split = applyManualSemanticOperation(
+      generated,
+      {
+        type: "split_component",
+        sourceComponentId: "skin.restored.manual",
+        target: {
+          instanceId: "skin.restored.split",
+          displayName: "Split authored skin",
+          category: "skin",
+        },
+        spans: [headSpan(9, 9)],
+      },
+      image,
+    );
+    const reclassified = applyManualSemanticOperation(
+      split,
+      {
+        type: "reclassify_component",
+        componentId: "skin.restored.split",
+        category: "face_detail",
+      },
+      image,
+    );
+    const merged = applyManualSemanticOperation(
+      reclassified,
+      {
+        type: "merge_components",
+        componentIds: ["skin.restored.manual", "skin.restored.split"],
+        target: {
+          instanceId: "skin.restored.merged",
+          displayName: "Merged authored skin",
+          category: "skin",
+        },
+      },
+      image,
+    );
+
+    expect(
+      merged.document.components.find(
+        (component) => component.instanceId === "skin.restored.merged",
+      )?.provenance,
+    ).toMatchObject({
+      actorType: "user",
+      containsGeneratedPixels: true,
+      restoration: {
+        planHash,
+        candidateIds: ["candidate_manual"],
+      },
+    });
+  });
 });
 
 describe("reusable semantic parts", () => {
@@ -469,7 +648,7 @@ function initialState(image: RgbaImage, armType: ArmType = "slim"): SemanticStat
 function component(
   instanceId: string,
   displayName: string,
-  category: "hair" | "eye" | "glove",
+  category: SemanticCategory,
 ) {
   return { instanceId, displayName, category } as const;
 }

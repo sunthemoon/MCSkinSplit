@@ -10,6 +10,7 @@ Browser UI
     -> AI job service (M5)
     -> Composition service (M6)
     -> Part repair service (M8)
+    -> Composition restoration service (M9)
 
 Deterministic skin core
   -> PNG RGBA decoder
@@ -20,6 +21,7 @@ Deterministic skin core
 
 Skin compositor
   -> ordered part layers over an immutable base
+  -> validated Outer clear and opaque Base restoration plan
   -> per-pixel winner selection
   -> model, semantic-boundary, and overlap conflict reports
 
@@ -33,6 +35,11 @@ Part repair service
   -> append-only part-edit Revisions
   -> atomic texture, write-mask, and operation storage
   -> immutable five-file part commit
+
+Composition restoration service
+  -> deterministic host-side candidate derivation from semantic snapshots
+  -> versioned candidate-ID/hash plans and append-only audit events
+  -> preview and compose-Revision restoration provenance
 ```
 
 ## M0 decisions
@@ -169,15 +176,43 @@ The detailed contract is in
 The detailed contract is in
 [`component-repair-workflow.md`](component-repair-workflow.md).
 
+## M9 decisions
+
+- `packages/skin-core` derives restoration target groups and candidate evidence
+  from immutable semantic Revisions. The complete hair, clothing, and accessory
+  controls expand to fine component IDs; the fixed 23-category taxonomy remains
+  authoritative.
+- One aggregate candidate clears all selected Outer pixels. Every selected Base
+  group instead requires one opaque fill candidate derived from current
+  same-surface skin, current same-body-part skin, a mirrored counterpart, one
+  compatible donor Revision, or an explicit manual RGBA value.
+- Candidate generation is deterministic and non-mutating. The HTTP boundary
+  returns summaries, IDs, hashes, and coverage only. It does not expose masks,
+  pixel IDs, operations, or a generated PNG, and no AI provider participates.
+- Plan application repeats the candidate-generation inputs. The Revision service
+  regenerates the set, validates the hash and IDs, and uses a monotonic version to
+  reject stale apply/clear requests.
+- `packages/skin-revision` stores the current hash-verified plan and append-only
+  set/clear events. `packages/skin-compositor` materializes the trusted plan over
+  the base before evaluating normal part layers; missing Base coverage or plan
+  integrity issues block commit.
+- A committed `compose` Revision records plan identity and counts in its operation
+  metadata. Restored opaque pixels receive `composition_restoration` semantic
+  provenance; manual fills are marked as user-authored pixels without a source
+  texel. Component-level merging preserves only unambiguous same-plan evidence.
+
+The detailed contract is in
+[`composition-restoration-workflow.md`](composition-restoration-workflow.md).
+
 ## Package boundaries
 
 ```text
-apps/web                 UI, editors, AI console, compositor, repair, and preview adapters
-apps/api                 HTTP API, revision, AI, composition, and repair orchestration
+apps/web                 UI, editors, AI console, compositor, repair, restoration, and preview adapters
+apps/api                 HTTP API, revision, AI, composition, repair, and restoration orchestration
 apps/ai-worker           persistent isolated analysis jobs (M5)
-packages/skin-core       PNG, UV, pixels, semantic edits, parts, and repair (M1-M8)
+packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, and restoration (M1-M9)
 packages/skin-revision   immutable snapshots, parts, repair histories, AI audit, and compositions
-packages/skin-compositor ordered layers and deterministic conflict evaluation (M6)
+packages/skin-compositor ordered layers, restoration, and deterministic conflict evaluation (M6/M9)
 packages/skin-analysis-pack deterministic analysis workspace generation (M5)
 packages/ai-provider     replaceable provider contracts and validation (M5)
 ```

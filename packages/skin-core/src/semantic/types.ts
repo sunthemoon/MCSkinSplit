@@ -20,6 +20,22 @@ export interface ComponentPalette {
   readonly colors: readonly string[];
 }
 
+export interface CompositionRestorationProvenance {
+  readonly kind: "composition_restoration";
+  readonly planHash: string;
+  readonly candidateIds: readonly string[];
+  readonly sourceRevisionIds: readonly string[];
+  readonly sourceComponentIds: readonly string[];
+}
+
+export interface SemanticComponentProvenance {
+  readonly actorType: "user" | "ai" | "system";
+  readonly aiRunId?: string;
+  /** True only when at least one owned pixel was authored without a source texel. */
+  readonly containsGeneratedPixels: boolean;
+  readonly restoration?: CompositionRestorationProvenance;
+}
+
 export interface SemanticComponent {
   readonly instanceId: string;
   readonly displayName: string;
@@ -31,11 +47,7 @@ export interface SemanticComponent {
   readonly spans: readonly SemanticPixelSpan[];
   readonly palette: ComponentPalette;
   readonly relations: ComponentRelations;
-  readonly provenance: {
-    readonly actorType: "user" | "ai" | "system";
-    readonly aiRunId?: string;
-    readonly containsGeneratedPixels: false;
-  };
+  readonly provenance: SemanticComponentProvenance;
 }
 
 export interface SegmentationDocument {
@@ -66,6 +78,12 @@ export interface SemanticComponentInput {
   readonly displayName: string;
   readonly category: SemanticCategory;
   readonly subtype?: string;
+}
+
+export interface ProvenanceSemanticAssignment {
+  readonly target: SemanticComponentInput;
+  readonly spans: readonly SemanticPixelSpan[];
+  readonly provenance: SemanticComponentProvenance;
 }
 
 export type ManualSemanticOperation =

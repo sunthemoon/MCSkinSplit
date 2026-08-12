@@ -268,6 +268,11 @@ export interface ApiCompositionReport {
   readonly layerConflictCount: number;
   readonly modelConflictCount: number;
   readonly unknownConflictCount: number;
+  readonly restorationPixelCount: number;
+  readonly restoredOuterPixelCount: number;
+  readonly restoredBasePixelCount: number;
+  readonly restorationMissingPixelCount: number;
+  readonly restorationIssueCount: number;
   readonly unresolvedConflictCount: number;
   readonly committable: boolean;
   readonly conflicts: readonly ApiCompositionConflict[];
@@ -283,6 +288,7 @@ export interface ApiCompositionProject {
   readonly status: "draft" | "committed";
   readonly resolutionMode: "unresolved" | "layer_order";
   readonly conflictWinners: Readonly<Record<string, string>>;
+  readonly restorationPlan: ApiCompositionRestorationPlan | null;
   readonly report: ApiCompositionReport;
   readonly resultRevisionId: string | null;
   readonly createdAt: string;
@@ -303,6 +309,56 @@ export interface ApiCompositionDetail {
   readonly composition: ApiCompositionProject;
   readonly layers: readonly ApiCompositionLayer[];
   readonly report: ApiCompositionReport;
+}
+
+export type ApiRestorationCandidateKind =
+  | "outer_transparent"
+  | "current_same_surface"
+  | "current_same_body_part"
+  | "mirrored_counterpart"
+  | "donor_revision"
+  | "manual_rgba";
+
+export interface ApiRestorationCandidate {
+  readonly id: string;
+  readonly kind: ApiRestorationCandidateKind;
+  readonly targetGroupId: string;
+  readonly label: string;
+  readonly description: string;
+  readonly pixelCount: number;
+  readonly coveragePixelCount: number;
+  readonly sourceRevisionId?: string;
+  readonly rgba?: Rgba;
+  readonly selectedByDefault?: boolean;
+}
+
+export interface ApiCompositionRestorationCandidates {
+  readonly compositionId: string;
+  readonly version: number;
+  readonly candidateSetHash: string;
+  readonly targetComponentIds: readonly string[];
+  readonly outer: {
+    readonly pixelCount: number;
+    readonly candidateId: string | null;
+  };
+  readonly base: {
+    readonly pixelCount: number;
+    readonly coveredPixelCount: number;
+    readonly missingPixelCount: number;
+    readonly candidates: readonly ApiRestorationCandidate[];
+  };
+}
+
+export interface ApiCompositionRestorationPlan {
+  readonly version: number;
+  readonly candidateSetHash: string;
+  readonly targetComponentIds: readonly string[];
+  readonly candidateIds: readonly string[];
+  readonly outerPixelCount: number;
+  readonly basePixelCount: number;
+  readonly coveredPixelCount: number;
+  readonly missingPixelCount: number;
+  readonly planHash: string;
 }
 
 export interface ApiCompositionCommit extends ApiMutationResult {
@@ -987,6 +1043,65 @@ export function resolveCompositionConflicts(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(resolution),
+    },
+    fetcher,
+  );
+}
+
+export function generateCompositionRestorationCandidates(
+  compositionId: string,
+  input: {
+    readonly targetComponentIds: readonly string[];
+    readonly donorRevisionId?: string;
+    readonly manualRgba?: Rgba;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionRestorationCandidates> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/restoration-candidates`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+}
+
+export function setCompositionRestorationPlan(
+  compositionId: string,
+  input: {
+    readonly expectedVersion: number;
+    readonly candidateSetHash: string;
+    readonly candidateIds: readonly string[];
+    readonly targetComponentIds: readonly string[];
+    readonly donorRevisionId?: string;
+    readonly manualRgba?: Rgba;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/restoration-plan`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+}
+
+export function clearCompositionRestorationPlan(
+  compositionId: string,
+  expectedVersion: number,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/restoration-plan`,
+    {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion }),
     },
     fetcher,
   );

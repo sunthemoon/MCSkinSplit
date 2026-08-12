@@ -115,6 +115,189 @@ describe("pixel-safe skin composition", () => {
     });
   });
 
+  it("clears residual old clothing from Outer surfaces before applying a replacement", () => {
+    const outerPixel = pixelOnSurface("torso.outer.front");
+    const replacementPixel = pixelOnSurface("torso.base.front");
+    const base = transparentImage();
+    base.data.set([120, 20, 30, 255], outerPixel * 4);
+    base.data.set([10, 20, 30, 255], replacementPixel * 4);
+    const replacement = layer(
+      "layer_replacement",
+      "part_replacement",
+      0,
+      replacementPixel,
+      [30, 140, 190, 255],
+    );
+    const result = composeSkin({
+      base,
+      targetArmType: "slim",
+      restorationPlan: {
+        operations: [
+          {
+            operationId: "clear_old_outer",
+            mode: "clear_outer",
+            mask: pixelIdsToMask([outerPixel]),
+          },
+        ],
+      },
+      layers: [
+        {
+          ...replacement,
+          manifest: manifestFor(
+            replacement.partId,
+            ["torso.base.front"],
+            ["slim"],
+          ),
+        },
+      ],
+      resolutionMode: "layer_order",
+    });
+
+    expect(readPixel(result.image, outerPixel)).toEqual([0, 0, 0, 0]);
+    expect(readPixel(result.image, replacementPixel)).toEqual([30, 140, 190, 255]);
+    expect(result.report).toMatchObject({
+      restorationPixelCount: 1,
+      restoredOuterPixelCount: 1,
+      restoredBasePixelCount: 0,
+      committable: true,
+    });
+    expect(result.restoredPixelIdsByOperation.clear_old_outer).toEqual([
+      outerPixel,
+    ]);
+  });
+
+  it("fills a removed Base clothing pixel with an explicit opaque skin color", () => {
+    const basePixel = pixelOnSurface("rightArm.base.front");
+    const skinColor: Rgba = [244, 205, 192, 255];
+    const result = composeSkin({
+      base: imageWithPixel(basePixel, [70, 90, 120, 255]),
+      targetArmType: "slim",
+      restorationPlan: {
+        operations: [
+          {
+            operationId: "restore_arm_skin",
+            mode: "fill_base",
+            mask: pixelIdsToMask([basePixel]),
+            rgba: skinColor,
+          },
+        ],
+      },
+      layers: [],
+    });
+
+    expect(readPixel(result.image, basePixel)).toEqual(skinColor);
+    expect(result.report).toMatchObject({
+      restorationPixelCount: 1,
+      restoredOuterPixelCount: 0,
+      restoredBasePixelCount: 1,
+      restorationMissingPixelCount: 0,
+      restorationIssueCount: 0,
+      committable: true,
+    });
+    expect(result.restoredPixelIdsByOperation.restore_arm_skin).toEqual([
+      basePixel,
+    ]);
+  });
+
+  it("blocks commit when requested Base cleanup is not fully restored", () => {
+    const basePixel = pixelOnSurface("torso.base.front");
+    const result = composeSkin({
+      base: imageWithPixel(basePixel, [70, 90, 120, 255]),
+      targetArmType: "slim",
+      layers: [],
+      restorationAssessment: { missingPixelCount: 1, issueCount: 0 },
+    });
+
+    expect(result.report).toMatchObject({
+      restorationMissingPixelCount: 1,
+      restorationIssueCount: 0,
+      committable: false,
+    });
+  });
+
+  it("rejects transparent restoration of Base pixels and overlapping targets", () => {
+    const basePixel = pixelOnSurface("torso.base.front");
+    expect(() =>
+      composeSkin({
+        base: imageWithPixel(basePixel, [20, 30, 40, 255]),
+        targetArmType: "slim",
+        restorationPlan: {
+          operations: [
+            {
+              operationId: "clear_base",
+              mode: "clear_outer",
+              mask: pixelIdsToMask([basePixel]),
+            },
+          ],
+        },
+        layers: [],
+      }),
+    ).toThrow(/cannot clear Base pixel/u);
+
+    expect(() =>
+      composeSkin({
+        base: imageWithPixel(basePixel, [20, 30, 40, 255]),
+        targetArmType: "slim",
+        restorationPlan: {
+          operations: [
+            {
+              operationId: "fill_base_one",
+              mode: "fill_base",
+              mask: pixelIdsToMask([basePixel]),
+              rgba: [100, 110, 120, 255],
+            },
+            {
+              operationId: "fill_base_two",
+              mode: "fill_base",
+              mask: pixelIdsToMask([basePixel]),
+              rgba: [130, 140, 150, 255],
+            },
+          ],
+        },
+        layers: [],
+      }),
+    ).toThrow(/overlap pixel/u);
+  });
+
+  it("rejects restoration outside used UV and non-opaque Base fills", () => {
+    const unusedPixel = 0;
+    expect(() =>
+      composeSkin({
+        base: transparentImage(),
+        targetArmType: "slim",
+        restorationPlan: {
+          operations: [
+            {
+              operationId: "clear_unused_uv",
+              mode: "clear_outer",
+              mask: pixelIdsToMask([unusedPixel]),
+            },
+          ],
+        },
+        layers: [],
+      }),
+    ).toThrow(/unused UV pixel/u);
+
+    const basePixel = pixelOnSurface("leftLeg.base.front");
+    expect(() =>
+      composeSkin({
+        base: transparentImage(),
+        targetArmType: "slim",
+        restorationPlan: {
+          operations: [
+            {
+              operationId: "fill_translucent_base",
+              mode: "fill_base",
+              mask: pixelIdsToMask([basePixel]),
+              rgba: [200, 180, 160, 200],
+            },
+          ],
+        },
+        layers: [],
+      }),
+    ).toThrow(/opaque Base fill/u);
+  });
+
   it("rebuilds the declared Alex mix from all six real skin sources", async () => {
     const manifest = JSON.parse(
       await readFile(resolve(fixtureDirectory, "real-skins.json"), "utf8"),
@@ -262,4 +445,9 @@ function readPixel(image: RgbaImage, pixelId: number): Rgba {
     image.data[offset + 2]!,
     image.data[offset + 3]!,
   ];
+}
+
+function pixelOnSurface(surface: SurfaceKey): number {
+  const rect = layout.surfaces[surface].atlasRect;
+  return rect.y * 64 + rect.x;
 }

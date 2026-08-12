@@ -15,6 +15,7 @@ Last updated: 2026-08-12
 | M6 compositor | Complete | Explicit conflicts and deterministic six-skin composition |
 | M7 analyzed-skin catalog and complete-category bundles | Complete | Immutable atomic bundles, derived previews, and atomic whole-bundle composition |
 | M8 immutable component repair | Complete | Append-only repair Revisions, verified files, neutral 3D preview, and new-part commit |
+| M9 composition remnant cleanup and Base restoration | Complete | Deterministic candidates, versioned/audited plans, restored previews, and compose provenance |
 
 ## M0 baseline
 
@@ -497,7 +498,89 @@ Last updated: 2026-08-12
   service validates the operation again before appending a repair Revision.
 - Committing a repaired part does not remove pixels from the target skin that lie
   outside the repaired part's write mask. Target-remnant clearing and Base-layer
-  restoration, including skin-color candidates, belong to M9.
+  restoration are provided by M9 inside the Composition Project; see
+  [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 - Repair projects use a linear HEAD rather than Branch/Revert semantics. Committed
   projects are read-only and further corrections start from a saved part in a new
   project.
+
+## M9 deliverables
+
+- Added deterministic host-side restoration candidate generation. Selected fine
+  semantic component masks are grouped by body part and Base/Outer layer; the
+  Studio's complete hair, clothing, and accessory modes only expand the selection
+  and do not alter the fixed 23-category taxonomy.
+- Added one aggregate transparent Outer cleanup candidate and opaque Base
+  candidates from current same-surface skin, current same-body-part skin,
+  canonical mirror evidence, one compatible donor Revision, or an explicit manual
+  RGBA value. Coverage and missing pixels are reported per candidate set.
+- Extended the compositor with validated Outer clear and Base fill operations
+  applied before ordinary part layers. Restoration counts are included in the
+  Composition report, while missing coverage or plan-integrity issues block
+  commit.
+- Added SQLite migration `007_composition_restoration.sql`, a monotonic restoration
+  version, hash-verified current plan storage, and append-only plan-set/plan-clear
+  audit events.
+- Added non-mutating candidate generation plus versioned plan set/clear APIs.
+  Public request/response DTOs use regeneration inputs, candidate IDs, hashes, and
+  counts; strict schemas reject client-supplied masks, operations, pixel IDs, PNGs,
+  non-opaque manual colors, and stale versions.
+- Added a responsive restoration panel inside Composition. It supports fine or
+  complete-category target selection, optional donor/manual inputs, forced Outer
+  cleanup, mutually exclusive Base choices per target group, coverage/missing
+  metrics, explicit Apply/Clear, and refreshed texture/3D previews.
+- Added commit provenance. Compose operation metadata records plan identity and
+  coverage, while restored opaque skin components record candidate/source
+  evidence. Manual fills are identified as user-authored without source texels
+  and set `containsGeneratedPixels: true`.
+- Documented the stable behavior in
+  [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
+
+## M9 verification evidence
+
+- Skin Core passes 11 test files / 71 tests, including deterministic candidate
+  ordering/hashing, aggregate Outer cleanup, semantic-skin sampling, donor model
+  checks, Slim-arm mirror evidence, opaque manual fill, overlap prevention, and
+  exclusion of typed masks from canonical candidate evidence.
+- Skin Core typecheck and production build pass.
+- Skin Compositor passes 1 test file / 8 tests, including layer-constrained Outer
+  clear, opaque Base fill, overlap and invalid-operation rejection, restoration
+  counts, missing/issue commit gates, and ordinary part-layer evaluation over the
+  restored base.
+- Skin Compositor typecheck and production build pass.
+- Revision service passes 1 test file / 26 tests, including versioned plan
+  set/clear, append-only events, persistence/reopen verification, partial-coverage
+  commit blocking, Base-only zero-operation draft round trips, preview pixels,
+  committed manual provenance, and immutable compose output.
+- Revision-service typecheck and production build pass.
+- API typecheck and production build pass. The API suite passes all 11 cases,
+  including deterministic non-mutating candidate generation, alpha `0`/`128`
+  rejection for manual candidates, strict request bodies, candidate-set hash
+  mismatch, Base fill plus Outer clear in the preview PNG, versioned clear, and
+  stale-version rejection.
+- Web typecheck and production build pass. All 52 web cases pass, including
+  candidate-ID-only transport, regeneration inputs on plan application, aggregate
+  versus fine selection, forced Outer inclusion, one Base candidate per target
+  group, opaque manual color parsing, coverage gating, and visible panel content.
+- The production web build retains the existing non-blocking Vite warning for
+  chunks larger than 500 kB.
+
+## M9 known boundaries
+
+- M9 is deterministic and does not call an AI model. Candidate generation uses
+  opaque pixels owned by stored semantic skin components or explicit user input;
+  it does not infer factual hidden pixels.
+- Manual Base fill is intentionally opaque and authored. It records no donor
+  Revision or source component and is marked as containing generated pixels even
+  though no generative model was called.
+- The public API never returns authoritative masks, pixel lists, compositor
+  operations, or a generated PNG as candidate output. These remain host-derived
+  and hash-verified behind the persistence boundary.
+- Provenance is component-level rather than a general per-pixel ancestry graph.
+  Merging evidence from different restoration plans keeps the conservative
+  generated-pixel flag but drops ambiguous restoration details.
+- Aggregate modes remain selection convenience. Fine components, atomic parts,
+  and Bundle members are still stored and edited independently.
+- Mirror coverage is verified for the canonical Slim arm counterpart exercised by
+  the focused suite; the tests do not claim exhaustive mirror coverage for every
+  face and both arm models.

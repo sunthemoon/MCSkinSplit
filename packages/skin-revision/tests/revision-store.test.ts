@@ -18,6 +18,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   RevisionStore,
   RevisionStoreError,
+  canonicalJson,
+  sha256,
   type RevisionIdKind,
 } from "../src";
 
@@ -1000,6 +1002,397 @@ describe("RevisionStore", () => {
           expect.stringMatching(/^composed\./),
         ]),
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists versioned restoration plans, blocks partial coverage, and commits honest provenance", async () => {
+    const created = await createStore();
+    const { store, directory } = created;
+    try {
+      const image = createRgbaImage(64, 64);
+      const layout = getSkinLayout("slim");
+      const basePixelId = 20 * 64 + 20;
+      const outerPixelId = 36 * 64 + 44;
+      image.data.set([90, 80, 70, 255], basePixelId * 4);
+      image.data.set([40, 50, 60, 255], outerPixelId * 4);
+      const imported = await store.importProject({
+        name: "Restoration source",
+        armType: "slim",
+        skinPng: encodeSkinPng(image),
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.cleanup",
+            displayName: "旧衣服",
+            category: "upper_clothing",
+          },
+          spans: pixelIdsToSpans([basePixelId, outerPixelId], layout),
+        },
+      });
+      const composition = await store.createComposition({
+        baseRevisionId: segmented.revision.id,
+      });
+      const generated = await store.generateCompositionRestorationCandidates(
+        composition.composition.id,
+        {
+          targetComponentIds: ["outfit.cleanup"],
+          manualRgba: [210, 170, 140, 255],
+        },
+      );
+      expect(generated).toMatchObject({
+        version: 0,
+        targetComponentIds: ["outfit.cleanup"],
+        outer: { pixelCount: 1 },
+        base: { pixelCount: 1 },
+      });
+      expect(store.listCompositionRestorationEvents(composition.composition.id)).toEqual([]);
+      const manual = generated.base.candidates.find(
+        (candidate) => candidate.kind === "manual_rgba",
+      )!;
+      const partial = await store.setCompositionRestorationPlan(
+        composition.composition.id,
+        {
+          expectedVersion: 0,
+          candidateSetHash: generated.candidateSetHash,
+          candidateIds: [],
+          targetComponentIds: ["outfit.cleanup"],
+          manualRgba: [210, 170, 140, 255],
+        },
+      );
+      expect(partial.composition.restorationVersion).toBe(1);
+      expect(partial.report).toMatchObject({
+        restorationMissingPixelCount: 1,
+        committable: false,
+      });
+      await expect(store.commitComposition(composition.composition.id)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      const cleared = await store.clearCompositionRestorationPlan(
+        composition.composition.id,
+        { expectedVersion: 1 },
+      );
+      expect(cleared.composition).toMatchObject({
+        restorationVersion: 2,
+        restorationPlan: null,
+      });
+      const regenerated = await store.generateCompositionRestorationCandidates(
+        composition.composition.id,
+        {
+          targetComponentIds: ["outfit.cleanup"],
+          manualRgba: [210, 170, 140, 255],
+        },
+      );
+      expect(regenerated.version).toBe(2);
+      expect(regenerated.candidateSetHash).toBe(generated.candidateSetHash);
+      const ready = await store.setCompositionRestorationPlan(
+        composition.composition.id,
+        {
+          expectedVersion: 2,
+          candidateSetHash: regenerated.candidateSetHash,
+          candidateIds: [manual.id],
+          targetComponentIds: ["outfit.cleanup"],
+          manualRgba: [210, 170, 140, 255],
+        },
+      );
+      expect(ready.report).toMatchObject({
+        restorationMissingPixelCount: 0,
+        restorationIssueCount: 0,
+        restoredOuterPixelCount: 1,
+        restoredBasePixelCount: 1,
+        committable: true,
+      });
+      expect(JSON.stringify(ready.composition)).not.toContain("pixelIds");
+      expect(store.listCompositionRestorationEvents(composition.composition.id)).toMatchObject([
+        { version: 1, eventType: "plan_set" },
+        { version: 2, eventType: "plan_cleared" },
+        {
+          version: 3,
+          eventType: "plan_set",
+          candidateIds: expect.arrayContaining([
+            generated.outer.candidateId,
+            manual.id,
+          ]),
+        },
+      ]);
+      store.close();
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const reopenedDetail = await reopened.getCompositionDetail(composition.composition.id);
+        expect(reopenedDetail.report.restorationIssueCount).toBe(0);
+        const committed = await reopened.commitComposition(composition.composition.id);
+        const result = decodeSkinPng(await reopened.readRevisionSkinPng(committed.revision.id));
+        expect(getPixel(result, 20, 20)).toEqual([210, 170, 140, 255]);
+        expect(getPixel(result, 44, 36)).toEqual([0, 0, 0, 0]);
+        const state = await reopened.readRevisionSemanticState(committed.revision.id);
+        const restored = state.document.components.find((component) =>
+          component.instanceId.startsWith("restored."),
+        );
+        expect(restored?.provenance).toMatchObject({
+          actorType: "user",
+          containsGeneratedPixels: true,
+          restoration: {
+            candidateIds: [manual.id],
+            sourceRevisionIds: [],
+            sourceComponentIds: [],
+          },
+        });
+        expect(await reopened.readRevisionOperation(committed.revision.id)).toMatchObject({
+          affectedSpans: pixelIdsToSpans([basePixelId, outerPixelId], layout),
+        });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a rehashed restoration plan with inconsistent representations", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const image = createRgbaImage(64, 64);
+      image.data.set([80, 70, 60, 255], (8 * 64 + 8) * 4);
+      const imported = await store.importProject({
+        name: "Restoration integrity source",
+        armType: "slim",
+        skinPng: encodeSkinPng(image),
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.integrity",
+            displayName: "Integrity outfit",
+            category: "upper_clothing",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const composition = await store.createComposition({
+        baseRevisionId: segmented.revision.id,
+      });
+      const candidates = await store.generateCompositionRestorationCandidates(
+        composition.composition.id,
+        {
+          targetComponentIds: ["outfit.integrity"],
+          manualRgba: [200, 160, 120, 255],
+        },
+      );
+      const manual = candidates.base.candidates.find(
+        (candidate) => candidate.kind === "manual_rgba",
+      )!;
+      await store.setCompositionRestorationPlan(composition.composition.id, {
+        expectedVersion: 0,
+        candidateSetHash: candidates.candidateSetHash,
+        candidateIds: [manual.id],
+        targetComponentIds: ["outfit.integrity"],
+        manualRgba: [200, 160, 120, 255],
+      });
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        const row = database
+          .prepare("SELECT restoration_plan_json FROM composition_project WHERE id = ?")
+          .get(composition.composition.id) as { readonly restoration_plan_json: string };
+        const originalPlan = JSON.parse(row.restoration_plan_json) as {
+          storageHash: string;
+          summary: { candidateIds: string[] };
+        };
+        for (const mutate of [
+          (plan: typeof originalPlan) => {
+            plan.summary.candidateIds = [];
+          },
+          (plan: typeof originalPlan & { selectedCandidates: Array<{ kind: string }> }) => {
+            plan.selectedCandidates[0]!.kind = "invalid_kind";
+          },
+          (plan: typeof originalPlan & {
+            operations: Array<{ pixelIds: number[] }>;
+          }) => {
+            plan.operations[0]!.pixelIds = [];
+          },
+        ]) {
+          const plan = structuredClone(originalPlan) as typeof originalPlan & {
+            selectedCandidates: Array<{ kind: string }>;
+            operations: Array<{ pixelIds: number[] }>;
+          };
+          mutate(plan);
+          const { storageHash: _storageHash, ...body } = plan;
+          plan.storageHash = sha256(canonicalJson(body).trim());
+          database
+            .prepare("UPDATE composition_project SET restoration_plan_json = ? WHERE id = ?")
+            .run(JSON.stringify(plan), composition.composition.id);
+          const corrupted = new RevisionStore({ dataDirectory: directory });
+          try {
+            expect(() => corrupted.getComposition(composition.composition.id)).toThrow(
+              expect.objectContaining({ code: "SNAPSHOT_CORRUPT", statusCode: 409 }),
+            );
+          } finally {
+            corrupted.close();
+          }
+        }
+      } finally {
+        database.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("round-trips a Base-only incomplete restoration plan with no selected candidate", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const image = createRgbaImage(64, 64);
+      const basePixelId = 8 * 64 + 8;
+      image.data.set([80, 70, 60, 255], basePixelId * 4);
+      const imported = await store.importProject({
+        name: "Base-only incomplete restoration",
+        armType: "slim",
+        skinPng: encodeSkinPng(image),
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.base_only",
+            displayName: "Base-only outfit",
+            category: "upper_clothing",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const composition = await store.createComposition({
+        baseRevisionId: segmented.revision.id,
+      });
+      const generated = await store.generateCompositionRestorationCandidates(
+        composition.composition.id,
+        { targetComponentIds: ["outfit.base_only"] },
+      );
+      expect(generated).toMatchObject({
+        outer: { pixelCount: 0, candidateId: null },
+        base: { pixelCount: 1 },
+      });
+
+      const incomplete = await store.setCompositionRestorationPlan(
+        composition.composition.id,
+        {
+          expectedVersion: 0,
+          candidateSetHash: generated.candidateSetHash,
+          candidateIds: [],
+          targetComponentIds: ["outfit.base_only"],
+        },
+      );
+      expect(incomplete.composition.restorationPlan).toMatchObject({
+        version: 1,
+        candidateIds: [],
+        coveredPixelCount: 0,
+        missingPixelCount: 1,
+      });
+      expect(incomplete.report).toMatchObject({
+        restorationPixelCount: 0,
+        restorationMissingPixelCount: 1,
+        committable: false,
+      });
+      await expect(store.commitComposition(composition.composition.id)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      store.close();
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const detail = await reopened.getCompositionDetail(composition.composition.id);
+        expect(detail.composition.restorationPlan).toMatchObject({
+          version: 1,
+          candidateIds: [],
+          coveredPixelCount: 0,
+          missingPixelCount: 1,
+        });
+        expect(detail.report).toMatchObject({
+          restorationPixelCount: 0,
+          restorationMissingPixelCount: 1,
+          committable: false,
+        });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not retain a restoration component fully covered by a winning part", async () => {
+    const { store } = await createStore();
+    try {
+      const pixelId = 8 * 64 + 8;
+      const image = createRgbaImage(64, 64);
+      image.data.set([80, 70, 60, 255], pixelId * 4);
+      const imported = await store.importProject({
+        name: "Covered restoration source",
+        armType: "slim",
+        skinPng: encodeSkinPng(image),
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.covered",
+            displayName: "Covered outfit",
+            category: "upper_clothing",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const composition = await store.createComposition({
+        baseRevisionId: segmented.revision.id,
+      });
+      const part = await exportHeadPixelPart(store, [12, 34, 56, 255]);
+      await store.addCompositionPart(composition.composition.id, { partId: part.id });
+      const candidates = await store.generateCompositionRestorationCandidates(
+        composition.composition.id,
+        {
+          targetComponentIds: ["outfit.covered"],
+          manualRgba: [200, 160, 120, 255],
+        },
+      );
+      const manual = candidates.base.candidates.find(
+        (candidate) => candidate.kind === "manual_rgba",
+      )!;
+      await store.setCompositionRestorationPlan(composition.composition.id, {
+        expectedVersion: 0,
+        candidateSetHash: candidates.candidateSetHash,
+        candidateIds: [manual.id],
+        targetComponentIds: ["outfit.covered"],
+        manualRgba: [200, 160, 120, 255],
+      });
+      const resolved = await store.resolveCompositionConflict(composition.composition.id, {
+        strategy: "layer_order",
+      });
+      expect(resolved.report.committable).toBe(true);
+
+      const committed = await store.commitComposition(composition.composition.id);
+      const state = await store.readRevisionSemanticState(committed.revision.id);
+      expect(
+        state.document.components.some((component) =>
+          component.instanceId.startsWith("restored."),
+        ),
+      ).toBe(false);
+      expect(
+        state.document.components.some((component) =>
+          component.instanceId.startsWith("composed."),
+        ),
+      ).toBe(true);
+      const operation = await store.readRevisionOperation(committed.revision.id);
+      expect(operation.affectedComponents).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^restored\./u)]),
+      );
+      expect(operation.affectedSpans).toEqual([
+        { surface: "head.base.front", y: 8, x0: 8, x1: 8 },
+      ]);
     } finally {
       store.close();
     }

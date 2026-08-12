@@ -138,7 +138,8 @@ fourth stored repair file.
 - M8 does not invoke an AI model and does not mark authored pixels as generated.
 - A repaired part still writes only its own non-transparent write-mask pixels when
   used in a composition. Clearing old target-skin clothing remnants or filling
-  newly exposed target Base pixels requires the replacement/restoration workflow
-  planned for M9.
+  newly exposed target Base pixels is handled by the Composition restoration
+  workflow documented in
+  [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 - Repair histories are linear HEAD-checked drafts. They do not branch, merge, or
   mutate the full-skin Revision graph.

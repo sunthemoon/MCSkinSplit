@@ -582,6 +582,63 @@ describe("revision API", () => {
       report: { layerCount: 0, committable: false },
     });
 
+    for (const alpha of [0, 128]) {
+      const translucentRestoration = await app.inject({
+        method: "POST",
+        url: `/api/compositions/${compositionId}/restoration-candidates`,
+        payload: {
+          targetComponentIds: ["shirt.main"],
+          manualRgba: [220, 170, 140, alpha],
+        },
+      });
+      expect(translucentRestoration.statusCode).toBe(400);
+      expect(translucentRestoration.json()).toMatchObject({
+        error: { code: "INVALID_REQUEST" },
+      });
+      const translucentPlan = await app.inject({
+        method: "PUT",
+        url: `/api/compositions/${compositionId}/restoration-plan`,
+        payload: {
+          expectedVersion: 0,
+          candidateSetHash: `sha256:${"a".repeat(64)}`,
+          candidateIds: ["candidate_outer"],
+          targetComponentIds: ["shirt.main"],
+          manualRgba: [220, 170, 140, alpha],
+        },
+      });
+      expect(translucentPlan.statusCode).toBe(400);
+      expect(translucentPlan.json()).toMatchObject({
+        error: { code: "INVALID_REQUEST" },
+      });
+    }
+
+    const rawMaskRestoration = await app.inject({
+      method: "PUT",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: {
+        expectedVersion: 0,
+        candidateSetHash: `sha256:${"a".repeat(64)}`,
+        candidateIds: ["candidate.outer"],
+        targetComponentIds: ["shirt.main"],
+        rawMask: [1, 2, 3],
+      },
+    });
+    expect(rawMaskRestoration.statusCode).toBe(400);
+    expect(rawMaskRestoration.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const missingRegenerationInput = await app.inject({
+      method: "PUT",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: {
+        expectedVersion: 0,
+        candidateSetHash: `sha256:${"a".repeat(64)}`,
+        candidateIds: ["candidate.outer"],
+      },
+    });
+    expect(missingRegenerationInput.statusCode).toBe(400);
+
     const added = await app.inject({
       method: "POST",
       url: `/api/compositions/${compositionId}/apply-part`,
@@ -667,6 +724,206 @@ describe("revision API", () => {
     expect(invalid.json()).toMatchObject({
       error: { code: "INVALID_REQUEST" },
     });
+  });
+
+  it("generates restoration candidates without mutation and persists only a recomputed plan", async () => {
+    const { app } = await createApi();
+    const project = await createProject(app, "Restoration API target");
+    const imported = await importSkinFromPath(
+      app,
+      project.projectId,
+      TARGET_SKIN_PATH,
+    );
+    const segmented = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "clothing.cleanup",
+          displayName: "待替换衣服",
+          category: "upper_clothing",
+        },
+        spans: [
+          { surface: "torso.base.front", y: 20, x0: 20, x1: 20 },
+          { surface: "torso.outer.front", y: 37, x0: 21, x1: 21 },
+        ],
+      },
+    });
+    expect(segmented.statusCode).toBe(201);
+    const baseRevisionId = segmented.json<MutationResponse>().revision.id;
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/compositions",
+      payload: { baseRevisionId, name: "Restoration API composition" },
+    });
+    expect(created.statusCode).toBe(201);
+    const compositionId = created.json<{
+      composition: { id: string; restorationPlan: null };
+    }>().composition.id;
+
+    const generationInput = {
+      targetComponentIds: ["clothing.cleanup"],
+      manualRgba: [220, 170, 140, 255] as const,
+    };
+    const generated = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/restoration-candidates`,
+      payload: generationInput,
+    });
+    expect(generated.statusCode).toBe(200);
+    const candidates = generated.json<{
+      version: number;
+      candidateSetHash: string;
+      targetComponentIds: string[];
+      outer: { pixelCount: number; candidateId: string | null };
+      base: {
+        pixelCount: number;
+        coveredPixelCount: number;
+        missingPixelCount: number;
+        candidates: Array<{
+          id: string;
+          kind: string;
+          targetGroupId: string;
+          coveragePixelCount: number;
+          rgba?: readonly number[];
+        }>;
+      };
+    }>();
+    expect(candidates).toMatchObject({
+      version: 0,
+      candidateSetHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      targetComponentIds: ["clothing.cleanup"],
+      outer: {
+        pixelCount: 1,
+        candidateId: expect.any(String),
+      },
+      base: {
+        pixelCount: 1,
+        coveredPixelCount: 1,
+        missingPixelCount: 0,
+      },
+    });
+    const manualCandidate = candidates.base.candidates.find(
+      (candidate) => candidate.kind === "manual_rgba",
+    );
+    expect(manualCandidate).toMatchObject({
+      targetGroupId: expect.any(String),
+      coveragePixelCount: 1,
+      rgba: generationInput.manualRgba,
+    });
+
+    const generatedAgain = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/restoration-candidates`,
+      payload: generationInput,
+    });
+    expect(generatedAgain.statusCode).toBe(200);
+    expect(generatedAgain.json()).toEqual(candidates);
+    const beforeSet = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}`,
+    });
+    expect(beforeSet.json()).toMatchObject({
+      composition: { restorationPlan: null },
+      report: {
+        restorationPixelCount: 0,
+        restorationMissingPixelCount: 0,
+        restorationIssueCount: 0,
+      },
+    });
+    const revisionList = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.projectId}/revisions`,
+    });
+    expect(revisionList.json<{ revisions: unknown[] }>().revisions).toHaveLength(2);
+
+    const candidateIds = [candidates.outer.candidateId!, manualCandidate!.id];
+    const mismatchedRegeneration = await app.inject({
+      method: "PUT",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: {
+        expectedVersion: candidates.version,
+        candidateSetHash: candidates.candidateSetHash,
+        candidateIds,
+        targetComponentIds: generationInput.targetComponentIds,
+        manualRgba: [221, 170, 140, 255],
+      },
+    });
+    expect(mismatchedRegeneration.statusCode).toBe(409);
+    expect(mismatchedRegeneration.json()).toMatchObject({
+      error: { code: "CONFLICT" },
+    });
+
+    const applied = await app.inject({
+      method: "PUT",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: {
+        expectedVersion: candidates.version,
+        candidateSetHash: candidates.candidateSetHash,
+        candidateIds,
+        ...generationInput,
+      },
+    });
+    expect(applied.statusCode, JSON.stringify(applied.json())).toBe(200);
+    expect(applied.json()).toMatchObject({
+      composition: {
+        restorationPlan: {
+          version: 1,
+          candidateSetHash: candidates.candidateSetHash,
+          targetComponentIds: generationInput.targetComponentIds,
+          candidateIds,
+          outerPixelCount: 1,
+          basePixelCount: 1,
+          coveredPixelCount: 2,
+          missingPixelCount: 0,
+          planHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+        },
+      },
+      report: {
+        restorationPixelCount: 2,
+        restoredOuterPixelCount: 1,
+        restoredBasePixelCount: 1,
+        restorationMissingPixelCount: 0,
+        restorationIssueCount: 0,
+        committable: true,
+      },
+    });
+    const preview = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}/preview.png`,
+    });
+    const previewImage = decodeSkinPng(preview.rawPayload);
+    expect(getPixel(previewImage, 20, 20)).toEqual(generationInput.manualRgba);
+    expect(getPixel(previewImage, 21, 37)[3]).toBe(0);
+
+    const cleared = await app.inject({
+      method: "DELETE",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json()).toMatchObject({
+      composition: { restorationPlan: null },
+      report: {
+        restorationPixelCount: 0,
+        restorationMissingPixelCount: 0,
+        restorationIssueCount: 0,
+        committable: false,
+      },
+    });
+    const staleClear = await app.inject({
+      method: "DELETE",
+      url: `/api/compositions/${compositionId}/restoration-plan`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(staleClear.statusCode).toBe(409);
+    const regeneratedAfterClear = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/restoration-candidates`,
+      payload: generationInput,
+    });
+    expect(regeneratedAfterClear.json()).toMatchObject({ version: 2 });
   });
 
   it("serves analyzed skins and applies immutable aggregate bundles atomically", async () => {
