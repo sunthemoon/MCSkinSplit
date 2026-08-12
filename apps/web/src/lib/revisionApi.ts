@@ -547,6 +547,10 @@ export function partPreviewUrl(partId: string): string {
   return `/api/parts/${encodeURIComponent(partId)}/preview.png`;
 }
 
+export function partMannequinUrl(partId: string, armType: ArmType): string {
+  return `/api/parts/${encodeURIComponent(partId)}/mannequin.png?armType=${armType}`;
+}
+
 export async function listCompositions(
   revisionId?: string,
   fetcher: Fetcher = fetch,

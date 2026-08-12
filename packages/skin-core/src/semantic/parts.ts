@@ -1,4 +1,5 @@
 import { createRgbaImage } from "../image";
+import { getSkinLayout } from "../layouts/layout";
 import type { ArmType, Rgba, RgbaImage } from "../types";
 import { assertMask, maskToPixelIds, pixelIdsToMask } from "./mask";
 import type {
@@ -13,6 +14,53 @@ export interface ExportedPart {
   readonly texture: RgbaImage;
   readonly writeMask: Uint8Array;
   readonly preview: RgbaImage;
+}
+
+const MANNEQUIN_BASE: Rgba = [226, 229, 224, 255];
+const MANNEQUIN_SHADOW: Rgba = [194, 201, 197, 255];
+const MANNEQUIN_TOP: Rgba = [242, 244, 240, 255];
+
+/**
+ * Builds a complete neutral skin for inspecting a sparse reusable part in 3D.
+ * The part's write mask remains authoritative; transparent texture pixels never
+ * erase the mannequin.
+ */
+export function createPartMannequinTexture(
+  partTexture: RgbaImage,
+  writeMask: Uint8Array,
+  armType: ArmType,
+): RgbaImage {
+  if (partTexture.width !== 64 || partTexture.height !== 64) {
+    throw new RangeError("Part mannequin requires a 64x64 texture");
+  }
+  assertMask(writeMask);
+  const result = createRgbaImage(64, 64);
+  const layout = getSkinLayout(armType);
+
+  for (const surfaceKey of layout.surfaceOrder) {
+    const surface = layout.surfaces[surfaceKey];
+    if (surface.layer !== "base") continue;
+    const color =
+      surface.face === "top"
+        ? MANNEQUIN_TOP
+        : surface.face === "back" || surface.face === "bottom"
+          ? MANNEQUIN_SHADOW
+          : MANNEQUIN_BASE;
+    const rect = surface.atlasRect;
+    for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+      for (let x = rect.x; x < rect.x + rect.width; x += 1) {
+        result.data.set(color, (y * 64 + x) * 4);
+      }
+    }
+  }
+
+  for (const pixelId of maskToPixelIds(writeMask)) {
+    const offset = pixelId * 4;
+    if (partTexture.data[offset + 3] !== 0) {
+      result.data.set(partTexture.data.subarray(offset, offset + 4), offset);
+    }
+  }
+  return result;
 }
 
 export function exportSemanticPart(input: {

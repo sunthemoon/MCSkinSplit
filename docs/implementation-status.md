@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 ## Milestones
 
@@ -294,3 +294,31 @@ Last updated: 2026-08-11
 - Composition Projects target one Branch HEAD and do not merge histories. If that
   Branch advances independently, the draft must be recreated on the new HEAD.
 - The lazy `skinview3d` chunk retains Vite's non-blocking size warning.
+
+## M6 usability refinement
+
+- The compositor now owns its component picker. Every saved part is visible in
+  the composition section and can be selected or added without first selecting
+  it in the semantic part panel above.
+- Added a deterministic neutral mannequin texture for sparse parts. The preview
+  copies only pixels allowed by the immutable part write mask and fills valid
+  base-model UV faces with shaded neutral pixels for Wide or Slim rendering.
+- Component inspection uses the mannequin in a draggable 3D viewer. Composition
+  output defaults to draggable 3D while retaining an explicit 64x64 texture view.
+- Both 3D inspectors default to an idle pose and expose compact in-frame idle/walk
+  controls. Automatic rotation is disabled; drag rotation and wheel zoom remain
+  under user control.
+
+## M6 usability-refinement verification evidence
+
+- Focused core, Revision, API, and web suites pass, including mannequin pixels,
+  mannequin HTTP validation, encoded client URLs, and idle/walk Viewer switching.
+- Browser desktop flow created a Slim draft, added the saved part directly from
+  the compositor, and reached a ready result Viewer with 1 layer, 2 written pixels,
+  and no unresolved conflicts.
+- Browser controls switched component idle/walk and result idle/walk plus
+  3D/texture/3D without recreating the surrounding composition state.
+- Browser responsive inspection at a 390px viewport kept the component and result
+  Viewers ready, stacked all three panels, and produced no horizontal overflow.
+- Browser console output contained only the known Chrome-extension message-channel
+  noise, with no application stack or failed local API response.

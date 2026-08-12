@@ -7,6 +7,7 @@ import {
   applyPartPixels,
   componentMaskFile,
   createInitialSemanticState,
+  createPartMannequinTexture,
   createRgbaImage,
   exportSemanticPart,
   getPixel,
@@ -321,6 +322,16 @@ describe("reusable semantic parts", () => {
     expect(getPixel(part.texture, 10, 8)).toEqual([0, 0, 0, 0]);
     expect(part.manifest.compatibility.armTypes).toEqual(["wide", "slim"]);
     expect(part.manifest.placement.surfaces).toEqual(["head.base.front"]);
+
+    const mannequin = createPartMannequinTexture(
+      part.texture,
+      part.writeMask,
+      "slim",
+    );
+    expect(getPixel(mannequin, 8, 8)).toEqual(getPixel(image, 8, 8));
+    expect(getPixel(mannequin, 10, 8)).toEqual([226, 229, 224, 255]);
+    expect(getPixel(mannequin, 8, 0)).toEqual([242, 244, 240, 255]);
+    expect(getPixel(mannequin, 24, 8)).toEqual([194, 201, 197, 255]);
   });
 
   it("limits arm parts to their source model", () => {

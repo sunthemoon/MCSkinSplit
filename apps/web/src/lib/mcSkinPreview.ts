@@ -1,6 +1,7 @@
 import type { ArmType } from "@mc-skin-split/skin-core";
 
 export type McSkinPreviewState = "loading" | "ready" | "error";
+export type McSkinPreviewMotion = "idle" | "walk";
 
 export interface McSkinAnimation {
   speed?: number;
@@ -12,7 +13,6 @@ export interface McSkinAnimationConstructor {
 
 export interface McSkinAnimationLibrary {
   readonly WalkingAnimation: McSkinAnimationConstructor;
-  readonly RotatingAnimation?: unknown;
 }
 
 export interface McSkinViewer {
@@ -47,6 +47,7 @@ export interface McSkinPreviewOptions {
   readonly stage: HTMLElement;
   readonly createViewer: (options: McSkinViewerOptions) => McSkinViewer;
   readonly animations: McSkinAnimationLibrary;
+  readonly initialMotion?: McSkinPreviewMotion;
   readonly createResizeObserver?: (
     callback: ResizeObserverCallback,
   ) => McSkinResizeObserver;
@@ -70,10 +71,12 @@ export class McSkinPreview {
     null;
   private loadGeneration = 0;
   private loadQueue: Promise<void> = Promise.resolve();
+  private motion: McSkinPreviewMotion;
   private disposed = false;
 
   constructor(options: McSkinPreviewOptions) {
     this.options = options;
+    this.motion = options.initialMotion ?? "walk";
   }
 
   initialize(): McSkinViewer {
@@ -92,7 +95,7 @@ export class McSkinPreview {
     });
     this.viewer = viewer;
     viewer.zoom = 0.82;
-    applyViewerMotion(viewer, this.options.animations);
+    applyViewerMotion(viewer, this.options.animations, this.motion);
 
     const createObserver =
       this.options.createResizeObserver ??
@@ -104,6 +107,13 @@ export class McSkinPreview {
 
   getViewer(): McSkinViewer | null {
     return this.viewer;
+  }
+
+  setMotion(motion: McSkinPreviewMotion): void {
+    this.motion = motion;
+    if (this.viewer && !this.disposed) {
+      applyViewerMotion(this.viewer, this.options.animations, motion);
+    }
   }
 
   loadSkin(source: string, armType: ArmType): Promise<void> {
@@ -204,20 +214,23 @@ export class McSkinPreview {
 export function applyViewerMotion(
   viewer: McSkinViewer,
   animations: McSkinAnimationLibrary,
+  motion: McSkinPreviewMotion = "walk",
 ): void {
+  viewer.autoRotate = false;
+
   if ("animation" in viewer) {
+    if (motion === "idle") {
+      viewer.animation = null;
+      return;
+    }
     const walking = new animations.WalkingAnimation();
     walking.speed = 0.75;
     viewer.animation = walking;
-    viewer.autoRotate = true;
     return;
   }
 
-  if (viewer.animations?.add) {
+  if (motion === "walk" && viewer.animations?.add) {
     viewer.animations.add(animations.WalkingAnimation);
-    if (animations.RotatingAnimation) {
-      viewer.animations.add(animations.RotatingAnimation);
-    }
   }
 }
 

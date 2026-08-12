@@ -83,6 +83,12 @@ Part directories are first written to a private sibling directory and then
 atomically renamed. SQLite records all five hashes, byte sizes, MIME types, and
 paths. Reads verify both the files and database metadata.
 
+For 3D inspection, the server generates a complete neutral mannequin texture at
+read time. It fills only valid base-layer UV faces for the requested Wide or Slim
+model, then copies non-transparent part pixels allowed by the immutable write mask.
+The generated preview is derived data; it does not add a sixth stored part file or
+change the original texture.
+
 ## Conflict preview and application
 
 Calling apply without a strategy performs a read-only preview. It reports model
@@ -110,6 +116,7 @@ GET  /api/parts
 GET  /api/parts/:partId
 GET  /api/parts/:partId/texture.png
 GET  /api/parts/:partId/preview.png
+GET  /api/parts/:partId/mannequin.png?armType=slim
 POST /api/revisions/:revisionId/apply-part
 ```
 

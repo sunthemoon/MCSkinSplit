@@ -13,8 +13,9 @@ ordered layers, and conflict decisions always produce the same RGBA result.
    copying mutable skin state.
 3. Add saved parts as ordered layers. Position zero is closest to the base and the
    highest position is the top writer.
-4. Inspect the live PNG and conflict report. Previewing is read-only and may show
-   the default top-layer result even while conflicts remain unresolved.
+4. Inspect the live 3D result or switch to its 64x64 texture and conflict report.
+   Previewing is read-only and may show the default top-layer result even while
+   conflicts remain unresolved.
 5. Resolve each hard pixel conflict by choosing a winning layer, or explicitly
    confirm that the complete layer order should decide all hard conflicts.
 6. Commit only when the report is committable. The service rechecks the Branch
@@ -91,8 +92,14 @@ pixel for pixel.
 
 ## Studio behavior
 
-The M6 panel restores the newest draft for the selected Revision, uses the global
-part library, shows the stack from top to base, and exposes both bulk layer-order
+The M6 panel restores the newest draft for the selected Revision and displays the
+global part library inside the compositor itself. Selecting a part opens a neutral
+mannequin 3D inspector, while the adjacent add action places it in the stack. The
+component and result viewers default to an idle pose, support drag rotation and
+wheel zoom, and expose compact idle/walk controls; the result also switches between
+3D and its raw texture.
+
+The panel shows the stack from top to base and exposes both bulk layer-order
 confirmation and individual pixel-winner controls. The preview PNG can be
 downloaded at any time for inspection; the commit action stays disabled until the
 server report is committable. After commit, the new Revision is loaded into the

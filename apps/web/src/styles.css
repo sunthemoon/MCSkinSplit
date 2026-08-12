@@ -1813,62 +1813,208 @@ h1 span {
   white-space: nowrap;
 }
 
-.composition-part-pick {
+.composition-part-library {
   display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
+  gap: 6px;
+  max-height: 240px;
   margin-top: 16px;
-  padding: 10px;
+  padding: 7px;
+  overflow-y: auto;
   border: 1px dashed rgba(244, 240, 228, 0.34);
   background: rgba(255, 255, 255, 0.035);
+  scrollbar-color: var(--cyan-bright) #0f1a1f;
 }
 
-.composition-part-pick[data-empty="true"] {
-  display: block;
+.composition-part-library[data-empty="true"] {
+  min-height: 94px;
+  place-items: center;
 }
 
-.composition-part-pick img {
-  width: 54px;
-  height: 54px;
+.composition-part-library > p {
+  margin: 8px;
+  color: rgba(244, 240, 228, 0.56);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.58rem;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.composition-part-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 5px;
+  border: 1px solid rgba(244, 240, 228, 0.18);
+  background: rgba(9, 16, 19, 0.42);
+}
+
+.composition-part-card[data-active="true"] {
+  border-color: var(--cyan-bright);
+  box-shadow: inset 3px 0 0 var(--cyan-bright);
+}
+
+.composition-part-card[data-compatible="false"] {
+  opacity: 0.55;
+}
+
+.composition-part-select {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px !important;
+  border: 0 !important;
+  text-align: left;
+}
+
+.composition-part-select img {
+  width: 46px;
+  height: 46px;
   background: conic-gradient(#24353b 25%, #31464d 0 50%, #24353b 0 75%, #31464d 0) 0 0 / 10px 10px;
   image-rendering: pixelated;
   object-fit: contain;
 }
 
-.composition-part-pick > div {
+.composition-part-select > span {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 3px;
 }
 
-.composition-part-pick strong,
-.composition-part-pick span {
+.composition-part-select strong,
+.composition-part-select small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.composition-part-pick strong {
-  font-size: 0.72rem;
+.composition-part-select strong {
+  font-size: 0.67rem;
 }
 
-.composition-part-pick span,
-.composition-part-pick p {
+.composition-part-select small {
   color: rgba(244, 240, 228, 0.56);
   font-family: "Cascadia Mono", monospace;
-  font-size: 0.56rem;
+  font-size: 0.52rem;
 }
 
-.composition-part-pick p {
-  margin: 8px;
+.composition-part-add {
+  min-height: 0 !important;
+  padding: 0 !important;
+  border-width: 0 0 0 1px !important;
+  border-color: rgba(244, 240, 228, 0.18) !important;
+  color: var(--cyan-bright) !important;
+  font-size: 1rem !important;
+}
+
+.component-inspector {
+  margin-top: 14px;
+  padding: 9px;
+  border: 1px solid rgba(244, 240, 228, 0.28);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.component-inspector[data-empty="true"] {
+  display: grid;
+  min-height: 140px;
+  place-items: center;
+  border-style: dashed;
+}
+
+.component-inspector[data-empty="true"] > p {
+  max-width: 220px;
+  margin: 0;
+  color: rgba(244, 240, 228, 0.5);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.58rem;
   line-height: 1.6;
   text-align: center;
 }
 
-.composition-part-pick > button {
-  grid-column: 1 / -1;
+.component-inspector > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.component-inspector > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.component-inspector > header span,
+.component-inspector > header small {
+  color: rgba(244, 240, 228, 0.48);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.5rem;
+}
+
+.component-inspector > header span {
+  color: var(--cyan-bright);
+  letter-spacing: 0.1em;
+}
+
+.component-inspector > header strong {
+  overflow: hidden;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component-inspector > header small {
+  flex: 0 0 auto;
+}
+
+.composition-3d-frame {
+  position: relative;
+  height: 280px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(36, 195, 194, 0.12), transparent 46%),
+    #101b20;
+}
+
+.skin-stage.compact-skin-stage {
   width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.preview-chip-controls {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.preview-chip-controls > div {
+  display: flex;
+  gap: 3px;
+}
+
+.preview-chip-controls button {
+  min-height: 24px;
+  padding: 3px 7px;
+  border-color: rgba(244, 240, 228, 0.4);
+  background: rgba(10, 17, 20, 0.82);
+  font-size: 0.52rem;
+  backdrop-filter: blur(5px);
+}
+
+.preview-chip-controls button[aria-pressed="true"] {
+  border-color: var(--cyan-bright);
+  background: var(--cyan-bright);
+  color: #101b20;
+}
+
+.component-inspector-add {
+  width: 100%;
+  margin-top: 7px;
 }
 
 .composition-error {
@@ -1985,10 +2131,12 @@ h1 span {
 }
 
 .composition-preview-frame {
+  position: relative;
   display: grid;
-  width: min(100%, 264px);
-  aspect-ratio: 1;
+  width: min(100%, 300px);
+  height: 360px;
   margin: 18px auto;
+  overflow: hidden;
   place-items: center;
   border: 2px solid rgba(244, 240, 228, 0.72);
   background: conic-gradient(#24353b 25%, #31464d 0 50%, #24353b 0 75%, #31464d 0) 0 0 / 24px 24px;
@@ -2001,6 +2149,12 @@ h1 span {
   height: 100%;
   image-rendering: pixelated;
   object-fit: contain;
+}
+
+.preview-chip-controls-wide {
+  right: 8px;
+  left: 8px;
+  justify-content: space-between;
 }
 
 .composition-preview-frame > p {

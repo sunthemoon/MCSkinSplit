@@ -2,24 +2,37 @@ import type { ArmType } from "@mc-skin-split/skin-core";
 import { useEffect, useRef, useState } from "react";
 import {
   McSkinPreview,
+  type McSkinPreviewMotion,
   type McSkinPreviewState,
   type McSkinViewer,
 } from "../lib/mcSkinPreview";
 
 export type PreviewState = McSkinPreviewState;
+export type PreviewMotion = McSkinPreviewMotion;
 
 interface SkinPreviewProps {
   armType: ArmType;
   skinUrl: string;
-  onStateChange: (state: PreviewState, detail?: string) => void;
+  motion?: PreviewMotion;
+  className?: string;
+  ariaLabel?: string;
+  onStateChange?: (state: PreviewState, detail?: string) => void;
 }
 
-export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProps) {
+export function SkinPreview({
+  armType,
+  skinUrl,
+  motion = "walk",
+  className,
+  ariaLabel = "Minecraft 皮肤三维预览",
+  onStateChange,
+}: SkinPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<McSkinPreview | null>(null);
   const stateCallbackRef = useRef(onStateChange);
   const latestSkinRef = useRef({ armType, skinUrl });
+  const latestMotionRef = useRef(motion);
   const [previewState, setPreviewState] = useState<PreviewState>("loading");
 
   useEffect(() => {
@@ -39,7 +52,7 @@ export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProp
     const reportState = (state: PreviewState, detail?: string) => {
       if (!cancelled) {
         setPreviewState(state);
-        stateCallbackRef.current(state, detail);
+        stateCallbackRef.current?.(state, detail);
       }
     };
 
@@ -49,9 +62,6 @@ export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProp
         if (cancelled) {
           return;
         }
-        const compatibleAnimations = skinview3d as typeof skinview3d & {
-          readonly RotatingAnimation?: unknown;
-        };
         const preview = new McSkinPreview({
           canvas,
           stage,
@@ -59,8 +69,8 @@ export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProp
             new skinview3d.SkinViewer(options) as unknown as McSkinViewer,
           animations: {
             WalkingAnimation: skinview3d.WalkingAnimation,
-            RotatingAnimation: compatibleAnimations.RotatingAnimation,
           },
+          initialMotion: latestMotionRef.current,
           onStateChange: reportState,
         });
         localPreview = preview;
@@ -96,14 +106,19 @@ export function SkinPreview({ armType, skinUrl, onStateChange }: SkinPreviewProp
     void previewRef.current?.loadSkin(skinUrl, armType).catch(() => undefined);
   }, [armType, skinUrl]);
 
+  useEffect(() => {
+    latestMotionRef.current = motion;
+    previewRef.current?.setMotion(motion);
+  }, [motion]);
+
   return (
     <div
-      className="skin-stage"
+      className={["skin-stage", className].filter(Boolean).join(" ")}
       ref={stageRef}
       data-state={previewState}
       aria-busy={previewState === "loading"}
     >
-      <canvas ref={canvasRef} aria-label="Minecraft 皮肤三维预览" />
+      <canvas ref={canvasRef} aria-label={ariaLabel} />
     </div>
   );
 }

@@ -13,6 +13,7 @@ import {
   applyManualSemanticOperation,
   applyPartPixels,
   assessArmType,
+  createPartMannequinTexture,
   createInitialSemanticState,
   decodeSkinPng,
   encodeSkinPng,
@@ -600,6 +601,28 @@ export class RevisionStore {
   async readPartPreviewPng(partId: string): Promise<Uint8Array> {
     const stored = await this.verifyPartStorage(partId);
     return stored.files["preview.png"].bytes.slice();
+  }
+
+  async readPartMannequinPng(
+    partId: string,
+    armType: "wide" | "slim",
+  ): Promise<Uint8Array> {
+    const part = this.getPart(partId);
+    if (!part.manifest.compatibility.armTypes.includes(armType)) {
+      throw invalidInput("部件不兼容请求的白模手臂模型", {
+        partId,
+        armType,
+        supportedArmTypes: part.manifest.compatibility.armTypes,
+      });
+    }
+    const stored = await this.verifyPartStorage(part.id);
+    const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+    const writeMask = rgbaImageToMask(
+      decodeSkinPng(stored.files["write-mask.png"].bytes),
+    );
+    return encodeSkinPng(
+      createPartMannequinTexture(texture, writeMask, armType),
+    );
   }
 
   async previewPartApplication(

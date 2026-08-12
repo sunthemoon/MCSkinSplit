@@ -21,7 +21,11 @@ import {
   useState,
 } from "react";
 import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
-import { SkinPreview, type PreviewState } from "./components/SkinPreview";
+import {
+  SkinPreview,
+  type PreviewMotion,
+  type PreviewState,
+} from "./components/SkinPreview";
 import { SemanticEditorCanvas } from "./components/SemanticEditorCanvas";
 import {
   decodeMinecraftSkinBytes,
@@ -51,6 +55,7 @@ import {
   loadComposition,
   loadRevisionSegmentation,
   loadRevisionSkin,
+  partMannequinUrl,
   partPreviewUrl,
   previewRevisionPart,
   retryAiJob,
@@ -231,6 +236,13 @@ export function App() {
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
+  const [compositionPartId, setCompositionPartId] = useState<string | null>(null);
+  const [componentInspectorMotion, setComponentInspectorMotion] =
+    useState<PreviewMotion>("idle");
+  const [compositionPreviewMotion, setCompositionPreviewMotion] =
+    useState<PreviewMotion>("idle");
+  const [compositionPreviewMode, setCompositionPreviewMode] =
+    useState<"3d" | "texture">("3d");
   const [compositionDetail, setCompositionDetail] =
     useState<ApiCompositionDetail | null>(null);
   const [compositionName, setCompositionName] = useState("Slim 真实皮肤混搭");
@@ -626,6 +638,7 @@ export function App() {
         setHistoryProjects(projects);
         setPartLibrary(parts);
         setSelectedPartId((current) => current ?? parts[0]?.id ?? null);
+        setCompositionPartId((current) => current ?? parts[0]?.id ?? null);
         const storedProjectId = window.localStorage.getItem(HISTORY_PROJECT_KEY);
         const storedProject = projects.find(
           (project) => project.id === storedProjectId,
@@ -707,12 +720,24 @@ export function App() {
     (component) => component.instanceId === activeComponentId,
   );
   const selectedPart = partLibrary.find((part) => part.id === selectedPartId);
+  const compositionPart = partLibrary.find(
+    (part) => part.id === compositionPartId,
+  );
   const composition = compositionDetail?.composition ?? null;
   const compositionReport = compositionDetail?.report ?? null;
   const compositionDraft = composition?.status === "draft";
-  const partAlreadyLayered = Boolean(
-    selectedPart &&
-      compositionDetail?.layers.some((layer) => layer.partId === selectedPart.id),
+  const compositionTargetArmType = composition?.armType ?? resolvedArmType;
+  const inspectedPartArmType: ArmType =
+    compositionPart?.manifest.compatibility.armTypes.includes(
+      compositionTargetArmType,
+    )
+      ? compositionTargetArmType
+      : (compositionPart?.manifest.compatibility.armTypes[0] ?? "slim");
+  const compositionPartAlreadyLayered = Boolean(
+    compositionPart &&
+      compositionDetail?.layers.some(
+        (layer) => layer.partId === compositionPart.id,
+      ),
   );
   const unresolvedCompositionConflicts =
     compositionReport?.conflicts.filter(
@@ -1095,6 +1120,7 @@ export function App() {
       const parts = await listParts();
       setPartLibrary(parts);
       setSelectedPartId(part.id);
+      setCompositionPartId(part.id);
       setPartPreview(null);
       setNotice(`已保存部件 ${part.name} · 64×64 texture + write mask`);
     } catch (error) {
@@ -1195,15 +1221,20 @@ export function App() {
     );
   };
 
-  const addSelectedPartToComposition = async () => {
-    if (!composition || !selectedPart || !compositionDraft) {
+  const addPartToComposition = async (part: ApiPart) => {
+    if (
+      !composition ||
+      !compositionDraft ||
+      compositionDetail?.layers.some((layer) => layer.partId === part.id)
+    ) {
       return;
     }
+    setCompositionPartId(part.id);
     await updateComposition(
-      () => addCompositionPart(composition.id, selectedPart.id),
-      `正在添加部件 ${selectedPart.name}`,
+      () => addCompositionPart(composition.id, part.id),
+      `正在添加部件 ${part.name}`,
       (detail) =>
-        `已添加 ${selectedPart.name} · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
+        `已添加 ${part.name} · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
     );
   };
 
@@ -2165,8 +2196,8 @@ export function App() {
         <div className="composition-grid">
           <section className="composition-setup">
             <div className="composition-section-title">
-              <span>SETUP</span>
-              <h3>基础与部件</h3>
+              <span>PART LIBRARY</span>
+              <h3>组件直接入场</h3>
             </div>
             <label className="composition-name-field">
               <span>混搭工程名称</span>
@@ -2201,30 +2232,134 @@ export function App() {
               </div>
             </dl>
 
-            <div className="composition-part-pick" data-empty={!selectedPart}>
-              {selectedPart ? (
+            <div
+              className="composition-part-library"
+              data-empty={partLibrary.length === 0}
+              aria-label="混搭组件库"
+            >
+              {partLibrary.length ? (
+                partLibrary.map((part) => {
+                  const layered = Boolean(
+                    compositionDetail?.layers.some(
+                      (layer) => layer.partId === part.id,
+                    ),
+                  );
+                  const compatible =
+                    !composition ||
+                    part.manifest.compatibility.armTypes.includes(
+                      composition.armType,
+                    );
+                  return (
+                    <article
+                      key={part.id}
+                      className="composition-part-card"
+                      data-active={part.id === compositionPartId}
+                      data-compatible={compatible}
+                    >
+                      <button
+                        className="composition-part-select"
+                        type="button"
+                        aria-pressed={part.id === compositionPartId}
+                        onClick={() => setCompositionPartId(part.id)}
+                      >
+                        <img src={partPreviewUrl(part.id)} alt="" />
+                        <span>
+                          <strong>{part.name}</strong>
+                          <small>
+                            {SEMANTIC_CATEGORY_LABELS[part.category]} · {part.manifest.compatibility.armTypes.join("/")}
+                          </small>
+                        </span>
+                      </button>
+                      <button
+                        className="composition-part-add"
+                        type="button"
+                        aria-label={`将 ${part.name} 加入混搭`}
+                        title={
+                          !compatible
+                            ? `不兼容 ${armLabels[composition?.armType ?? "slim"]}`
+                            : layered
+                              ? "已在图层中"
+                              : "加入混搭"
+                        }
+                        disabled={
+                          !compositionDraft ||
+                          compositionBusy ||
+                          layered ||
+                          !compatible
+                        }
+                        onClick={() => void addPartToComposition(part)}
+                      >
+                        {layered ? "✓" : "+"}
+                      </button>
+                    </article>
+                  );
+                })
+              ) : (
+                <p>保存语义组件后，它会直接出现在这里，不必回到上方点选。</p>
+              )}
+            </div>
+
+            <div
+              className="component-inspector"
+              data-empty={!compositionPart}
+            >
+              {compositionPart ? (
                 <>
-                  <img src={partPreviewUrl(selectedPart.id)} alt="" />
-                  <div>
-                    <strong>{selectedPart.name}</strong>
-                    <span>
-                      {SEMANTIC_CATEGORY_LABELS[selectedPart.category]} · {selectedPart.manifest.compatibility.armTypes.join("/")}
-                    </span>
+                  <header>
+                    <div>
+                      <span>3D COMPONENT</span>
+                      <strong>{compositionPart.name}</strong>
+                    </div>
+                    <small>拖拽旋转 · 滚轮缩放</small>
+                  </header>
+                  <div className="composition-3d-frame">
+                    <SkinPreview
+                      className="compact-skin-stage"
+                      skinUrl={partMannequinUrl(
+                        compositionPart.id,
+                        inspectedPartArmType,
+                      )}
+                      armType={inspectedPartArmType}
+                      motion={componentInspectorMotion}
+                      ariaLabel={`${compositionPart.name} 白模三维预览`}
+                    />
+                    <div className="preview-chip-controls" aria-label="组件预览动作">
+                      <button
+                        type="button"
+                        aria-pressed={componentInspectorMotion === "idle"}
+                        onClick={() => setComponentInspectorMotion("idle")}
+                      >
+                        静止
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={componentInspectorMotion === "walk"}
+                        onClick={() => setComponentInspectorMotion("walk")}
+                      >
+                        走动
+                      </button>
+                    </div>
                   </div>
                   <button
+                    className="component-inspector-add"
                     type="button"
                     disabled={
                       !compositionDraft ||
                       compositionBusy ||
-                      partAlreadyLayered
+                      compositionPartAlreadyLayered ||
+                      !compositionPart.manifest.compatibility.armTypes.includes(
+                        compositionTargetArmType,
+                      )
                     }
-                    onClick={() => void addSelectedPartToComposition()}
+                    onClick={() => void addPartToComposition(compositionPart)}
                   >
-                    {partAlreadyLayered ? "已在图层中" : "加入混搭"}
+                    {compositionPartAlreadyLayered
+                      ? "已在图层中"
+                      : "将当前组件加入混搭"}
                   </button>
                 </>
               ) : (
-                <p>在上方部件库选择一个已识别并保存的语义部件。</p>
+                <p>选择任意组件即可在白模上检查实际覆盖位置。</p>
               )}
             </div>
             {compositionError && (
@@ -2310,16 +2445,67 @@ export function App() {
           <section className="composition-preview-panel">
             <div className="composition-section-title">
               <span>LIVE OUTPUT</span>
-              <h3>64×64 结果预览</h3>
+              <h3>混搭结果 3D 预览</h3>
             </div>
             <div className="composition-preview-frame" data-ready={Boolean(composition)}>
               {composition ? (
-                <img
-                  src={compositionPreviewUrl(composition.id, composition.updatedAt)}
-                  alt={`${composition.name} 混搭预览`}
-                />
+                compositionPreviewMode === "3d" ? (
+                  <SkinPreview
+                    className="compact-skin-stage"
+                    skinUrl={compositionPreviewUrl(
+                      composition.id,
+                      composition.updatedAt,
+                    )}
+                    armType={composition.armType}
+                    motion={compositionPreviewMotion}
+                    ariaLabel={`${composition.name} 混搭三维预览`}
+                  />
+                ) : (
+                  <img
+                    src={compositionPreviewUrl(composition.id, composition.updatedAt)}
+                    alt={`${composition.name} 64×64 纹理预览`}
+                  />
+                )
               ) : (
                 <p>PREVIEW<br />WAITING</p>
+              )}
+              {composition && (
+                <div className="preview-chip-controls preview-chip-controls-wide">
+                  <div aria-label="结果预览模式">
+                    <button
+                      type="button"
+                      aria-pressed={compositionPreviewMode === "3d"}
+                      onClick={() => setCompositionPreviewMode("3d")}
+                    >
+                      3D
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={compositionPreviewMode === "texture"}
+                      onClick={() => setCompositionPreviewMode("texture")}
+                    >
+                      纹理
+                    </button>
+                  </div>
+                  {compositionPreviewMode === "3d" && (
+                    <div aria-label="结果预览动作">
+                      <button
+                        type="button"
+                        aria-pressed={compositionPreviewMotion === "idle"}
+                        onClick={() => setCompositionPreviewMotion("idle")}
+                      >
+                        静止
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={compositionPreviewMotion === "walk"}
+                        onClick={() => setCompositionPreviewMotion("walk")}
+                      >
+                        走动
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             <dl className="composition-metrics">

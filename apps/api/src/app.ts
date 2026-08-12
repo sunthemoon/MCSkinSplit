@@ -103,6 +103,10 @@ interface PartsQuery {
   readonly category?: string;
 }
 
+interface PartMannequinQuery {
+  readonly armType?: ArmType;
+}
+
 interface ApplyPartBody {
   readonly partId: string;
   readonly strategy?: "use_part" | "keep_base";
@@ -536,6 +540,35 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
         .type("image/png")
         .header("Cache-Control", "private, max-age=31536000, immutable")
         .header("ETag", `\"${part.preview.sha256}\"`)
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.get<{ Params: PartParams; Querystring: PartMannequinQuery }>(
+    "/api/parts/:partId/mannequin.png",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            armType: { type: "string", enum: ["wide", "slim"] },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const part = store.getPart(request.params.partId);
+      const armType =
+        request.query.armType ??
+        (part.manifest.compatibility.armTypes.includes("slim")
+          ? "slim"
+          : "wide");
+      const bytes = await store.readPartMannequinPng(part.id, armType);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", `"${part.texture.sha256}-${armType}-mannequin-v1"`)
         .send(Buffer.from(bytes));
     },
   );

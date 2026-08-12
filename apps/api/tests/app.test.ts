@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decodeSkinPng } from "@mc-skin-split/skin-core";
+import { decodeSkinPng, getPixel } from "@mc-skin-split/skin-core";
 import type {
   AnalysisProposal,
   ProviderAnalysisInput,
@@ -256,6 +256,20 @@ describe("revision API", () => {
       width: 64,
       height: 64,
     });
+    const mannequin = await app.inject({
+      method: "GET",
+      url: `/api/parts/${part.id}/mannequin.png?armType=slim`,
+    });
+    expect(mannequin.statusCode).toBe(200);
+    expect(mannequin.headers["content-type"]).toContain("image/png");
+    const mannequinTexture = decodeSkinPng(mannequin.rawPayload);
+    expect(getPixel(mannequinTexture, 10, 8)).toEqual([226, 229, 224, 255]);
+
+    const invalidMannequin = await app.inject({
+      method: "GET",
+      url: `/api/parts/${part.id}/mannequin.png?armType=invalid`,
+    });
+    expect(invalidMannequin.statusCode).toBe(400);
 
     const targetProject = await createProject(app, "Semantic API target");
     const targetImport = await importSkinFromPath(

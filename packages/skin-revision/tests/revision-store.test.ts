@@ -315,6 +315,11 @@ describe("RevisionStore", () => {
       expect(maskToPixelIds(writeMask)).toEqual([8 * 64 + 8, 8 * 64 + 9]);
       expect(getPixel(texture, 8, 8)).toEqual(getPixel(sourceSkin, 8, 8));
       expect(getPixel(texture, 10, 8)).toEqual([0, 0, 0, 0]);
+      const mannequin = decodeSkinPng(
+        await store.readPartMannequinPng(part.id, "slim"),
+      );
+      expect(getPixel(mannequin, 8, 8)).toEqual(getPixel(sourceSkin, 8, 8));
+      expect(getPixel(mannequin, 10, 8)).toEqual([226, 229, 224, 255]);
 
       const preview = await store.previewPartApplication(
         edited.revision.id,

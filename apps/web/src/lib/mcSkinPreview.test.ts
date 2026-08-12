@@ -11,8 +11,6 @@ class WalkingAnimation {
   speed = 0;
 }
 
-class RotatingAnimation {}
-
 describe("McSkinPreview", () => {
   it("initializes and disposes exactly one modern viewer", () => {
     const fixture = createFixture({ modernAnimation: true });
@@ -27,7 +25,7 @@ describe("McSkinPreview", () => {
       width: 320,
       height: 460,
       zoom: 0.82,
-      autoRotate: true,
+      autoRotate: false,
     });
     expect(fixture.viewer.animation).toBeInstanceOf(WalkingAnimation);
     expect(fixture.viewer.animation?.speed).toBe(0.75);
@@ -45,14 +43,29 @@ describe("McSkinPreview", () => {
 
     applyViewerMotion(viewer, {
       WalkingAnimation,
-      RotatingAnimation,
     });
 
-    expect(add.mock.calls).toEqual([
-      [WalkingAnimation],
-      [RotatingAnimation],
-    ]);
-    expect(viewer.autoRotate).toBeUndefined();
+    expect(add.mock.calls).toEqual([[WalkingAnimation]]);
+    expect(viewer.autoRotate).toBe(false);
+  });
+
+  it("switches a modern viewer between idle and walking without auto rotation", () => {
+    const fixture = createFixture({
+      modernAnimation: true,
+      initialMotion: "idle",
+    });
+
+    fixture.preview.initialize();
+    expect(fixture.viewer.animation).toBeNull();
+    expect(fixture.viewer.autoRotate).toBe(false);
+
+    fixture.preview.setMotion("walk");
+    expect(fixture.viewer.animation).toBeInstanceOf(WalkingAnimation);
+    expect(fixture.viewer.animation?.speed).toBe(0.75);
+    expect(fixture.viewer.autoRotate).toBe(false);
+
+    fixture.preview.setMotion("idle");
+    expect(fixture.viewer.animation).toBeNull();
   });
 
   it("serializes loads so the newest Revision becomes ready", async () => {
@@ -129,7 +142,10 @@ describe("McSkinPreview", () => {
   });
 });
 
-function createFixture(options: { readonly modernAnimation: boolean }) {
+function createFixture(options: {
+  readonly modernAnimation: boolean;
+  readonly initialMotion?: "idle" | "walk";
+}) {
   const stage = {
     clientWidth: 320,
     clientHeight: 460,
@@ -168,7 +184,8 @@ function createFixture(options: { readonly modernAnimation: boolean }) {
     canvas,
     stage,
     createViewer,
-    animations: { WalkingAnimation, RotatingAnimation },
+    animations: { WalkingAnimation },
+    initialMotion: options.initialMotion,
     createResizeObserver: (callback) => {
       resizeCallback = callback;
       return observer;

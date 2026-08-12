@@ -11,6 +11,7 @@ import {
   listAiJobs,
   loadRevisionSegmentation,
   loadRevisionSkin,
+  partMannequinUrl,
   retryAiJob,
   removeCompositionLayer,
   reorderCompositionLayers,
@@ -142,6 +143,9 @@ describe("revisionApi", () => {
     });
     expect(fetcher.mock.calls[1]?.[0]).toBe(
       "/api/revisions/rev%20%2F%202/components/hair%2Fmain/export-part",
+    );
+    expect(partMannequinUrl("part / 1", "slim")).toBe(
+      "/api/parts/part%20%2F%201/mannequin.png?armType=slim",
     );
   });
 
