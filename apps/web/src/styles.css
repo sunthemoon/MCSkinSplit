@@ -902,25 +902,6 @@ h1 span {
   letter-spacing: 0.1em;
 }
 
-.ai-progress {
-  height: 5px;
-  margin-top: 13px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.ai-progress i {
-  display: block;
-  height: 100%;
-  background: var(--cyan-bright);
-  transition: width 280ms ease;
-}
-
-.ai-console[data-status="failed"] .ai-progress i,
-.ai-console[data-status="cancelled"] .ai-progress i {
-  background: var(--orange);
-}
-
 .ai-job-meta {
   display: flex;
   flex-wrap: wrap;
@@ -933,6 +914,196 @@ h1 span {
 
 .ai-job-meta code {
   color: var(--cyan-bright);
+}
+
+.semantic-ai-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 15px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(7, 14, 17, 0.34);
+}
+
+.semantic-ai-progress-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px 12px;
+}
+
+.semantic-ai-progress-heading > span,
+.semantic-ai-handoff > span {
+  color: var(--cyan-bright);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.5rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.semantic-ai-progress-heading > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.semantic-ai-progress-heading > small {
+  color: rgba(244, 240, 228, 0.72);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.62rem;
+}
+
+.semantic-ai-progress-meter {
+  height: 5px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.semantic-ai-progress-meter > i {
+  display: block;
+  height: 100%;
+  background: var(--cyan-bright);
+  transition: width 280ms ease;
+}
+
+.ai-console[data-status="failed"] .semantic-ai-progress-meter > i,
+.ai-console[data-status="cancelled"] .semantic-ai-progress-meter > i {
+  background: var(--orange);
+}
+
+.semantic-ai-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.semantic-ai-steps > li {
+  display: grid;
+  min-width: 0;
+  min-height: 91px;
+  align-content: start;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 7px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.semantic-ai-steps > li > span {
+  color: rgba(244, 240, 228, 0.34);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.54rem;
+  font-weight: 900;
+}
+
+.semantic-ai-steps > li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.semantic-ai-steps strong {
+  font-size: 0.61rem;
+  line-height: 1.3;
+}
+
+.semantic-ai-steps small {
+  color: rgba(244, 240, 228, 0.72);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.semantic-ai-steps em {
+  grid-column: 1 / -1;
+  align-self: end;
+  color: rgba(244, 240, 228, 0.7);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.62rem;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+}
+
+.semantic-ai-steps > li[data-state="completed"],
+.semantic-ai-steps > li[data-state="skipped"] {
+  border-color: rgba(36, 195, 194, 0.32);
+}
+
+.semantic-ai-steps > li[data-state="completed"] em,
+.semantic-ai-steps > li[data-state="completed"] > span,
+.semantic-ai-steps > li[data-state="skipped"] em {
+  color: var(--cyan-bright);
+}
+
+.semantic-ai-steps > li[data-state="current"] {
+  border-color: var(--cyan-bright);
+  background: rgba(36, 195, 194, 0.13);
+  box-shadow: inset 0 3px 0 var(--cyan-bright);
+}
+
+.semantic-ai-steps > li[data-state="current"] em,
+.semantic-ai-steps > li[data-state="current"] > span {
+  color: var(--cyan-bright);
+}
+
+.semantic-ai-steps > li[data-state="failed"],
+.semantic-ai-steps > li[data-state="cancelled"] {
+  border-color: #ff765f;
+  background: rgba(227, 108, 61, 0.14);
+}
+
+.semantic-ai-steps > li[data-state="failed"] em,
+.semantic-ai-steps > li[data-state="cancelled"] em {
+  color: #ffad8d;
+}
+
+.semantic-ai-handoff {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid rgba(244, 240, 228, 0.22);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.semantic-ai-handoff > div {
+  display: grid;
+  gap: 2px;
+}
+
+.semantic-ai-handoff strong,
+.semantic-ai-handoff p {
+  margin: 0;
+}
+
+.semantic-ai-handoff strong {
+  font-size: 0.62rem;
+}
+
+.semantic-ai-handoff p {
+  color: rgba(244, 240, 228, 0.72);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.semantic-ai-handoff[data-state="ready"] {
+  border-left-color: var(--orange);
+  background: rgba(227, 108, 61, 0.11);
+}
+
+.semantic-ai-handoff[data-state="ready"] > span,
+.semantic-ai-handoff[data-state="ready"] strong {
+  color: #ffb08f;
+}
+
+.semantic-ai-handoff[data-state="unavailable"] {
+  border-left-color: #ff765f;
 }
 
 .ai-proposal-summary {
@@ -1127,7 +1298,7 @@ h1 span {
 
 .ai-empty-state {
   display: grid;
-  min-height: 204px;
+  min-height: 76px;
   place-content: center;
   text-align: center;
 }
@@ -3960,6 +4131,10 @@ h1 span {
     border-bottom: 2px solid var(--ink);
   }
 
+  .semantic-ai-steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .workbench {
     grid-template-columns: minmax(270px, 0.78fr) minmax(390px, 1.22fr);
   }
@@ -4082,6 +4257,26 @@ h1 span {
     grid-template-columns: 1fr;
     max-height: 620px;
     padding-inline: 12px;
+  }
+
+  .semantic-ai-progress-heading {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .semantic-ai-progress-heading > small {
+    grid-column: 1 / -1;
+  }
+
+  .semantic-ai-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .semantic-ai-steps > li {
+    min-height: 0;
+  }
+
+  .semantic-ai-handoff {
+    grid-template-columns: 1fr;
   }
 
   .analyzed-skin-card {

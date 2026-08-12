@@ -198,6 +198,15 @@ or backup policy.
 Semantic labels remain probabilistic. Review low-confidence items and use the manual
 editor for corrections before exporting reusable parts or composing a final skin.
 
+The semantic Job card shows a fixed five-stage outline before a task starts:
+queue, isolated input, Codex classification, deterministic validation, and optional
+repair/revalidation. The bar represents completed workflow stages rather than an
+elapsed-time estimate. A second model Run moves into the repair stage without
+resetting earlier progress; failure or cancellation remains attached to the last
+evidenced stage. After machine validation succeeds, the card separately marks the
+handoff to manual review because AI success does not mean that component review is
+complete. The live event list remains the detailed record beneath this outline.
+
 ## Constrained replacement recommendation
 
 M10 adds a second, separate model task for composition restoration. It does not

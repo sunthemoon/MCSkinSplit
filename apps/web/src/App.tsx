@@ -26,6 +26,7 @@ import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
 import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
 import { CompositionRestorationPanel } from "./components/CompositionRestorationPanel";
 import { PartBundleShelf } from "./components/PartBundleShelf";
+import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
 import {
   SkinPreview,
   type PreviewMotion,
@@ -2194,15 +2195,14 @@ export function App() {
                   <span>{aiStatusLabels[aiJob.status]}</span>
                   <strong>{String(aiJobDetail?.runs.length ?? 0).padStart(2, "0")} RUNS</strong>
                 </div>
-                <div className="ai-progress" aria-label={aiStatusLabels[aiJob.status]}>
-                  <i style={{ width: `${aiProgressPercent(aiJob.status)}%` }} />
-                </div>
                 <div className="ai-job-meta">
                   <code>{shortIdentifier(aiJob.id)}</code>
                   <span>{aiJob.provider} / {aiJob.model}</span>
                   <span>reasoning / {aiJob.options.reasoningEffort}</span>
                   <span>{aiJob.skillName} {aiJob.skillVersion}</span>
                 </div>
+
+                <SemanticAiJobProgress detail={aiJobDetail} />
 
                 {aiJob.proposalSummary && (
                   <p className="ai-proposal-summary">{aiJob.proposalSummary}</p>
@@ -2268,10 +2268,13 @@ export function App() {
                 </ol>
               </>
             ) : (
-              <div className="ai-empty-state">
-                <strong>NO ANALYSIS JOB</strong>
-                <p>选择 Branch HEAD 后启动识别。生成的组件会直接进入下方人工语义编辑器。</p>
-              </div>
+              <>
+                <SemanticAiJobProgress detail={null} />
+                <div className="ai-empty-state">
+                  <strong>NO ANALYSIS JOB</strong>
+                  <p>选择 Branch HEAD 后启动识别。上方大纲会显示每个确定性阶段，实时日志提供步骤明细。</p>
+                </div>
+              </>
             )}
             {aiError && <p className="ai-console-error">{aiError}</p>}
           </article>
@@ -3352,24 +3355,6 @@ export function App() {
 function projectNameFromFile(fileName: string): string {
   const withoutExtension = fileName.replace(/\.png$/i, "").trim();
   return (withoutExtension || "Minecraft Skin").slice(0, 120);
-}
-
-function aiProgressPercent(status: ApiAiJobStatus): number {
-  switch (status) {
-    case "queued":
-      return 8;
-    case "preparing":
-      return 24;
-    case "running":
-      return 58;
-    case "validating":
-      return 82;
-    case "succeeded":
-      return 100;
-    case "failed":
-    case "cancelled":
-      return 100;
-  }
 }
 
 function shortIdentifier(value: string): string {
