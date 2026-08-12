@@ -26,6 +26,60 @@ export const SEMANTIC_CATEGORIES = [
 
 export type SemanticCategory = (typeof SEMANTIC_CATEGORIES)[number];
 
+/**
+ * Coarse reusable-asset groups are an orthogonal browsing/composition aid.
+ * They deliberately do not replace the precise semantic taxonomy above.
+ */
+export const AGGREGATE_KINDS = ["hair", "clothing", "accessory"] as const;
+
+export type AggregateKind = (typeof AGGREGATE_KINDS)[number];
+
+const AGGREGATE_CATEGORIES: Readonly<
+  Record<AggregateKind, readonly SemanticCategory[]>
+> = {
+  hair: ["hair"],
+  clothing: [
+    "upper_clothing",
+    "lower_clothing",
+    "one_piece_clothing",
+    "sleeve",
+    "glove",
+    "legwear",
+    "shoe",
+  ],
+  accessory: [
+    "head_accessory",
+    "face_accessory",
+    "neck_accessory",
+    "body_accessory",
+    "waist_accessory",
+    "arm_accessory",
+    "leg_accessory",
+    "back_accessory",
+    "other_accessory",
+  ],
+};
+
+export function isAggregateKind(value: unknown): value is AggregateKind {
+  return AGGREGATE_KINDS.includes(value as AggregateKind);
+}
+
+export function aggregateKindForCategory(
+  category: SemanticCategory,
+): AggregateKind | null {
+  for (const kind of AGGREGATE_KINDS) {
+    if (AGGREGATE_CATEGORIES[kind].includes(category)) return kind;
+  }
+  return null;
+}
+
+export function categoryBelongsToAggregate(
+  category: SemanticCategory,
+  kind: AggregateKind,
+): boolean {
+  return AGGREGATE_CATEGORIES[kind].includes(category);
+}
+
 export const SEMANTIC_CATEGORY_LABELS: Readonly<
   Record<SemanticCategory, string>
 > = {

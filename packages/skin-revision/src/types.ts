@@ -1,4 +1,5 @@
 import type {
+  AggregateKind,
   ArmType,
   ManualSemanticOperation,
   PartApplicationReport,
@@ -195,6 +196,13 @@ export interface ExportPartInput {
   readonly name?: string;
 }
 
+export interface ExportPartBundleInput {
+  readonly name?: string;
+  readonly kind: AggregateKind;
+  readonly componentIds: readonly string[];
+  readonly sourceGroupKey?: string;
+}
+
 export interface PartFileAsset {
   readonly id: string;
   readonly storagePath: string;
@@ -220,6 +228,64 @@ export interface SkinPart {
   readonly source: PartFileAsset;
   readonly createdAt: string;
   readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface PartBundleMember {
+  readonly bundleId: string;
+  readonly partId: string;
+  readonly position: number;
+  readonly part: SkinPart;
+  readonly createdAt: string;
+}
+
+export interface PartBundle {
+  readonly id: string;
+  readonly sourceProjectId: string;
+  readonly sourceRevisionId: string;
+  readonly name: string;
+  readonly kind: AggregateKind;
+  readonly sourceGroupKey: string | null;
+  readonly armTypes: readonly ArmType[];
+  readonly members: readonly PartBundleMember[];
+  readonly createdAt: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface AnalyzedSkinGroup {
+  readonly key: string;
+  readonly sourceGroupKey: string | null;
+  readonly kind: AggregateKind;
+  readonly displayName: string;
+  readonly componentIds: readonly string[];
+  readonly componentCount: number;
+  readonly pixelCount: number;
+  readonly exportedBundleId: string | null;
+}
+
+export interface AnalyzedSkinCatalogItem {
+  readonly project: Pick<SkinProject, "id" | "name">;
+  readonly revision: Pick<
+    SkinRevision,
+    "id" | "branchId" | "branchName" | "sequence" | "createdAt"
+  >;
+  readonly aiJob: {
+    readonly id: string;
+    readonly provider: string;
+    readonly model: string;
+    readonly finishedAt: string;
+  };
+  readonly armType: ArmType;
+  readonly componentCount: number;
+  readonly unknownPixelCount: number;
+  readonly reviewItemCount: number;
+  readonly groups: readonly AnalyzedSkinGroup[];
+  readonly skinUrl: string;
+}
+
+export interface AnalyzedSkinCatalogQuery {
+  readonly projectId?: string;
+  readonly kind?: AggregateKind;
+  readonly query?: string;
 }
 
 export interface PartApplicationPreview {
@@ -286,6 +352,11 @@ export interface AddCompositionPartInput {
   readonly position?: number;
 }
 
+export interface AddCompositionBundleInput {
+  readonly bundleId: string;
+  readonly position?: number;
+}
+
 export interface ReorderCompositionLayersInput {
   readonly layerIds: readonly string[];
 }
@@ -329,6 +400,7 @@ export type RevisionIdKind =
   | "asset"
   | "operation"
   | "part"
+  | "part_bundle"
   | "composition"
   | "composition_layer";
 

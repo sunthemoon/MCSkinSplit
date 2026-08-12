@@ -28,6 +28,11 @@ const migrations: readonly Migration[] = [
     name: "composition projects and ordered layers",
     sql: readFileSync(new URL("./migrations/004_compositions.sql", import.meta.url), "utf8"),
   },
+  {
+    version: 5,
+    name: "aggregate part bundles",
+    sql: readFileSync(new URL("./migrations/005_part_bundles.sql", import.meta.url), "utf8"),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

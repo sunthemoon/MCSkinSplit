@@ -2280,6 +2280,35 @@ feat(composer): add pixel-safe skin composition workflow
 
 ---
 
+## M7：已分析皮肤目录与完整大类部件集
+
+目标：让成功识别的皮肤成为可检索的复用来源，并在不删除精细分类的前提下，支持完整头发、衣服和饰品的快速入库与混搭。
+
+Codex 任务：
+
+1. 从成功的 AI 结果 Revision 派生已分析皮肤目录。
+2. 保留既有 23 个精细语义分类，增加 `hair`、`clothing`、`accessory` 三种聚合类型。
+3. 将一个聚合组批量导出为不可变 Bundle；Bundle 成员仍是可独立调整的原子部件。
+4. 提供 Bundle 的合并平面预览与 Wide/Slim 白模 3D 预览。
+5. 在 Composition Project 中原子化加入整个 Bundle。
+6. 对批量导出、文件校验、模型兼容、重复成员和组合事务建立自动化测试。
+
+验收：
+
+- 聚合类型不替换、合并或删除精细分类。
+- 目录只展示成功并已创建结果 Revision 的 AI 分析。
+- Bundle 导出失败时不留下部分数据库记录或可见的半成品部件。
+- 整组加入失败时不改变 Composition Project；成功后每个成员仍是独立图层。
+- 预览只从已校验的不可变部件派生，不修改源 Revision 或部件文件。
+
+建议提交：
+
+```text
+feat(parts): add analyzed-skin catalog and aggregate bundles
+```
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2295,7 +2324,8 @@ feat(composer): add pixel-safe skin composition workflow
 | S5 | M4 人工编辑与部件库 | S2、S3 |
 | S6 | M5 AI Skill/Worker | S1、S2、S4 |
 | S7 | M6 拼装器 | S4、S5 |
-| S8 | 综合测试与审核 | 全部 |
+| S8 | M7 已分析目录与完整大类部件集 | S4、S5、S6、S7 |
+| S9 | 综合测试与审核 | 全部 |
 
 每个 Session：
 
@@ -2579,4 +2609,3 @@ OpenAI API
 - [ ] 可将已保存部件复写到另一皮肤。
 - [ ] 像素冲突不会被静默覆盖。
 - [ ] 所有关键路径有自动化测试。
-

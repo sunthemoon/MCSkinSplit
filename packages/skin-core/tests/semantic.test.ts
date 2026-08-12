@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aggregateKindForCategory,
   SEMANTIC_CATEGORIES,
   SemanticEditError,
   analyzePartApplication,
@@ -40,6 +41,16 @@ describe("semantic taxonomy and masks", () => {
     expect(SEMANTIC_CATEGORIES).toContain("glove");
     expect(SEMANTIC_CATEGORIES).toContain("shoe");
     expect(SEMANTIC_CATEGORIES.at(-1)).toBe("unknown");
+  });
+
+  it("maps precise categories to additive aggregate kinds", () => {
+    expect(aggregateKindForCategory("hair")).toBe("hair");
+    expect(aggregateKindForCategory("upper_clothing")).toBe("clothing");
+    expect(aggregateKindForCategory("glove")).toBe("clothing");
+    expect(aggregateKindForCategory("neck_accessory")).toBe("accessory");
+    expect(aggregateKindForCategory("skin")).toBeNull();
+    expect(SEMANTIC_CATEGORIES).not.toContain("clothing");
+    expect(SEMANTIC_CATEGORIES).not.toContain("accessory");
   });
 
   it("round-trips canonical surface spans and a full-size binary mask", () => {

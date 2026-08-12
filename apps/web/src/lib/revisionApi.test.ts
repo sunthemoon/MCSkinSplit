@@ -1,17 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   addCompositionPart,
+  applyCompositionBundle,
   applySemanticOperation,
   commitComposition,
   commitRevisionPart,
   compositionPreviewUrl,
   createComposition,
   exportRevisionPart,
+  exportRevisionBundle,
+  getAnalyzedSkin,
   importProjectSkin,
+  listAnalyzedSkins,
   listAiJobs,
+  listPartBundles,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partMannequinUrl,
+  partBundleMannequinUrl,
+  partBundlePreviewUrl,
   retryAiJob,
   removeCompositionLayer,
   reorderCompositionLayers,
@@ -224,6 +231,89 @@ describe("revisionApi", () => {
     expect(fetcher.mock.calls[4]?.[1]?.method).toBe("DELETE");
     expect(compositionPreviewUrl("composition / 1", "2026-08-11T00:00:00Z")).toBe(
       "/api/compositions/composition%20%2F%201/preview.png?v=2026-08-11T00%3A00%3A00Z",
+    );
+  });
+
+  it("loads analyzed skins and persists aggregate bundles without flattening members", async () => {
+    const analyzedSkin = {
+      project: { id: "project_1", name: "Red skin" },
+      revision: { id: "rev / 2", branchName: "main", sequence: 2 },
+      groups: [
+        {
+          key: "clothing:outfit-a",
+          sourceGroupKey: "outfit-a",
+          kind: "clothing",
+          componentIds: ["shirt/main", "shoe/main"],
+        },
+      ],
+    };
+    const bundle = {
+      id: "bundle / 1",
+      name: "完整服装",
+      kind: "clothing",
+      members: [{ partId: "part_1", position: 0 }],
+    };
+    const detail = {
+      composition: { id: "composition_1", status: "draft" },
+      layers: [{ partId: "part_1" }],
+      report: { committable: false },
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ analyzedSkins: [analyzedSkin] }, 200))
+      .mockResolvedValueOnce(jsonResponse({ analyzedSkin }, 200))
+      .mockResolvedValueOnce(jsonResponse({ bundle }, 201))
+      .mockResolvedValueOnce(jsonResponse({ bundles: [bundle] }, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 201));
+
+    await listAnalyzedSkins(
+      { projectId: "project / 1", kind: "clothing", query: "red skin" },
+      fetcher,
+    );
+    await getAnalyzedSkin("rev / 2", fetcher);
+    await exportRevisionBundle(
+      "rev / 2",
+      {
+        name: "完整服装",
+        kind: "clothing",
+        componentIds: ["shirt/main", "shoe/main"],
+        sourceGroupKey: "clothing:outfit-a",
+      },
+      fetcher,
+    );
+    await listPartBundles(
+      { kind: "clothing", sourceRevisionId: "rev / 2" },
+      fetcher,
+    );
+    await applyCompositionBundle(
+      "composition / 1",
+      "bundle / 1",
+      2,
+      fetcher,
+    );
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/analyzed-skins?projectId=project+%2F+1&kind=clothing&q=red+skin",
+      "/api/analyzed-skins/rev%20%2F%202",
+      "/api/revisions/rev%20%2F%202/export-bundle",
+      "/api/part-bundles?kind=clothing&sourceRevisionId=rev+%2F+2",
+      "/api/compositions/composition%20%2F%201/apply-bundle",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      name: "完整服装",
+      kind: "clothing",
+      componentIds: ["shirt/main", "shoe/main"],
+      sourceGroupKey: "clothing:outfit-a",
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[4]?.[1]?.body))).toEqual({
+      bundleId: "bundle / 1",
+      position: 2,
+    });
+    expect(partBundlePreviewUrl("bundle / 1")).toBe(
+      "/api/part-bundles/bundle%20%2F%201/preview.png",
+    );
+    expect(partBundleMannequinUrl("bundle / 1", "slim")).toBe(
+      "/api/part-bundles/bundle%20%2F%201/mannequin.png?armType=slim",
     );
   });
 

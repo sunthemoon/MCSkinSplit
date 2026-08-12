@@ -21,6 +21,8 @@ import {
   useState,
 } from "react";
 import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
+import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
+import { PartBundleShelf } from "./components/PartBundleShelf";
 import {
   SkinPreview,
   type PreviewMotion,
@@ -33,6 +35,7 @@ import {
 } from "./lib/skinFile";
 import {
   addCompositionPart,
+  applyCompositionBundle,
   branchRevision,
   applySemanticOperation,
   cancelAiJob,
@@ -42,13 +45,16 @@ import {
   createComposition,
   createProject,
   exportRevisionPart,
+  exportRevisionBundle,
   getProject,
   importProjectSkin,
   listAiJobs,
+  listAnalyzedSkins,
   listAiProviders,
   listBranches,
   listCompositions,
   listParts,
+  listPartBundles,
   listProjects,
   listRevisions,
   loadAiJobDetail,
@@ -68,9 +74,12 @@ import {
   type ApiAiJobStatus,
   type ApiAiAnalysisOptions,
   type ApiBranch,
+  type ApiAnalyzedSkin,
+  type ApiAnalyzedSkinGroup,
   type ApiCompositionDetail,
   type ApiProject,
   type ApiPart,
+  type ApiPartBundle,
   type ApiPartPreview,
   type ApiRevision,
   type ApiSegmentation,
@@ -234,10 +243,21 @@ export function App() {
   const [componentSubtype, setComponentSubtype] = useState("");
   const [semanticBusy, setSemanticBusy] = useState(false);
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
+  const [partBundles, setPartBundles] = useState<readonly ApiPartBundle[]>([]);
+  const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
+  const [analyzedSkins, setAnalyzedSkins] =
+    useState<readonly ApiAnalyzedSkin[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [busyCatalogGroupKey, setBusyCatalogGroupKey] = useState<string | null>(
+    null,
+  );
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
   const [compositionPartId, setCompositionPartId] = useState<string | null>(null);
   const [componentInspectorMotion, setComponentInspectorMotion] =
+    useState<PreviewMotion>("idle");
+  const [bundleInspectorMotion, setBundleInspectorMotion] =
     useState<PreviewMotion>("idle");
   const [compositionPreviewMotion, setCompositionPreviewMotion] =
     useState<PreviewMotion>("idle");
@@ -267,6 +287,24 @@ export function App() {
       URL.revokeObjectURL(objectUrlRef.current);
       objectUrlRef.current = null;
     }
+  }, []);
+
+  const refreshReusableCatalog = useCallback(async () => {
+    const [parts, bundles, catalog] = await Promise.all([
+      listParts(),
+      listPartBundles(),
+      listAnalyzedSkins(),
+    ]);
+    setPartLibrary(parts);
+    setPartBundles(bundles);
+    setAnalyzedSkins(catalog);
+    setSelectedPartId((current) => current ?? parts[0]?.id ?? null);
+    setCompositionPartId((current) => current ?? parts[0]?.id ?? null);
+    setSelectedBundleId((current) =>
+      bundles.some((bundle) => bundle.id === current)
+        ? current
+        : (bundles[0]?.id ?? null),
+    );
   }, []);
 
   const activateFixture = useCallback(
@@ -463,6 +501,7 @@ export function App() {
 
       if (job.status === "succeeded" && job.resultRevisionId) {
         await refreshHistory(job.projectId, job.resultRevisionId);
+        await refreshReusableCatalog();
         setNotice(
           `AI 识别完成 · 已创建 Revision · ${job.reviewItems.length} 项待审核`,
         );
@@ -478,7 +517,7 @@ export function App() {
       handledAiJobsRef.current.add(job.id);
       return detail;
     },
-    [refreshHistory],
+    [refreshHistory, refreshReusableCatalog],
   );
 
   useEffect(() => {
@@ -638,14 +677,13 @@ export function App() {
     void (async () => {
       await activateFixture(DEFAULT_FIXTURE);
       try {
-        const [projects, parts] = await Promise.all([listProjects(), listParts()]);
+        const projects = await listProjects();
+        await refreshReusableCatalog();
         if (cancelled) {
           return;
         }
         setHistoryProjects(projects);
-        setPartLibrary(parts);
-        setSelectedPartId((current) => current ?? parts[0]?.id ?? null);
-        setCompositionPartId((current) => current ?? parts[0]?.id ?? null);
+        setCatalogError(null);
         const storedProjectId = window.localStorage.getItem(HISTORY_PROJECT_KEY);
         const storedProject = projects.find(
           (project) => project.id === storedProjectId,
@@ -656,10 +694,12 @@ export function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setHistoryError(
-            `Revision API 未连接：${error instanceof Error ? error.message : String(error)}`,
-          );
+          const message = error instanceof Error ? error.message : String(error);
+          setHistoryError(`Revision API 未连接：${message}`);
+          setCatalogError(`目录读取失败：${message}`);
         }
+      } finally {
+        if (!cancelled) setCatalogLoading(false);
       }
     })();
 
@@ -668,7 +708,7 @@ export function App() {
       requestIdRef.current += 1;
       releaseObjectUrl();
     };
-  }, [activateFixture, refreshHistory, releaseObjectUrl]);
+  }, [activateFixture, refreshHistory, refreshReusableCatalog, releaseObjectUrl]);
 
   const selectFile = useCallback(
     async (file: File) => {
@@ -730,6 +770,8 @@ export function App() {
   const compositionPart = partLibrary.find(
     (part) => part.id === compositionPartId,
   );
+  const selectedBundle =
+    partBundles.find((bundle) => bundle.id === selectedBundleId) ?? null;
   const composition = compositionDetail?.composition ?? null;
   const compositionReport = compositionDetail?.report ?? null;
   const compositionDraft = composition?.status === "draft";
@@ -744,6 +786,14 @@ export function App() {
     compositionPart &&
       compositionDetail?.layers.some(
         (layer) => layer.partId === compositionPart.id,
+      ),
+  );
+  const selectedBundleAlreadyLayered = Boolean(
+    selectedBundle &&
+      selectedBundle.members.every((member) =>
+        compositionDetail?.layers.some(
+          (layer) => layer.partId === member.partId,
+        ),
       ),
   );
   const unresolvedCompositionConflicts =
@@ -1112,6 +1162,68 @@ export function App() {
     setComponentSubtype(component.subtype ?? "");
   };
 
+  const activateAnalyzedSkin = async (item: ApiAnalyzedSkin) => {
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const [project, branches, revisions, projects] = await Promise.all([
+        getProject(item.project.id),
+        listBranches(item.project.id),
+        listRevisions(item.project.id),
+        listProjects(),
+      ]);
+      setHistoryProject(project);
+      setHistoryBranches(branches);
+      setHistoryRevisions(revisions);
+      setHistoryProjects(projects);
+      window.localStorage.setItem(HISTORY_PROJECT_KEY, project.id);
+      const revision = revisions.find(
+        (candidate) => candidate.id === item.revision.id,
+      );
+      if (!revision) {
+        throw new Error("目录中的 Revision 已不存在");
+      }
+      await activateRevision(revision);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`已分析皮肤载入失败：${message}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const exportAnalyzedGroup = async (
+    item: ApiAnalyzedSkin,
+    group: ApiAnalyzedSkinGroup,
+  ) => {
+    const busyKey = `${item.revision.id}:${group.key}`;
+    setBusyCatalogGroupKey(busyKey);
+    setCatalogError(null);
+    setNotice(`正在将 ${group.displayName} 的 ${group.componentCount} 个组件整组入库`);
+    try {
+      const bundle = await exportRevisionBundle(item.revision.id, {
+        name: group.displayName,
+        kind: group.kind,
+        componentIds: group.componentIds,
+        ...(group.sourceGroupKey
+          ? { sourceGroupKey: group.sourceGroupKey }
+          : {}),
+      });
+      await refreshReusableCatalog();
+      setSelectedBundleId(bundle.id);
+      setNotice(
+        `已入库 ${bundle.name} · 保留 ${bundle.members.length} 个可独立调整的细组件`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogError(message);
+      setNotice(`完整大类入库失败：${message}`);
+    } finally {
+      setBusyCatalogGroupKey(null);
+    }
+  };
+
   const exportActiveComponent = async () => {
     if (!selectedRevision || !activeComponent) {
       return;
@@ -1124,8 +1236,7 @@ export function App() {
         activeComponent.instanceId,
         activeComponent.displayName,
       );
-      const parts = await listParts();
-      setPartLibrary(parts);
+      await refreshReusableCatalog();
       setSelectedPartId(part.id);
       setCompositionPartId(part.id);
       setPartPreview(null);
@@ -1242,6 +1353,19 @@ export function App() {
       `正在添加部件 ${part.name}`,
       (detail) =>
         `已添加 ${part.name} · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
+    );
+  };
+
+  const addBundleToComposition = async (bundle: ApiPartBundle) => {
+    if (!composition || !compositionDraft || selectedBundleAlreadyLayered) {
+      return;
+    }
+    setSelectedBundleId(bundle.id);
+    await updateComposition(
+      () => applyCompositionBundle(composition.id, bundle.id),
+      `正在整组添加 ${bundle.name}`,
+      (detail) =>
+        `已添加 ${bundle.name} 的 ${bundle.members.length} 个组件 · ${detail.report.unresolvedConflictCount} 项冲突待确认`,
     );
   };
 
@@ -1526,6 +1650,16 @@ export function App() {
 
         {historyError && <p className="history-error">{historyError}</p>}
       </section>
+
+      <AnalyzedSkinCatalog
+        items={analyzedSkins}
+        busyGroupKey={busyCatalogGroupKey}
+        loading={catalogLoading}
+        error={catalogError}
+        selectedRevisionId={selectedRevisionId}
+        onActivate={(item) => void activateAnalyzedSkin(item)}
+        onExportGroup={(item, group) => void exportAnalyzedGroup(item, group)}
+      />
 
       <section
         className="ai-console"
@@ -2256,6 +2390,25 @@ export function App() {
                 <dd>{composition ? armLabels[composition.armType] : "Alex / Slim 默认"}</dd>
               </div>
             </dl>
+
+            <PartBundleShelf
+              bundles={partBundles}
+              selectedBundle={selectedBundle}
+              targetArmType={compositionTargetArmType}
+              draftReady={Boolean(compositionDraft)}
+              busy={compositionBusy}
+              allMembersLayered={selectedBundleAlreadyLayered}
+              motion={bundleInspectorMotion}
+              onSelect={setSelectedBundleId}
+              onAdd={(bundle) => void addBundleToComposition(bundle)}
+              onMotionChange={setBundleInspectorMotion}
+            />
+
+            <div className="composition-section-title atomic-parts-title">
+              <span>ATOMIC PARTS</span>
+              <h3>细组件逐个入场</h3>
+              <small>保留原有 23 类语义组件与单件冲突处理。</small>
+            </div>
 
             <div
               className="composition-part-library"

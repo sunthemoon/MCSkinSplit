@@ -9,6 +9,7 @@ import {
 } from "@mc-skin-split/skin-compositor";
 import {
   SemanticEditError,
+  aggregateKindForCategory,
   analyzePartApplication,
   applyManualSemanticOperation,
   applyPartPixels,
@@ -19,6 +20,7 @@ import {
   encodeSkinPng,
   exportSemanticPart,
   getSkinLayout,
+  isAggregateKind,
   isSemanticCategory,
   maskToRgbaImage,
   maskToPixelIds,
@@ -27,6 +29,7 @@ import {
   rebaseSemanticStateImage,
   validateSemanticState,
   type ManualSemanticOperation,
+  type AggregateKind,
   type PartManifest,
   type SegmentationDocument,
   type SemanticState,
@@ -55,9 +58,12 @@ import {
   OPERATION_TYPES,
   type ActorType,
   type AiSegmentationRevisionInput,
+  type AddCompositionBundleInput,
   type AddCompositionPartInput,
   type ApplyPartInput,
   type ApplyPartResult,
+  type AnalyzedSkinCatalogItem,
+  type AnalyzedSkinCatalogQuery,
   type BranchFromRevisionInput,
   type CommitCompositionInput,
   type CommitCompositionResult,
@@ -68,6 +74,7 @@ import {
   type CreateProjectInput,
   type CreateProjectResult,
   type ExportPartInput,
+  type ExportPartBundleInput,
   type ImportProjectInput,
   type ImportProjectResult,
   type ImportSkinInput,
@@ -75,6 +82,8 @@ import {
   type OperationSnapshot,
   type PartApplicationPreview,
   type PartFileAsset,
+  type PartBundle,
+  type PartBundleMember,
   type RevisionDiff,
   type RevisionIdKind,
   type RevisionMutationResult,
@@ -189,6 +198,36 @@ interface PartRow {
   readonly source_mime_type: string;
   readonly source_byte_size: number;
   readonly source_sha256: string;
+}
+
+interface PartBundleRow {
+  readonly id: string;
+  readonly source_project_id: string;
+  readonly source_revision_id: string;
+  readonly name: string;
+  readonly kind: string;
+  readonly source_group_key: string | null;
+  readonly arm_types_json: string;
+  readonly created_at: string;
+  readonly metadata_json: string;
+}
+
+interface PartBundleMemberRow {
+  readonly bundle_id: string;
+  readonly part_id: string;
+  readonly position: number;
+  readonly created_at: string;
+}
+
+interface AnalyzedCatalogRow {
+  readonly job_id: string;
+  readonly project_id: string;
+  readonly project_name: string;
+  readonly result_revision_id: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly review_items_json: string;
+  readonly finished_at: string;
 }
 
 interface CompositionProjectRow {
@@ -391,6 +430,86 @@ export class RevisionStore {
     return mapPart(row);
   }
 
+  listPartBundles(kind?: AggregateKind, sourceRevisionId?: string): PartBundle[] {
+    if (kind !== undefined && !isAggregateKind(kind)) {
+      throw invalidInput(`未知部件集分类：${kind}`);
+    }
+    if (sourceRevisionId !== undefined) this.getRevision(sourceRevisionId);
+    const conditions: string[] = [];
+    const parameters: string[] = [];
+    if (kind !== undefined) {
+      conditions.push("kind = ?");
+      parameters.push(kind);
+    }
+    if (sourceRevisionId !== undefined) {
+      conditions.push("source_revision_id = ?");
+      parameters.push(sourceRevisionId);
+    }
+    const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(`SELECT * FROM part_bundle${where} ORDER BY created_at, id`)
+      .all(...parameters) as PartBundleRow[];
+    return rows.map((row) => this.mapPartBundle(row));
+  }
+
+  getPartBundle(bundleId: string): PartBundle {
+    const row = this.database
+      .prepare("SELECT * FROM part_bundle WHERE id = ?")
+      .get(bundleId) as PartBundleRow | undefined;
+    if (!row) throw notFound("Part bundle", bundleId);
+    return this.mapPartBundle(row);
+  }
+
+  private mapPartBundle(row: PartBundleRow): PartBundle {
+    if (!isAggregateKind(row.kind)) {
+      throw snapshotCorrupt(row.id, "部件集分类无效");
+    }
+    const armTypes = parseArmTypes(row.arm_types_json, row.id);
+    const memberRows = this.database
+      .prepare(
+        "SELECT * FROM part_bundle_member WHERE bundle_id = ? ORDER BY position, part_id",
+      )
+      .all(row.id) as PartBundleMemberRow[];
+    if (memberRows.length === 0 || memberRows.some((member, index) => member.position !== index)) {
+      throw snapshotCorrupt(row.id, "部件集成员为空或位置不连续");
+    }
+    const members: PartBundleMember[] = memberRows.map((member) => ({
+      bundleId: row.id,
+      partId: member.part_id,
+      position: member.position,
+      part: this.getPart(member.part_id),
+      createdAt: member.created_at,
+    }));
+    if (
+      members.some(
+        (member) =>
+          member.part.sourceProjectId !== row.source_project_id ||
+          member.part.sourceRevisionId !== row.source_revision_id ||
+          aggregateKindForCategory(member.part.category) !== row.kind,
+      )
+    ) {
+      throw snapshotCorrupt(row.id, "部件集成员与来源或大类不一致");
+    }
+    const expectedArmTypes = intersectArmTypes(
+      members.map((member) => member.part.manifest.compatibility.armTypes),
+    );
+    if (canonicalJson(expectedArmTypes) !== canonicalJson(armTypes)) {
+      throw snapshotCorrupt(row.id, "部件集手臂模型与成员不一致");
+    }
+    return {
+      id: row.id,
+      sourceProjectId: row.source_project_id,
+      sourceRevisionId: row.source_revision_id,
+      name: row.name,
+      kind: row.kind,
+      sourceGroupKey: row.source_group_key,
+      armTypes,
+      members,
+      createdAt: row.created_at,
+      metadata: parseObjectJson(row.metadata_json, `Part bundle ${row.id} metadata`),
+    };
+  }
+
   listCompositions(baseRevisionId?: string): CompositionProject[] {
     const rows = (baseRevisionId === undefined
       ? this.database
@@ -485,6 +604,15 @@ export class RevisionStore {
     );
   }
 
+  async exportPartBundle(
+    revisionId: string,
+    input: ExportPartBundleInput,
+  ): Promise<PartBundle> {
+    return this.withWriteLock(() =>
+      this.exportPartBundleUnlocked(revisionId, input),
+    );
+  }
+
   async applyPart(
     revisionId: string,
     input: ApplyPartInput,
@@ -505,12 +633,106 @@ export class RevisionStore {
     return { composition, layers, report: evaluated.report };
   }
 
+  async listAnalyzedSkins(
+    query: AnalyzedSkinCatalogQuery = {},
+  ): Promise<AnalyzedSkinCatalogItem[]> {
+    if (query.kind !== undefined && !isAggregateKind(query.kind)) {
+      throw invalidInput(`未知已分析目录分类：${query.kind}`);
+    }
+    if (query.projectId !== undefined) this.getProject(query.projectId);
+    const rows = this.database
+      .prepare(`
+        SELECT
+          job.id AS job_id,
+          job.project_id,
+          project.name AS project_name,
+          job.result_revision_id,
+          job.provider,
+          job.model,
+          job.review_items_json,
+          job.finished_at
+        FROM ai_job AS job
+        JOIN skin_project AS project ON project.id = job.project_id
+        WHERE job.status = 'succeeded'
+          AND job.result_revision_id IS NOT NULL
+          AND job.finished_at IS NOT NULL
+        ORDER BY job.finished_at, job.id
+      `)
+      .all() as AnalyzedCatalogRow[];
+    const newestByRevision = new Map<string, AnalyzedCatalogRow>();
+    for (const row of rows) newestByRevision.set(row.result_revision_id, row);
+    const items = await Promise.all(
+      [...newestByRevision.values()].map((row) => this.analyzedCatalogItem(row)),
+    );
+    const normalizedQuery = query.query?.trim().toLocaleLowerCase();
+    return items.filter((item) => {
+      if (query.projectId && item.project.id !== query.projectId) return false;
+      if (query.kind && !item.groups.some((group) => group.kind === query.kind)) return false;
+      if (
+        normalizedQuery &&
+        !`${item.project.name} ${item.revision.branchName} ${item.groups.map((group) => group.displayName).join(" ")}`
+          .toLocaleLowerCase()
+          .includes(normalizedQuery)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  async getAnalyzedSkin(revisionId: string): Promise<AnalyzedSkinCatalogItem> {
+    const items = await this.listAnalyzedSkins();
+    const item = items.find((candidate) => candidate.revision.id === revisionId);
+    if (!item) throw notFound("Analyzed skin", revisionId);
+    return item;
+  }
+
+  private async analyzedCatalogItem(
+    row: AnalyzedCatalogRow,
+  ): Promise<AnalyzedSkinCatalogItem> {
+    const revision = this.getRevision(row.result_revision_id);
+    const segmentation = await this.readRevisionSegmentation(revision.id);
+    const bundles = this.listPartBundles(undefined, revision.id);
+    const groups = aggregateCatalogGroups(segmentation, bundles);
+    return {
+      project: { id: row.project_id, name: row.project_name },
+      revision: {
+        id: revision.id,
+        branchId: revision.branchId,
+        branchName: revision.branchName,
+        sequence: revision.sequence,
+        createdAt: revision.createdAt,
+      },
+      aiJob: {
+        id: row.job_id,
+        provider: row.provider,
+        model: row.model,
+        finishedAt: row.finished_at,
+      },
+      armType: segmentation.source.armType,
+      componentCount: segmentation.components.length,
+      unknownPixelCount: segmentation.unknown.pixelCount,
+      reviewItemCount: parseJsonArray(row.review_items_json, `AI Job ${row.job_id} review items`).length,
+      groups,
+      skinUrl: `/api/revisions/${encodeURIComponent(revision.id)}/skin.png`,
+    };
+  }
+
   async addCompositionPart(
     compositionId: string,
     input: AddCompositionPartInput,
   ): Promise<CompositionDetail> {
     return this.withWriteLock(() =>
       this.addCompositionPartUnlocked(compositionId, input),
+    );
+  }
+
+  async addCompositionBundle(
+    compositionId: string,
+    input: AddCompositionBundleInput,
+  ): Promise<CompositionDetail> {
+    return this.withWriteLock(() =>
+      this.addCompositionBundleUnlocked(compositionId, input),
     );
   }
 
@@ -623,6 +845,62 @@ export class RevisionStore {
     return encodeSkinPng(
       createPartMannequinTexture(texture, writeMask, armType),
     );
+  }
+
+  async readPartBundlePreviewPng(bundleId: string): Promise<Uint8Array> {
+    const { texture } = await this.readVerifiedBundleTexture(bundleId);
+    return encodeSkinPng(texture);
+  }
+
+  async readPartBundleMannequinPng(
+    bundleId: string,
+    armType: "wide" | "slim",
+  ): Promise<Uint8Array> {
+    const bundle = this.getPartBundle(bundleId);
+    if (!bundle.armTypes.includes(armType)) {
+      throw invalidInput("部件集不兼容请求的白模手臂模型", {
+        bundleId,
+        armType,
+        supportedArmTypes: bundle.armTypes,
+      });
+    }
+    const { texture, writeMask } = await this.readVerifiedBundleTexture(bundleId);
+    return encodeSkinPng(createPartMannequinTexture(texture, writeMask, armType));
+  }
+
+  private async readVerifiedBundleTexture(bundleId: string) {
+    const bundle = this.getPartBundle(bundleId);
+    const data = new Uint8Array(64 * 64 * 4);
+    const written = new Uint8Array(64 * 64);
+    for (const member of bundle.members) {
+      const stored = await this.verifyPartStorage(member.partId);
+      const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+      const mask = rgbaImageToMask(
+        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      );
+      for (const pixelId of maskToPixelIds(mask)) {
+        const offset = pixelId * 4;
+        const alpha = texture.data[offset + 3]!;
+        if (alpha === 0) {
+          throw snapshotCorrupt(bundle.id, `部件 ${member.partId} 写入了透明像素`);
+        }
+        if (written[pixelId]) {
+          const same = [0, 1, 2, 3].every(
+            (channel) => data[offset + channel] === texture.data[offset + channel],
+          );
+          if (!same) {
+            throw snapshotCorrupt(bundle.id, `部件集成员在像素 ${pixelId} 存在不同颜色重叠`);
+          }
+          continue;
+        }
+        data.set(texture.data.subarray(offset, offset + 4), offset);
+        written[pixelId] = 1;
+      }
+    }
+    return {
+      texture: { width: 64 as const, height: 64 as const, data },
+      writeMask: written,
+    };
   }
 
   async previewPartApplication(
@@ -1219,6 +1497,65 @@ export class RevisionStore {
     };
     const layers = [...existing];
     layers.splice(position, 0, inserted);
+    const normalized = normalizeCompositionLayers(layers);
+    const draft = resetCompositionResolution(composition);
+    const evaluated = await this.evaluateComposition(draft, normalized);
+    this.persistCompositionDraft(
+      composition.id,
+      normalized,
+      draft.resolutionMode,
+      draft.conflictWinners,
+      evaluated.report,
+      createdAt,
+    );
+    return {
+      composition: this.getComposition(composition.id),
+      layers: normalized,
+      report: evaluated.report,
+    };
+  }
+
+  private async addCompositionBundleUnlocked(
+    compositionId: string,
+    input: AddCompositionBundleInput,
+  ): Promise<CompositionDetail> {
+    const composition = this.requireDraftComposition(compositionId);
+    const bundle = this.getPartBundle(input.bundleId);
+    if (!bundle.armTypes.includes(composition.armType)) {
+      throw invalidInput("部件集不兼容当前混搭模型", {
+        bundleId: bundle.id,
+        armType: composition.armType,
+      });
+    }
+    const existing = this.listCompositionLayers(composition.id);
+    const existingPartIds = new Set(existing.map((layer) => layer.partId));
+    const duplicate = bundle.members.find((member) => existingPartIds.has(member.partId));
+    if (duplicate) {
+      throw conflict("部件集成员已在混搭工程中", {
+        compositionId,
+        bundleId: bundle.id,
+        partId: duplicate.partId,
+      });
+    }
+    await Promise.all(bundle.members.map((member) => this.verifyPartStorage(member.partId)));
+    const position = input.position ?? existing.length;
+    if (!Number.isInteger(position) || position < 0 || position > existing.length) {
+      throw invalidInput("部件集图层位置超出范围", {
+        position,
+        layerCount: existing.length,
+      });
+    }
+    const createdAt = this.now();
+    const inserted = bundle.members.map((member, memberPosition): CompositionLayer => ({
+      id: this.id("composition_layer"),
+      compositionId: composition.id,
+      partId: member.partId,
+      position: position + memberPosition,
+      part: member.part,
+      createdAt,
+    }));
+    const layers = [...existing];
+    layers.splice(position, 0, ...inserted);
     const normalized = normalizeCompositionLayers(layers);
     const draft = resetCompositionResolution(composition);
     const evaluated = await this.evaluateComposition(draft, normalized);
@@ -2011,6 +2348,227 @@ export class RevisionStore {
       throw error;
     }
     return this.getPart(partId);
+  }
+
+  private async exportPartBundleUnlocked(
+    revisionId: string,
+    input: ExportPartBundleInput,
+  ): Promise<PartBundle> {
+    if (!isAggregateKind(input.kind)) {
+      throw invalidInput(`未知部件集分类：${String(input.kind)}`);
+    }
+    const componentIds = [...new Set(input.componentIds)];
+    if (componentIds.length === 0 || componentIds.length !== input.componentIds.length) {
+      throw invalidInput("部件集必须包含至少一个不重复的组件");
+    }
+    const revision = this.getRevision(revisionId);
+    const snapshot = await this.verifyRevisionSnapshot(revision.id);
+    const segmentation = parseSegmentation(
+      snapshot.files["segmentation.json"].bytes,
+      revision.id,
+    );
+    const state = semanticStateFromSnapshot(snapshot, segmentation, revision.id);
+    const components = componentIds.map((componentId) => {
+      const component = state.document.components.find(
+        (candidate) => candidate.instanceId === componentId,
+      );
+      if (!component) throw notFound("Component", componentId);
+      if (aggregateKindForCategory(component.category) !== input.kind) {
+        throw invalidInput(`组件 ${componentId} 不属于 ${input.kind} 大类`);
+      }
+      if (
+        input.sourceGroupKey !== undefined &&
+        component.relations.sameOutfitGroup !== input.sourceGroupKey
+      ) {
+        throw invalidInput(`组件 ${componentId} 不属于指定的语义分组`);
+      }
+      return component;
+    });
+    const name = validateText(
+      "部件集名称",
+      input.name ?? defaultBundleName(input.kind),
+      120,
+    );
+    const sourceGroupKey = validateOptionalText(
+      "来源语义分组",
+      input.sourceGroupKey,
+      100,
+    );
+    const bundleId = this.id("part_bundle");
+    const createdAt = this.now();
+    const image = decodeSkinPng(snapshot.files["skin.png"].bytes);
+    type PreparedBundleMember = {
+      readonly component: (typeof components)[number];
+      readonly position: number;
+      readonly partId: string;
+      readonly exported: ReturnType<typeof exportSemanticPart>;
+    };
+    const prepared: PreparedBundleMember[] = components.map((component, position) => {
+      const partId = this.id("part");
+      const exported = exportSemanticPart({
+        id: partId,
+        name: component.displayName,
+        projectId: revision.projectId,
+        revisionId: revision.id,
+        armType: segmentation.source.armType,
+        createdAt,
+        image,
+        component,
+        componentMask: state.masks[component.instanceId]!,
+      });
+      return { component, position, partId, exported };
+    });
+    const storedParts: Array<{
+      readonly prepared: Extract<PreparedBundleMember, { readonly exported: unknown }>;
+      readonly stored: VerifiedPartStorage;
+      readonly fileIds: Record<PartFileName, string>;
+    }> = [];
+    try {
+      for (const item of prepared) {
+        const exported = item.exported;
+        const sourceJson = canonicalJson({
+          schemaVersion: "1.0",
+          projectId: revision.projectId,
+          revisionId: revision.id,
+          componentInstanceId: item.component.instanceId,
+          component: item.component,
+        });
+        const stored = await this.partStorage.writePart({
+          partId: item.partId,
+          files: {
+            "texture.png": encodeSkinPng(exported.texture),
+            "write-mask.png": encodeSkinPng(maskToRgbaImage(exported.writeMask)),
+            "manifest.json": Buffer.from(canonicalJson(exported.manifest), "utf8"),
+            "preview.png": encodeSkinPng(exported.preview),
+            "source.json": Buffer.from(sourceJson, "utf8"),
+          },
+        });
+        storedParts.push({
+          prepared: item,
+          stored,
+          fileIds: Object.fromEntries(
+            PART_FILE_NAMES.map((fileName) => [fileName, this.id("asset")]),
+          ) as Record<PartFileName, string>,
+        });
+      }
+
+      const armTypes = intersectArmTypes(
+        prepared.map((item) => item.exported.manifest.compatibility.armTypes),
+      );
+      if (armTypes.length === 0) {
+        throw invalidInput("部件集成员没有共同兼容的手臂模型");
+      }
+      const commit = this.database.transaction(() => {
+        for (const item of storedParts) this.insertPreparedPart(item, revision, createdAt);
+        this.database
+          .prepare(`
+            INSERT INTO part_bundle (
+              id, source_project_id, source_revision_id, name, kind,
+              source_group_key, arm_types_json, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            bundleId,
+            revision.projectId,
+            revision.id,
+            name,
+            input.kind,
+            sourceGroupKey ?? null,
+            compactCanonicalJson(armTypes),
+            createdAt,
+            compactCanonicalJson({ componentIds }),
+          );
+        const insertMember = this.database.prepare(`
+          INSERT INTO part_bundle_member (bundle_id, part_id, position, created_at)
+          VALUES (?, ?, ?, ?)
+        `);
+        for (const item of prepared) {
+          insertMember.run(bundleId, item.partId, item.position, createdAt);
+        }
+      });
+      commit.immediate();
+    } catch (error) {
+      await Promise.all(
+        storedParts.map((item) => this.partStorage.removeNewPart(item.prepared.partId)),
+      );
+      throw error;
+    }
+    return this.getPartBundle(bundleId);
+  }
+
+  private insertPreparedPart(
+    item: {
+      readonly prepared: {
+        readonly partId: string;
+        readonly component: SegmentationDocument["components"][number];
+        readonly exported: ReturnType<typeof exportSemanticPart>;
+      };
+      readonly stored: VerifiedPartStorage;
+      readonly fileIds: Record<PartFileName, string>;
+    },
+    revision: SkinRevision,
+    createdAt: string,
+  ): void {
+    const insertFile = this.database.prepare(`
+      INSERT INTO part_file_asset (
+        id, part_id, file_role, storage_path, mime_type, byte_size, sha256, created_at
+      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+    `);
+    const roles: Readonly<Record<PartFileName, string>> = {
+      "texture.png": "texture",
+      "write-mask.png": "write_mask",
+      "manifest.json": "manifest",
+      "preview.png": "preview",
+      "source.json": "source",
+    };
+    for (const fileName of PART_FILE_NAMES) {
+      const file = item.stored.files[fileName];
+      insertFile.run(
+        item.fileIds[fileName],
+        roles[fileName],
+        file.storagePath,
+        fileName.endsWith(".png") ? "image/png" : "application/json",
+        file.bytes.byteLength,
+        file.sha256,
+        createdAt,
+      );
+    }
+    const manifest = item.prepared.exported.manifest;
+    this.database
+      .prepare(`
+        INSERT INTO part_asset (
+          id, source_project_id, source_revision_id, source_component_id,
+          name, category, subtype, arm_type, texture_asset_id, mask_asset_id,
+          manifest_asset_id, preview_asset_id, source_asset_id, created_at,
+          manifest_json, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        item.prepared.partId,
+        revision.projectId,
+        revision.id,
+        item.prepared.component.instanceId,
+        manifest.name,
+        manifest.category,
+        manifest.subtype ?? null,
+        manifest.compatibility.armTypes.length === 1
+          ? manifest.compatibility.armTypes[0]
+          : "slim",
+        item.fileIds["texture.png"],
+        item.fileIds["write-mask.png"],
+        item.fileIds["manifest.json"],
+        item.fileIds["preview.png"],
+        item.fileIds["source.json"],
+        createdAt,
+        canonicalJson(manifest).trim(),
+        compactCanonicalJson({ maskMode: manifest.maskMode }),
+      );
+    const attach = this.database.prepare(
+      "UPDATE part_file_asset SET part_id = ? WHERE id = ?",
+    );
+    for (const fileName of PART_FILE_NAMES) {
+      attach.run(item.prepared.partId, item.fileIds[fileName]);
+    }
   }
 
   private async applyManualOperationUnlocked(
@@ -3338,6 +3896,102 @@ function parseObjectJson(
   return parsed as Readonly<Record<string, unknown>>;
 }
 
+function parseJsonArray(source: string, label: string): readonly unknown[] {
+  const parsed = JSON.parse(source) as unknown;
+  if (!Array.isArray(parsed)) throw new TypeError(`${label} 必须是 JSON array`);
+  return parsed;
+}
+
+function parseArmTypes(source: string, bundleId: string): readonly ("wide" | "slim")[] {
+  const parsed = parseJsonArray(source, `Part bundle ${bundleId} armTypes`);
+  if (
+    parsed.length === 0 ||
+    parsed.some((value) => value !== "wide" && value !== "slim") ||
+    new Set(parsed).size !== parsed.length
+  ) {
+    throw snapshotCorrupt(bundleId, "部件集手臂模型无效");
+  }
+  return parsed as readonly ("wide" | "slim")[];
+}
+
+function intersectArmTypes(
+  collections: readonly (readonly ("wide" | "slim")[])[],
+): readonly ("wide" | "slim")[] {
+  return (["wide", "slim"] as const).filter((armType) =>
+    collections.every((collection) => collection.includes(armType)),
+  );
+}
+
+function defaultBundleName(kind: AggregateKind): string {
+  return { hair: "完整头发", clothing: "整套服装", accessory: "整组饰品" }[kind];
+}
+
+function aggregateCatalogGroups(
+  segmentation: SegmentationSnapshot,
+  bundles: readonly PartBundle[],
+): AnalyzedSkinCatalogItem["groups"] {
+  const buckets = new Map<
+    string,
+    {
+      readonly key: string;
+      readonly sourceGroupKey: string | null;
+      readonly kind: AggregateKind;
+      readonly components: Array<SegmentationSnapshot["components"][number]>;
+    }
+  >();
+  for (const component of segmentation.components) {
+    const kind = aggregateKindForCategory(component.category);
+    if (!kind) continue;
+    const sourceGroupKey =
+      kind === "clothing" ? component.relations.sameOutfitGroup : null;
+    const key =
+      sourceGroupKey === null
+        ? `aggregate.${kind}`
+        : `${kind}:${sourceGroupKey}`;
+    const bucket = buckets.get(key) ?? {
+      key,
+      sourceGroupKey,
+      kind,
+      components: [],
+    };
+    bucket.components.push(component);
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()]
+    .sort((left, right) => left.key.localeCompare(right.key))
+    .map((bucket) => {
+      const componentIds = bucket.components
+        .map((component) => component.instanceId)
+        .sort();
+      const exported = [...bundles]
+        .reverse()
+        .find(
+          (bundle) =>
+            bundle.kind === bucket.kind &&
+            bundle.sourceGroupKey === bucket.sourceGroupKey &&
+            bundle.members.length === componentIds.length &&
+            bundle.members.every((member) => componentIds.includes(member.part.sourceComponentId)),
+        );
+      return {
+        key: bucket.key,
+        sourceGroupKey: bucket.sourceGroupKey,
+        kind: bucket.kind,
+        displayName: defaultBundleName(bucket.kind),
+        componentIds,
+        componentCount: componentIds.length,
+        pixelCount: bucket.components.reduce(
+          (total, component) =>
+            total + component.spans.reduce(
+              (subtotal, span) => subtotal + span.x1 - span.x0 + 1,
+              0,
+            ),
+          0,
+        ),
+        exportedBundleId: exported?.id ?? null,
+      };
+    });
+}
+
 function validateText(label: string, value: string, maxLength: number): string {
   const normalized = value.trim();
   if (
@@ -3372,6 +4026,7 @@ function defaultId(kind: RevisionIdKind): string {
     asset: "asset",
     operation: "op",
     part: "part",
+    part_bundle: "partbundle",
     composition: "composition",
     composition_layer: "complayer",
   };

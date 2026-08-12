@@ -336,6 +336,102 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("exports fine components as one immutable aggregate bundle", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const first = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.top",
+            displayName: "上装",
+            category: "upper_clothing",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const second = await store.applyManualOperation(first.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "outfit.glove",
+            displayName: "手套",
+            category: "glove",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+        },
+      });
+      const bundle = await store.exportPartBundle(second.revision.id, {
+        name: "整套服装",
+        kind: "clothing",
+        componentIds: ["outfit.top", "outfit.glove"],
+      });
+
+      expect(bundle).toMatchObject({
+        name: "整套服装",
+        kind: "clothing",
+        sourceRevisionId: second.revision.id,
+        sourceGroupKey: null,
+        armTypes: ["wide", "slim"],
+      });
+      expect(bundle.members.map((member) => member.part.sourceComponentId)).toEqual([
+        "outfit.top",
+        "outfit.glove",
+      ]);
+      expect(store.listPartBundles("clothing", second.revision.id)).toEqual([bundle]);
+      expect(decodeSkinPng(await store.readPartBundlePreviewPng(bundle.id))).toMatchObject({
+        width: 64,
+        height: 64,
+      });
+      expect(getPixel(decodeSkinPng(await store.readPartBundleMannequinPng(bundle.id, "slim")), 10, 8)).toEqual([
+        226, 229, 224, 255,
+      ]);
+
+      const target = await store.importProject({
+        name: "Bundle target",
+        skinPng: encodeSkinPng(createRgbaImage(64, 64)),
+        armType: "slim",
+      });
+      const composition = await store.createComposition({
+        baseRevisionId: target.revision.id,
+      });
+      const detail = await store.addCompositionBundle(composition.composition.id, {
+        bundleId: bundle.id,
+      });
+      expect(detail.layers.map((layer) => layer.partId)).toEqual(
+        bundle.members.map((member) => member.partId),
+      );
+      expect(detail.layers.map((layer) => layer.position)).toEqual([0, 1]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects an invalid aggregate export without leaving atomic parts", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const edited = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "hair.main", displayName: "头发", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      await expect(
+        store.exportPartBundle(edited.revision.id, {
+          kind: "clothing",
+          componentIds: ["hair.main"],
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      expect(store.listParts()).toEqual([]);
+      expect(store.listPartBundles()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("previews conflicts before applying a part to a new skin revision", async () => {
     const { store } = await createStore();
 

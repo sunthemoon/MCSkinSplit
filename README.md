@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, and M6 adds conflict-aware composition.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, and M7 adds an analyzed-skin catalog plus reusable complete-category bundles.
 
 The current Studio can:
 
@@ -23,6 +23,10 @@ The current Studio can:
 - run the repository `mc-skin-segmenter` Skill through the local Codex CLI;
 - inspect job progress, attempts, validation artifacts, and review items in the Studio;
 - create an `ai_segment` Revision only after strict schema and pixel-ownership validation;
+- browse successful AI result Revisions as a persistent analyzed-skin catalog;
+- batch-export complete hair, clothing, or accessory groups without removing any of the 23 fine semantic categories;
+- inspect an immutable part bundle as a 2D texture or on a draggable Wide/Slim 3D mannequin;
+- add every member of a bundle to a Composition Project atomically while retaining independent fine-component layers;
 - arrange multiple saved parts in a persistent top-to-bottom layer stack;
 - inspect model, semantic-boundary, same-color, and hard per-pixel conflicts;
 - resolve hard conflicts through explicit layer order or individual pixel winners;
@@ -50,7 +54,7 @@ Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` 
 
 AI analysis defaults to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. It is optional: deterministic editing, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
 
-Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer, conflict, persistence, and real-skin test contracts.
+Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution. Complete-category bundles are a convenience layer over immutable fine parts, not flattened replacement textures. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer, conflict, persistence, and real-skin test contracts, and [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog, batch-export, and whole-bundle workflow.
 
 ## Verify
 
@@ -77,4 +81,4 @@ scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

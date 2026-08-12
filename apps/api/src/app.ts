@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   CODEX_CONFIG_DEFAULT_MODEL,
@@ -13,8 +14,10 @@ import {
   type AnalysisReasoningEffort,
 } from "@mc-skin-split/ai-worker";
 import {
+  AGGREGATE_KINDS,
   SEMANTIC_CATEGORIES,
   SkinPngError,
+  type AggregateKind,
   type ArmType,
   type ManualSemanticOperation,
 } from "@mc-skin-split/skin-core";
@@ -22,6 +25,7 @@ import {
   RevisionStore,
   RevisionStoreError,
   type BranchFromRevisionInput,
+  type PartBundle,
   type RevertRevisionInput,
 } from "@mc-skin-split/skin-revision";
 import Fastify, {
@@ -58,6 +62,10 @@ interface ComponentParams extends RevisionParams {
 
 interface PartParams {
   readonly partId: string;
+}
+
+interface PartBundleParams {
+  readonly bundleId: string;
 }
 
 interface CompositionParams {
@@ -99,8 +107,26 @@ interface ExportPartBody {
   readonly name?: string;
 }
 
+interface ExportPartBundleBody {
+  readonly name?: string;
+  readonly kind: AggregateKind;
+  readonly componentIds: readonly string[];
+  readonly sourceGroupKey?: string;
+}
+
 interface PartsQuery {
   readonly category?: string;
+}
+
+interface PartBundlesQuery {
+  readonly kind?: AggregateKind;
+  readonly sourceRevisionId?: string;
+}
+
+interface AnalyzedSkinsQuery {
+  readonly projectId?: string;
+  readonly kind?: AggregateKind;
+  readonly q?: string;
 }
 
 interface PartMannequinQuery {
@@ -127,6 +153,11 @@ interface CreateCompositionBody {
 
 interface AddCompositionPartBody {
   readonly partId: string;
+  readonly position?: number;
+}
+
+interface AddCompositionBundleBody {
+  readonly bundleId: string;
   readonly position?: number;
 }
 
@@ -498,6 +529,39 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.post<{ Params: RevisionParams; Body: ExportPartBundleBody }>(
+    "/api/revisions/:revisionId/export-bundle",
+    { schema: { body: exportPartBundleSchema } },
+    async (request, reply) => {
+      const bundle = await store.exportPartBundle(
+        request.params.revisionId,
+        request.body,
+      );
+      return reply.status(201).send({ bundle });
+    },
+  );
+
+  app.get<{ Querystring: AnalyzedSkinsQuery }>(
+    "/api/analyzed-skins",
+    { schema: { querystring: analyzedSkinsQuerySchema } },
+    async (request) => ({
+      analyzedSkins: await store.listAnalyzedSkins({
+        ...(request.query.projectId
+          ? { projectId: request.query.projectId }
+          : {}),
+        ...(request.query.kind ? { kind: request.query.kind } : {}),
+        ...(request.query.q ? { query: request.query.q } : {}),
+      }),
+    }),
+  );
+
+  app.get<{ Params: RevisionParams }>(
+    "/api/analyzed-skins/:revisionId",
+    async (request) => ({
+      analyzedSkin: await store.getAnalyzedSkin(request.params.revisionId),
+    }),
+  );
+
   app.get<{ Querystring: PartsQuery }>(
     "/api/parts",
     {
@@ -512,6 +576,54 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
       },
     },
     async (request) => ({ parts: store.listParts(request.query.category) }),
+  );
+
+  app.get<{ Querystring: PartBundlesQuery }>(
+    "/api/part-bundles",
+    { schema: { querystring: partBundlesQuerySchema } },
+    async (request) => ({
+      bundles: store.listPartBundles(
+        request.query.kind,
+        request.query.sourceRevisionId,
+      ),
+    }),
+  );
+
+  app.get<{ Params: PartBundleParams }>(
+    "/api/part-bundles/:bundleId",
+    async (request) => ({
+      bundle: store.getPartBundle(request.params.bundleId),
+    }),
+  );
+
+  app.get<{ Params: PartBundleParams }>(
+    "/api/part-bundles/:bundleId/preview.png",
+    async (request, reply) => {
+      const bundle = store.getPartBundle(request.params.bundleId);
+      const bytes = await store.readPartBundlePreviewPng(bundle.id);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", bundlePngEtag(bundle, "preview"))
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.get<{ Params: PartBundleParams; Querystring: PartMannequinQuery }>(
+    "/api/part-bundles/:bundleId/mannequin.png",
+    { schema: { querystring: armTypeQuerySchema } },
+    async (request, reply) => {
+      const bundle = store.getPartBundle(request.params.bundleId);
+      const armType =
+        request.query.armType ??
+        (bundle.armTypes.includes("slim") ? "slim" : "wide");
+      const bytes = await store.readPartBundleMannequinPng(bundle.id, armType);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", bundlePngEtag(bundle, `mannequin-${armType}`))
+        .send(Buffer.from(bytes));
+    },
   );
 
   app.get<{ Params: PartParams }>("/api/parts/:partId", async (request) => ({
@@ -636,6 +748,18 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     { schema: { body: addCompositionPartSchema } },
     async (request, reply) => {
       const detail = await store.addCompositionPart(
+        request.params.compositionId,
+        request.body,
+      );
+      return reply.status(201).send(detail);
+    },
+  );
+
+  app.post<{ Params: CompositionParams; Body: AddCompositionBundleBody }>(
+    "/api/compositions/:compositionId/apply-bundle",
+    { schema: { body: addCompositionBundleSchema } },
+    async (request, reply) => {
+      const detail = await store.addCompositionBundle(
         request.params.compositionId,
         request.body,
       );
@@ -864,6 +988,65 @@ const exportPartSchema = {
   },
 } as const;
 
+const aggregateKindSchema = {
+  type: "string",
+  enum: AGGREGATE_KINDS,
+} as const;
+
+const exportPartBundleSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["kind", "componentIds"],
+  properties: {
+    name: { type: "string", minLength: 1, maxLength: 120 },
+    kind: aggregateKindSchema,
+    componentIds: {
+      type: "array",
+      minItems: 1,
+      maxItems: 256,
+      uniqueItems: true,
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 100,
+        pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      },
+    },
+    sourceGroupKey: {
+      type: "string",
+      minLength: 1,
+      maxLength: 100,
+    },
+  },
+} as const;
+
+const analyzedSkinsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    projectId: { type: "string", minLength: 1, maxLength: 100 },
+    kind: aggregateKindSchema,
+    q: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const partBundlesQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: aggregateKindSchema,
+    sourceRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+  },
+} as const;
+
+const armTypeQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    armType: { type: "string", enum: ["wide", "slim"] },
+  },
+} as const;
+
 const applyPartSchema = {
   type: "object",
   additionalProperties: false,
@@ -902,6 +1085,16 @@ const addCompositionPartSchema = {
   required: ["partId"],
   properties: {
     partId: { type: "string", minLength: 1, maxLength: 100 },
+    position: { type: "integer", minimum: 0, maximum: 255 },
+  },
+} as const;
+
+const addCompositionBundleSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["bundleId"],
+  properties: {
+    bundleId: { type: "string", minLength: 1, maxLength: 100 },
     position: { type: "integer", minimum: 0, maximum: 255 },
   },
 } as const;
@@ -1066,6 +1259,21 @@ function getErrorCode(error: unknown): string {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求无法完成";
+}
+
+function bundlePngEtag(bundle: PartBundle, variant: string): string {
+  const signature = createHash("sha256")
+    .update(bundle.id)
+    .update("\0")
+    .update(variant)
+    .update("\0")
+    .update(
+      bundle.members
+        .map((member) => `${member.position}:${member.part.texture.sha256}`)
+        .join("\n"),
+    )
+    .digest("hex");
+  return `"sha256:${signature}"`;
 }
 
 function readBoundedInteger(

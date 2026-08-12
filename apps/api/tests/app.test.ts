@@ -470,6 +470,181 @@ describe("revision API", () => {
     });
   });
 
+  it("serves analyzed skins and applies immutable aggregate bundles atomically", async () => {
+    const provider = new ApiAiProvider("catalog-provider");
+    const { app } = await createApi([provider]);
+    const sourceProject = await createProject(app, "Catalog / 女仆皮肤");
+    const sourceImport = await importSkin(app, sourceProject.projectId);
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceImport.revisionId}/ai-analysis`,
+      payload: {
+        mode: "full",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: true,
+      },
+    });
+    expect(started.statusCode).toBe(202);
+    const jobId = started.json<{ job: { id: string } }>().job.id;
+    const job = await waitForAiJob(app, jobId);
+    const analyzedRevisionId = job.job.resultRevisionId!;
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/analyzed-skins?projectId=${sourceProject.projectId}&kind=hair&q=${encodeURIComponent("女仆")}`,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      analyzedSkins: [
+        {
+          project: { id: sourceProject.projectId, name: "Catalog / 女仆皮肤" },
+          revision: { id: analyzedRevisionId },
+          aiJob: { id: jobId, provider: "catalog-provider", model: "catalog-model" },
+          armType: "slim",
+          componentCount: 1,
+          groups: [
+            {
+              key: "aggregate.hair",
+              kind: "hair",
+              componentIds: ["hair.main"],
+              exportedBundleId: null,
+            },
+          ],
+        },
+      ],
+    });
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/analyzed-skins/${encodeURIComponent(analyzedRevisionId)}`,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      analyzedSkin: { revision: { id: analyzedRevisionId } },
+    });
+
+    const invalidKind = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${analyzedRevisionId}/export-bundle`,
+      payload: { kind: "face", componentIds: ["hair.main"] },
+    });
+    expect(invalidKind.statusCode).toBe(400);
+    expect(invalidKind.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+    const invalidGroup = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${analyzedRevisionId}/export-bundle`,
+      payload: {
+        kind: "hair",
+        componentIds: ["hair.main"],
+        sourceGroupKey: "outfit.other",
+      },
+    });
+    expect(invalidGroup.statusCode).toBe(400);
+    expect(invalidGroup.json()).toMatchObject({ error: { code: "INVALID_INPUT" } });
+
+    const exported = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${analyzedRevisionId}/export-bundle`,
+      payload: {
+        name: "AI 完整头发",
+        kind: "hair",
+        componentIds: ["hair.main"],
+      },
+    });
+    expect(exported.statusCode).toBe(201);
+    const bundle = exported.json<{
+      bundle: { id: string; members: readonly { partId: string }[] };
+    }>().bundle;
+    expect(bundle.members).toHaveLength(1);
+
+    const filteredBundles = await app.inject({
+      method: "GET",
+      url: `/api/part-bundles?kind=hair&sourceRevisionId=${analyzedRevisionId}`,
+    });
+    expect(filteredBundles.statusCode).toBe(200);
+    expect(filteredBundles.json()).toMatchObject({
+      bundles: [{ id: bundle.id, name: "AI 完整头发", kind: "hair" }],
+    });
+    const bundleDetail = await app.inject({
+      method: "GET",
+      url: `/api/part-bundles/${encodeURIComponent(bundle.id)}`,
+    });
+    expect(bundleDetail.statusCode).toBe(200);
+    expect(bundleDetail.json()).toMatchObject({ bundle: { id: bundle.id } });
+
+    const preview = await app.inject({
+      method: "GET",
+      url: `/api/part-bundles/${bundle.id}/preview.png`,
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.headers["cache-control"]).toContain("immutable");
+    expect(preview.headers.etag).toMatch(/^"sha256:[0-9a-f]{64}"$/);
+    expect(decodeSkinPng(preview.rawPayload)).toMatchObject({ width: 64, height: 64 });
+    const mannequin = await app.inject({
+      method: "GET",
+      url: `/api/part-bundles/${bundle.id}/mannequin.png?armType=slim`,
+    });
+    expect(mannequin.statusCode).toBe(200);
+    expect(mannequin.headers["cache-control"]).toContain("immutable");
+    expect(mannequin.headers.etag).not.toBe(preview.headers.etag);
+    expect(decodeSkinPng(mannequin.rawPayload)).toMatchObject({ width: 64, height: 64 });
+
+    const targetProject = await createProject(app, "Bundle target");
+    const target = await importSkinFromPath(
+      app,
+      targetProject.projectId,
+      TARGET_SKIN_PATH,
+    );
+    const compositionResponse = await app.inject({
+      method: "POST",
+      url: "/api/compositions",
+      payload: { baseRevisionId: target.revisionId },
+    });
+    const compositionId = compositionResponse.json<{
+      composition: { id: string };
+    }>().composition.id;
+    const applied = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/apply-bundle`,
+      payload: { bundleId: bundle.id },
+    });
+    expect(applied.statusCode).toBe(201);
+    expect(applied.json()).toMatchObject({
+      layers: [{ partId: bundle.members[0]!.partId, position: 0 }],
+      report: { layerCount: 1 },
+    });
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/compositions/${compositionId}/apply-bundle`,
+      payload: { bundleId: bundle.id },
+    });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toMatchObject({ error: { code: "CONFLICT" } });
+    const afterFailure = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${compositionId}`,
+    });
+    expect(afterFailure.json()).toMatchObject({
+      layers: [{ partId: bundle.members[0]!.partId, position: 0 }],
+      report: { layerCount: 1 },
+    });
+
+    const refreshedCatalog = await app.inject({
+      method: "GET",
+      url: `/api/analyzed-skins/${analyzedRevisionId}`,
+    });
+    expect(refreshedCatalog.json()).toMatchObject({
+      analyzedSkin: {
+        groups: [{ kind: "hair", exportedBundleId: bundle.id }],
+      },
+    });
+  });
+
   it("returns stable client errors for bad PNG data and duplicate imports", async () => {
     const { app } = await createApi();
     const project = await createProject(app, "Error handling");

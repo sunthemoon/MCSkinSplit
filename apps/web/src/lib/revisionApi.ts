@@ -1,4 +1,5 @@
 import type {
+  AggregateKind,
   ArmType,
   ManualSemanticOperation,
   PartApplicationReport,
@@ -83,6 +84,58 @@ export interface ApiPart {
   readonly armType: ArmType;
   readonly manifest: PartManifest;
   readonly createdAt: string;
+}
+
+export interface ApiPartBundleMember {
+  readonly bundleId: string;
+  readonly partId: string;
+  readonly position: number;
+  readonly part: ApiPart;
+  readonly createdAt: string;
+}
+
+export interface ApiPartBundle {
+  readonly id: string;
+  readonly sourceProjectId: string;
+  readonly sourceRevisionId: string;
+  readonly name: string;
+  readonly kind: AggregateKind;
+  readonly sourceGroupKey: string | null;
+  readonly armTypes: readonly ArmType[];
+  readonly members: readonly ApiPartBundleMember[];
+  readonly createdAt: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface ApiAnalyzedSkinGroup {
+  readonly key: string;
+  readonly sourceGroupKey: string | null;
+  readonly kind: AggregateKind;
+  readonly displayName: string;
+  readonly componentIds: readonly string[];
+  readonly componentCount: number;
+  readonly pixelCount: number;
+  readonly exportedBundleId: string | null;
+}
+
+export interface ApiAnalyzedSkin {
+  readonly project: Pick<ApiProject, "id" | "name">;
+  readonly revision: Pick<
+    ApiRevision,
+    "id" | "branchId" | "branchName" | "sequence" | "createdAt"
+  >;
+  readonly aiJob: {
+    readonly id: string;
+    readonly provider: string;
+    readonly model: string;
+    readonly finishedAt: string;
+  };
+  readonly armType: ArmType;
+  readonly componentCount: number;
+  readonly unknownPixelCount: number;
+  readonly reviewItemCount: number;
+  readonly groups: readonly ApiAnalyzedSkinGroup[];
+  readonly skinUrl: string;
 }
 
 export interface ApiPartPreview {
@@ -510,6 +563,103 @@ export async function listParts(
   return body.parts;
 }
 
+export async function listAnalyzedSkins(
+  options: {
+    readonly projectId?: string;
+    readonly kind?: AggregateKind;
+    readonly query?: string;
+  } = {},
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiAnalyzedSkin[]> {
+  const query = new URLSearchParams();
+  if (options.projectId) query.set("projectId", options.projectId);
+  if (options.kind) query.set("kind", options.kind);
+  if (options.query) query.set("q", options.query);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const body = await requestJson<{
+    readonly analyzedSkins: readonly ApiAnalyzedSkin[];
+  }>(`/api/analyzed-skins${suffix}`, undefined, fetcher);
+  return body.analyzedSkins;
+}
+
+export async function getAnalyzedSkin(
+  revisionId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAnalyzedSkin> {
+  const body = await requestJson<{ readonly analyzedSkin: ApiAnalyzedSkin }>(
+    `/api/analyzed-skins/${encodeURIComponent(revisionId)}`,
+    undefined,
+    fetcher,
+  );
+  return body.analyzedSkin;
+}
+
+export async function exportRevisionBundle(
+  revisionId: string,
+  input: {
+    readonly name?: string;
+    readonly kind: AggregateKind;
+    readonly componentIds: readonly string[];
+    readonly sourceGroupKey?: string;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartBundle> {
+  const body = await requestJson<{ readonly bundle: ApiPartBundle }>(
+    `/api/revisions/${encodeURIComponent(revisionId)}/export-bundle`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+  return body.bundle;
+}
+
+export async function listPartBundles(
+  options: {
+    readonly kind?: AggregateKind;
+    readonly sourceRevisionId?: string;
+  } = {},
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiPartBundle[]> {
+  const query = new URLSearchParams();
+  if (options.kind) query.set("kind", options.kind);
+  if (options.sourceRevisionId) {
+    query.set("sourceRevisionId", options.sourceRevisionId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const body = await requestJson<{ readonly bundles: readonly ApiPartBundle[] }>(
+    `/api/part-bundles${suffix}`,
+    undefined,
+    fetcher,
+  );
+  return body.bundles;
+}
+
+export async function loadPartBundle(
+  bundleId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartBundle> {
+  const body = await requestJson<{ readonly bundle: ApiPartBundle }>(
+    `/api/part-bundles/${encodeURIComponent(bundleId)}`,
+    undefined,
+    fetcher,
+  );
+  return body.bundle;
+}
+
+export function partBundlePreviewUrl(bundleId: string): string {
+  return `/api/part-bundles/${encodeURIComponent(bundleId)}/preview.png`;
+}
+
+export function partBundleMannequinUrl(
+  bundleId: string,
+  armType: ArmType,
+): string {
+  return `/api/part-bundles/${encodeURIComponent(bundleId)}/mannequin.png?armType=${armType}`;
+}
+
 export async function previewRevisionPart(
   revisionId: string,
   partId: string,
@@ -603,6 +753,26 @@ export function addCompositionPart(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ partId, ...(position === undefined ? {} : { position }) }),
+    },
+    fetcher,
+  );
+}
+
+export function applyCompositionBundle(
+  compositionId: string,
+  bundleId: string,
+  position?: number,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompositionDetail> {
+  return requestJson(
+    `/api/compositions/${encodeURIComponent(compositionId)}/apply-bundle`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bundleId,
+        ...(position === undefined ? {} : { position }),
+      }),
     },
     fetcher,
   );

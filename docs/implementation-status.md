@@ -13,6 +13,7 @@ Last updated: 2026-08-12
 | M4 manual semantic editor and parts | Complete | Manual segmentation and lossless part reuse |
 | M5 AI Skill and worker | Complete | Schema-valid proposals create revisions only after validation |
 | M6 compositor | Complete | Explicit conflicts and deterministic six-skin composition |
+| M7 analyzed-skin catalog and complete-category bundles | Complete | Immutable atomic bundles, derived previews, and atomic whole-bundle composition |
 
 ## M0 baseline
 
@@ -354,3 +355,68 @@ Last updated: 2026-08-12
   The observed `spawn EPERM` occurred only when Vitest tried to create test workers
   inside the restricted Codex command sandbox; the same suites passed in a normal
   Windows process.
+
+## M7 deliverables
+
+- Kept the fixed 23-category semantic taxonomy intact and added the orthogonal
+  aggregate kinds `hair`, `clothing`, and `accessory` for complete-category
+  browsing and reuse.
+- Added a catalog derived from successful AI Jobs and their immutable result
+  Revisions. It exposes Project/Revision identity, provider/model provenance,
+  arm layout, review and coverage counts, source skin, and deterministic aggregate
+  groups.
+- Added SQLite-backed immutable part Bundles. A batch export creates ordinary
+  five-file part assets for every fine component and stores only their ordered
+  Bundle membership, source, aggregate kind, model intersection, and optional
+  outfit-group identity.
+- Added integrity-checked combined 2D previews and neutral Wide/Slim mannequin
+  previews without creating mutable or flattened Bundle textures.
+- Added atomic whole-Bundle insertion into a Composition Project. All members are
+  validated before the draft layer set changes, and successful insertion retains
+  every member as an independently adjustable fine-part layer.
+- Added the analyzed-skin catalog and complete-category shelf to the Studio,
+  including filtering, source Revision loading, one-action export, direct
+  composition add, and draggable idle/walk 3D inspection.
+- Documented the stable workflow in
+  [`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md).
+
+## M7 verification evidence
+
+- Core test coverage checks the additive aggregate mappings while retaining all
+  existing fine taxonomy identifiers.
+- Revision-service tests exercise multi-component batch export, immutable member
+  provenance, derived Bundle previews, list/read persistence, transaction cleanup,
+  and atomic insertion as independently addressable composition layers.
+- API tests cover catalog filters and detail loading, strict export validation,
+  Bundle listing/detail/PNG routes, whole-Bundle composition add, duplicate-member
+  rejection, and exported-group discovery in the catalog.
+- Web client tests cover encoded catalog and Bundle URLs, query parameters,
+  batch-export request bodies, preview helpers, and whole-Bundle composition calls.
+- `pnpm verify` passes fixture drift detection, TypeScript checks, every Vitest
+  suite, and all production builds. Vite retains the known non-blocking
+  `skinview3d` chunk-size warning.
+- Browser smoke testing loaded the real-skin Studio and reached a ready Slim/Alex
+  3D preview. The immutable Revision timeline remained the first body section,
+  followed by the analyzed-skin catalog; the complete-category shelf remained
+  separate from the existing atomic-part picker.
+- Responsive browser inspection confirmed the 1600 px desktop grids and the
+  sub-700 px stacked layout without element overflow. Browser logs contained only
+  the known Chrome-extension message-channel noise and no application stack or
+  failed local API response.
+
+## M7 known boundaries
+
+- The catalog contains successful AI result Revisions, not every imported or
+  manually edited Revision. It derives from authoritative Job and Revision data
+  rather than duplicating skin files in a separate catalog store.
+- “Complete” means all classified components in the aggregate group. M7 does not
+  infer hidden pixels, repair incomplete parts, erase target-skin remnants, or fill
+  newly exposed base pixels.
+- Clothing respects confirmed `sameOutfitGroup` values; ungrouped clothing is
+  collected into the Revision's default clothing group. Hair and accessories use
+  their aggregate kind for grouping.
+- Bundle previews reject different-color overlap between members. Target-skin and
+  cross-layer conflicts remain governed by the existing compositor report and
+  explicit resolution rules.
+- Bundles are immutable snapshots of one source Revision. Later corrections create
+  new parts and a new Bundle instead of rewriting prior library data.

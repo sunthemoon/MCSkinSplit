@@ -26,6 +26,12 @@ The fixed taxonomy contains skin, face, hair, clothing, footwear, accessories,
 and `unknown` categories. Stable machine identifiers are stored separately from
 Chinese display labels, so UI text can change without changing saved semantics.
 
+The complete-category kinds `hair`, `clothing`, and `accessory` are an additive
+browsing and reuse layer. They map the existing fine components into convenient
+groups; they do not replace or remove any of the fixed 23 categories. A saved
+clothing bundle can therefore be added in one action and still expose its upper
+clothing, sleeves, gloves, legwear, shoes, and other members as independent parts.
+
 ## Manual operations
 
 The editor supports five deterministic operations:
@@ -89,6 +95,22 @@ model, then copies non-transparent part pixels allowed by the immutable write ma
 The generated preview is derived data; it does not add a sixth stored part file or
 change the original texture.
 
+## Complete-category bundles
+
+M7 can batch-export confirmed components from one Revision as an immutable part
+bundle. Every member remains a normal five-file part asset with its own source
+component, texture, mask, manifest, and hashes. The bundle stores only ordered
+member references, source Revision, aggregate kind, model compatibility, and an
+optional semantic outfit-group key. It never replaces the fine components with a
+flattened mutable texture.
+
+Hair and accessories are collected by aggregate kind. Clothing components with a
+confirmed `sameOutfitGroup` value are kept in that outfit group; ungrouped clothing
+forms the Revision's default clothing group. The derived 2D and neutral-mannequin
+previews combine verified member pixels at read time. A different-color overlap
+between members is treated as corrupt bundle data instead of being silently
+flattened.
+
 ## Conflict preview and application
 
 Calling apply without a strategy performs a read-only preview. It reports model
@@ -112,14 +134,23 @@ ownership, and written part pixels receive a provenance-backed component.
 ```text
 POST /api/revisions/:revisionId/operations
 POST /api/revisions/:revisionId/components/:componentId/export-part
+POST /api/revisions/:revisionId/export-bundle
 GET  /api/parts
 GET  /api/parts/:partId
 GET  /api/parts/:partId/texture.png
 GET  /api/parts/:partId/preview.png
 GET  /api/parts/:partId/mannequin.png?armType=slim
+GET  /api/part-bundles
+GET  /api/part-bundles/:bundleId
+GET  /api/part-bundles/:bundleId/preview.png
+GET  /api/part-bundles/:bundleId/mannequin.png?armType=slim
 POST /api/revisions/:revisionId/apply-part
 ```
 
 `GET /api/parts` accepts an optional `category` query. Send only `{ "partId":
 "..." }` to preview application. Add `"strategy": "use_part"` or
 `"strategy": "keep_base"` to create a Revision.
+
+The complete catalog and bundle workflow, including integrity and composition
+boundaries, is documented in
+[`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md).
