@@ -61,6 +61,8 @@ describe("AiJobManager", () => {
         "preparing",
         "run_started",
         "running",
+        "provider_session",
+        "provider_output",
         "validating",
         "succeeded",
       ]),
@@ -313,6 +315,16 @@ class ScriptedProvider implements SkinSemanticAiProvider {
 
   async analyze(input: ProviderAnalysisInput): Promise<ProviderAnalysisResult> {
     this.calls += 1;
+    input.onProgress?.({
+      kind: "session",
+      status: "started",
+      message: "Codex 会话已建立",
+    });
+    input.onProgress?.({
+      kind: "output",
+      status: "completed",
+      message: "候选分类提案已生成",
+    });
     return {
       proposal: await this.response(input),
       rawEvents: `${JSON.stringify({ type: "thread.started", thread_id: `thread_${this.calls}` })}\n`,

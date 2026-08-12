@@ -59,6 +59,8 @@ The adapter:
   of executing a batch file through a shell;
 - captures thread ID, token usage, stdout events, stderr, and final output with a
   16 MiB combined log limit;
+- projects JSONL stdout incrementally into safe Job events for the Studio process
+  display while the provider is still running;
 - first requests schema-constrained output and, only for a structured-output
   transport/capability failure, may retry transport without `--output-schema`.
 
@@ -71,6 +73,20 @@ authentication and custom provider settings work. The model value
 still has a private working directory and explicit sandbox. Set
 `AI_IGNORE_USER_CONFIG=true` only when an independently authenticated default Codex
 configuration is available.
+
+## Live process display
+
+While a Job is active, the provider converts supported Codex JSONL lifecycle events
+into generic session, turn, tool, proposal, usage, fallback, and error messages. The
+worker persists those messages in the existing Job event stream, and the Studio
+refreshes the Job every 1.5 seconds, renders events in chronological order, and
+automatically follows newly appended entries.
+
+The projection deliberately excludes `reasoning` items and never copies command
+text, search queries, agent-message bodies, or other raw item payloads into the HTTP
+event response. Complete JSONL remains available only as the local `raw_events`
+audit asset. Progress reporting is telemetry: a display or persistence callback
+failure cannot change the provider Run result.
 
 ## Proposal validation
 

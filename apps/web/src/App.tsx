@@ -260,6 +260,7 @@ export function App() {
   const requestIdRef = useRef(0);
   const aiJobDetailRef = useRef<ApiAiJobDetail | null>(null);
   const handledAiJobsRef = useRef(new Set<string>());
+  const aiEventLogRef = useRef<HTMLOListElement>(null);
 
   const releaseObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -624,6 +625,12 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [aiJobDetail?.job, synchronizeAiJob]);
+
+  useEffect(() => {
+    const log = aiEventLogRef.current;
+    if (!log) return;
+    log.scrollTop = log.scrollHeight;
+  }, [aiJobDetail?.events.length, aiJobDetail?.job.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1637,7 +1644,7 @@ export function App() {
             </div>
           </form>
 
-          <article className="ai-job-card" aria-live="polite">
+          <article className="ai-job-card">
             {aiJob ? (
               <>
                 <div className="ai-job-status">
@@ -1690,10 +1697,28 @@ export function App() {
                   ))}
                 </div>
 
-                <ol className="ai-event-log">
-                  {aiJobDetail?.events.slice(-6).toReversed().map((event) => (
-                    <li key={event.id}>
-                      <time dateTime={event.createdAt}>{formatRevisionTime(event.createdAt)}</time>
+                <div className="ai-live-stream-heading">
+                  <span>LIVE PROCESS</span>
+                  <small>
+                    {aiJobRunning ? "实时刷新 · 自动跟随" : "运行记录"}
+                  </small>
+                </div>
+                <ol
+                  className="ai-event-log"
+                  ref={aiEventLogRef}
+                  aria-label="AI 识别实时过程"
+                  aria-live="polite"
+                  aria-relevant="additions"
+                >
+                  {aiJobDetail?.events.map((event) => (
+                    <li
+                      key={event.id}
+                      data-kind={aiEventKind(event.eventType)}
+                    >
+                      <time dateTime={event.createdAt}>
+                        {formatEventTime(event.createdAt)}
+                      </time>
+                      <i aria-hidden="true" />
                       <span>{event.message}</span>
                     </li>
                   ))}
@@ -2725,4 +2750,35 @@ function formatRevisionTime(value: string): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+function formatEventTime(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function aiEventKind(
+  eventType: string,
+): "stage" | "tool" | "output" | "warning" | "error" {
+  if (eventType === "failed" || eventType === "cancelled" || eventType === "provider_error") {
+    return "error";
+  }
+  if (eventType === "provider_warning") {
+    return "warning";
+  }
+  if (eventType === "provider_tool") {
+    return "tool";
+  }
+  if (eventType === "provider_output" || eventType === "provider_usage") {
+    return "output";
+  }
+  return "stage";
 }

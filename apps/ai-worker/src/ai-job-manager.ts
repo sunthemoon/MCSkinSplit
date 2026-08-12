@@ -302,6 +302,7 @@ export class AiJobManager {
           attempt === 1 ? "Codex 正在分析皮肤" : "Codex 正在修复无效提案",
         );
         this.assertNotCancelled(jobId, signal);
+        const progressRun = currentRun;
         const providerResult = await provider.analyze({
           jobId,
           runId: currentRun.id,
@@ -310,6 +311,23 @@ export class AiJobManager {
           pack,
           ...(repairReport ? { repairReport } : {}),
           signal,
+          onProgress: (event) => {
+            try {
+              this.jobStore.appendEvent(
+                jobId,
+                `provider_${event.kind}`,
+                event.message,
+                {
+                  runId: progressRun.id,
+                  attempt,
+                  kind: event.kind,
+                  ...(event.status ? { status: event.status } : {}),
+                },
+              );
+            } catch {
+              // Progress telemetry must never decide the analysis result.
+            }
+          },
         });
         await verifyAnalysisPackIntegrity(pack);
         await Promise.all([

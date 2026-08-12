@@ -385,6 +385,24 @@ export class AiJobStore {
     ).map(mapEvent);
   }
 
+  appendEvent(
+    jobId: string,
+    eventType: string,
+    message: string,
+    data: Readonly<Record<string, unknown>> = {},
+  ): void {
+    this.getJob(jobId);
+    if (!/^[a-z][a-z0-9_]{1,60}$/u.test(eventType)) {
+      throw new AiJobStoreError("INVALID_AI_JOB", "AI event type 格式无效", 500);
+    }
+    this.appendEventUnlocked(
+      jobId,
+      eventType,
+      visibleText("event message", message, 500),
+      data,
+    );
+  }
+
   failInterruptedJobs(): number {
     const rows = this.database
       .prepare("SELECT id FROM ai_job WHERE status IN ('queued', 'preparing', 'running', 'validating')")

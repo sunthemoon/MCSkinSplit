@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CODEX_CONFIG_DEFAULT_MODEL,
   CodexExecProvider,
+  projectCodexProgressEvent,
   resolveCommandInvocation,
   type CommandExecutionInput,
 } from "../src/codex-exec-provider";
@@ -118,6 +119,7 @@ describe("CodexExecProvider", () => {
       mkdir(resolve(root, "schema"), { recursive: true }),
     ]);
     const invocations: CommandExecutionInput[] = [];
+    const progress: string[] = [];
     const provider = new CodexExecProvider({
       command: "codex-test",
       execute: async (input) => {
@@ -149,6 +151,7 @@ describe("CodexExecProvider", () => {
       attempt: 1,
       model: CODEX_CONFIG_DEFAULT_MODEL,
       pack: minimalPack(root),
+      onProgress: (event) => progress.push(event.message),
     });
 
     expect(invocations).toHaveLength(2);
@@ -156,6 +159,83 @@ describe("CodexExecProvider", () => {
     expect(invocations[1]?.args).not.toContain("--output-schema");
     expect(result.proposal).toMatchObject({ marker: "fallback" });
     expect(result.rawEvents).toContain("provider.schema_fallback");
+    expect(progress).toContain("结构化输出不可用，已切换本地 JSON 校验");
+  });
+
+  it("streams safe progress projections and excludes reasoning content", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "mcskinsplit-progress-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      mkdir(resolve(root, "output"), { recursive: true }),
+      mkdir(resolve(root, "schema"), { recursive: true }),
+    ]);
+    const progress: Array<{ readonly kind: string; readonly message: string }> = [];
+    const provider = new CodexExecProvider({
+      command: "codex-test",
+      execute: async (input) => {
+        const outputIndex = input.args.indexOf("--output-last-message");
+        await writeFile(
+          input.args[outputIndex + 1]!,
+          JSON.stringify({ schemaVersion: "1.0" }),
+          "utf8",
+        );
+        const lines = [
+          { type: "thread.started", thread_id: "thread_stream" },
+          { type: "turn.started" },
+          {
+            type: "item.completed",
+            item: { type: "reasoning", text: "private chain of thought" },
+          },
+          {
+            type: "item.started",
+            item: { type: "command_execution", command: "inspect skin" },
+          },
+          {
+            type: "item.completed",
+            item: { type: "agent_message", text: "full proposal details" },
+          },
+          {
+            type: "turn.completed",
+            usage: { input_tokens: 12, output_tokens: 5 },
+          },
+        ].map((event) => JSON.stringify(event));
+        input.onStdout?.(`${lines[0]}\n${lines[1]}\n${lines[2]}\n${lines[3]!.slice(0, 18)}`);
+        input.onStdout?.(`${lines[3]!.slice(18)}\n${lines[4]}\n${lines[5]}\n`);
+        return { exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
+      },
+    });
+
+    await provider.analyze({
+      jobId: "job_progress",
+      runId: "run_progress",
+      attempt: 1,
+      model: CODEX_CONFIG_DEFAULT_MODEL,
+      pack: minimalPack(root),
+      onProgress: (event) => {
+        progress.push(event);
+        if (event.kind === "turn") throw new Error("observer failed");
+      },
+    });
+
+    expect(progress).toEqual([
+      { kind: "session", status: "started", message: "Codex 会话已建立" },
+      { kind: "turn", status: "started", message: "模型开始分析候选区域" },
+      { kind: "tool", status: "started", message: "正在运行本地分析工具" },
+      { kind: "output", status: "completed", message: "候选分类提案已生成" },
+      { kind: "usage", status: "completed", message: "模型分析完成 · 输入 12 / 输出 5 tokens" },
+    ]);
+    expect(JSON.stringify(progress)).not.toContain("private chain of thought");
+    expect(JSON.stringify(progress)).not.toContain("full proposal details");
+  });
+
+  it("ignores malformed, unknown, and reasoning JSONL events", () => {
+    expect(projectCodexProgressEvent("not json")).toBeNull();
+    expect(
+      projectCodexProgressEvent(
+        JSON.stringify({ type: "item.started", item: { type: "reasoning" } }),
+      ),
+    ).toBeNull();
+    expect(projectCodexProgressEvent(JSON.stringify({ type: "unknown" }))).toBeNull();
   });
 });
 

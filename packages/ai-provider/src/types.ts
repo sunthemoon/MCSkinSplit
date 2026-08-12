@@ -103,6 +103,22 @@ export interface ProviderAnalysisInput {
   readonly pack: AnalysisPack;
   readonly repairReport?: ProposalValidationReport;
   readonly signal?: AbortSignal;
+  readonly onProgress?: (event: ProviderProgressEvent) => void;
+}
+
+export type ProviderProgressKind =
+  | "session"
+  | "turn"
+  | "tool"
+  | "output"
+  | "usage"
+  | "warning"
+  | "error";
+
+export interface ProviderProgressEvent {
+  readonly kind: ProviderProgressKind;
+  readonly message: string;
+  readonly status?: "started" | "completed" | "failed";
 }
 
 export interface ProviderAnalysisResult {

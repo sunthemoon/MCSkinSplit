@@ -1,14 +1,17 @@
 import { spawn } from "node:child_process";
 import { access, readFile, rm } from "node:fs/promises";
 import { resolve, win32 } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type {
   ProviderAnalysisInput,
   ProviderAnalysisResult,
+  ProviderProgressEvent,
   SkinSemanticAiProvider,
 } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+const MAX_PROGRESS_LINE_CHARS = 1024 * 1024;
 export const CODEX_CONFIG_DEFAULT_MODEL = "codex-config-default";
 
 export class AiProviderError extends Error {
@@ -42,6 +45,7 @@ export interface CommandExecutionInput {
   readonly timeoutMs: number;
   readonly stdin?: string;
   readonly signal?: AbortSignal;
+  readonly onStdout?: (chunk: string) => void;
 }
 
 export interface CommandExecutionResult {
@@ -128,15 +132,32 @@ export class CodexExecProvider implements SkinSemanticAiProvider {
 
     const prompt = buildPrompt(input);
     const startedAt = Date.now();
-    const execute = async (commandArgs: readonly string[]) =>
-      await this.execute({
-        command: this.command,
-        args: commandArgs,
-        cwd: root,
-        timeoutMs: Math.max(1_000, this.timeoutMs - (Date.now() - startedAt)),
-        stdin: prompt,
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
+    const execute = async (commandArgs: readonly string[]) => {
+      const progress = createCodexProgressStream(input.onProgress);
+      let streamed = false;
+      let executed: CommandExecutionResult;
+      try {
+        executed = await this.execute({
+          command: this.command,
+          args: commandArgs,
+          cwd: root,
+          timeoutMs: Math.max(1_000, this.timeoutMs - (Date.now() - startedAt)),
+          stdin: prompt,
+          ...(input.signal ? { signal: input.signal } : {}),
+          onStdout: (chunk) => {
+            streamed = true;
+            progress.push(chunk);
+          },
+        });
+      } finally {
+        if (streamed) progress.flush();
+      }
+      if (!streamed) {
+        progress.push(executed.stdout);
+        progress.flush();
+      }
+      return executed;
+    };
 
     let executed: CommandExecutionResult;
     try {
@@ -146,6 +167,11 @@ export class CodexExecProvider implements SkinSemanticAiProvider {
         this.allowSchemaFallback &&
         isStructuredOutputTransportFailure(executed)
       ) {
+        emitProgress(input.onProgress, {
+          kind: "warning",
+          status: "completed",
+          message: "结构化输出不可用，已切换本地 JSON 校验",
+        });
         await rm(outputPath, { force: true });
         const fallback = await execute(removeOptionWithValue(args, "--output-schema"));
         executed = {
@@ -242,6 +268,7 @@ export async function executeCommand(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const stdoutDecoder = new StringDecoder("utf8");
     let captured = 0;
     let timedOut = false;
     let cancelled = false;
@@ -260,11 +287,17 @@ export async function executeCommand(
       // Process exit and stderr provide the actionable failure information.
     });
     child.stdin.end(input.stdin ?? "");
-    child.stdout.on("data", (chunk: Buffer) => capture(chunk, stdout));
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (!capture(chunk, stdout)) return;
+      const decoded = stdoutDecoder.write(chunk);
+      if (decoded) input.onStdout?.(decoded);
+    });
     child.stderr.on("data", (chunk: Buffer) => capture(chunk, stderr));
     child.once("error", finishError);
     child.once("close", (code) => {
       cleanup();
+      const stdoutTail = stdoutDecoder.end();
+      if (stdoutTail) input.onStdout?.(stdoutTail);
       if (timedOut) {
         reject(new AiProviderError("AI_TIMEOUT", `Codex CLI 超过 ${input.timeoutMs} ms`));
       } else if (cancelled || input.signal?.aborted) {
@@ -278,14 +311,15 @@ export async function executeCommand(
       }
     });
 
-    function capture(chunk: Buffer, target: Buffer[]): void {
+    function capture(chunk: Buffer, target: Buffer[]): boolean {
       captured += chunk.byteLength;
       if (captured > MAX_CAPTURE_BYTES) {
         terminate();
         finishError(new AiProviderError("AI_OUTPUT_TOO_LARGE", "Codex CLI 日志超过 16 MiB"));
-        return;
+        return false;
       }
       target.push(Buffer.from(chunk));
+      return true;
     }
 
     function finishError(error: Error): void {
@@ -298,6 +332,128 @@ export async function executeCommand(
       input.signal?.removeEventListener("abort", abort);
     }
   });
+}
+
+interface CodexProgressStream {
+  push(chunk: string): void;
+  flush(): void;
+}
+
+function createCodexProgressStream(
+  onProgress?: (event: ProviderProgressEvent) => void,
+): CodexProgressStream {
+  let pending = "";
+  const consume = (line: string) => {
+    if (line.length > MAX_PROGRESS_LINE_CHARS) return;
+    const event = projectCodexProgressEvent(line);
+    if (event) emitProgress(onProgress, event);
+  };
+  return {
+    push(chunk) {
+      pending += chunk;
+      if (!pending.includes("\n") && pending.length > MAX_PROGRESS_LINE_CHARS) {
+        pending = "";
+        return;
+      }
+      const lines = pending.split(/\r?\n/u);
+      pending = lines.pop() ?? "";
+      for (const line of lines) consume(line);
+    },
+    flush() {
+      if (pending.trim()) consume(pending);
+      pending = "";
+    },
+  };
+}
+
+function emitProgress(
+  onProgress: ((event: ProviderProgressEvent) => void) | undefined,
+  event: ProviderProgressEvent,
+): void {
+  try {
+    onProgress?.(event);
+  } catch {
+    // Progress observers are telemetry only and must not decide the run result.
+  }
+}
+
+export function projectCodexProgressEvent(
+  line: string,
+): ProviderProgressEvent | null {
+  let event: Readonly<Record<string, unknown>>;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    if (!isRecord(parsed)) return null;
+    event = parsed;
+  } catch {
+    return null;
+  }
+
+  if (event.type === "thread.started") {
+    return { kind: "session", status: "started", message: "Codex 会话已建立" };
+  }
+  if (event.type === "turn.started") {
+    return { kind: "turn", status: "started", message: "模型开始分析候选区域" };
+  }
+  if (event.type === "turn.completed") {
+    return {
+      kind: "usage",
+      status: "completed",
+      message: formatUsageMessage(event.usage),
+    };
+  }
+  if (event.type === "turn.failed" || event.type === "error") {
+    return { kind: "error", status: "failed", message: "Codex 报告运行错误" };
+  }
+  if (event.type === "provider.schema_fallback") {
+    return {
+      kind: "warning",
+      status: "completed",
+      message: "结构化输出不可用，已切换本地 JSON 校验",
+    };
+  }
+  if (event.type !== "item.started" && event.type !== "item.completed") {
+    return null;
+  }
+
+  const item = isRecord(event.item) ? event.item : null;
+  const itemType = item?.type;
+  if (typeof itemType !== "string" || itemType === "reasoning") return null;
+  const started = event.type === "item.started";
+  const status = started ? "started" : item?.status === "failed" ? "failed" : "completed";
+  const messages: Readonly<Record<string, readonly [string, string]>> = {
+    command_execution: ["正在运行本地分析工具", "本地分析工具执行完成"],
+    mcp_tool_call: ["正在调用分析工具", "分析工具调用完成"],
+    web_search: ["正在检索辅助资料", "辅助资料检索完成"],
+    file_change: ["正在生成分析文件", "分析文件已更新"],
+    plan: ["正在更新分析步骤", "分析步骤已更新"],
+    agent_message: ["正在整理候选分类提案", "候选分类提案已生成"],
+  };
+  const message = messages[itemType];
+  if (!message) return null;
+  return {
+    kind: itemType === "agent_message" ? "output" : "tool",
+    status,
+    message: status === "failed" ? `${message[1]}（失败）` : message[started ? 0 : 1],
+  };
+}
+
+function formatUsageMessage(usage: unknown): string {
+  if (!isRecord(usage)) return "模型分析完成";
+  const inputTokens = numericUsage(usage.input_tokens);
+  const outputTokens = numericUsage(usage.output_tokens);
+  if (inputTokens === null && outputTokens === null) return "模型分析完成";
+  const details = [
+    inputTokens === null ? null : `输入 ${inputTokens}`,
+    outputTokens === null ? null : `输出 ${outputTokens}`,
+  ].filter(Boolean);
+  return `模型分析完成 · ${details.join(" / ")} tokens`;
+}
+
+function numericUsage(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : null;
 }
 
 export async function resolveCommandInvocation(

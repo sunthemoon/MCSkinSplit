@@ -568,6 +568,9 @@ describe("revision API", () => {
     expect(first.events.some((event) => event.eventType === "validating")).toBe(
       true,
     );
+    expect(first.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining(["provider_session", "provider_output"]),
+    );
 
     const aiRevision = await app.inject({
       method: "GET",
@@ -587,8 +590,12 @@ describe("revision API", () => {
       url: `/api/ai-jobs/${firstJobId}/events`,
     });
     expect(eventResponse.statusCode).toBe(200);
-    expect(eventResponse.json<{ events: unknown[] }>().events.length).toBeGreaterThan(
-      4,
+    const eventTypes = eventResponse
+      .json<{ events: { eventType: string }[] }>()
+      .events.map((event) => event.eventType);
+    expect(eventTypes.length).toBeGreaterThan(4);
+    expect(eventTypes).toEqual(
+      expect.arrayContaining(["provider_session", "provider_output"]),
     );
 
     const retried = await app.inject({
@@ -705,6 +712,16 @@ class ApiAiProvider implements SkinSemanticAiProvider {
   constructor(readonly providerName: string) {}
 
   async analyze(input: ProviderAnalysisInput): Promise<ProviderAnalysisResult> {
+    input.onProgress?.({
+      kind: "session",
+      status: "started",
+      message: "Codex 会话已建立",
+    });
+    input.onProgress?.({
+      kind: "output",
+      status: "completed",
+      message: "候选组件提案已生成",
+    });
     return {
       proposal: apiProposal(input),
       rawEvents: `${JSON.stringify({ type: "thread.started", thread_id: `${this.providerName}-thread` })}\n`,

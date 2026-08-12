@@ -715,27 +715,94 @@ h1 span {
   color: #ffad8d;
 }
 
+.ai-live-stream-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--cyan-bright);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.54rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.ai-live-stream-heading small {
+  color: rgba(244, 240, 228, 0.42);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 .ai-event-log {
   display: grid;
-  max-height: 118px;
-  gap: 5px;
-  margin: 12px 0 0;
-  padding: 0;
+  height: 172px;
+  gap: 0;
+  margin: 7px 0 0;
+  padding: 5px 7px;
   overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(7, 14, 17, 0.45);
   list-style: none;
+  scrollbar-color: rgba(36, 195, 194, 0.62) rgba(255, 255, 255, 0.04);
 }
 
 .ai-event-log li {
   display: grid;
-  grid-template-columns: 76px 1fr;
-  gap: 8px;
+  grid-template-columns: 60px 8px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 4px 0;
   color: rgba(244, 240, 228, 0.64);
   font-size: 0.63rem;
+  line-height: 1.45;
 }
 
 .ai-event-log time {
   color: rgba(36, 195, 194, 0.72);
   font-family: "Cascadia Mono", monospace;
+}
+
+.ai-event-log li > i {
+  width: 5px;
+  height: 5px;
+  margin-top: 4px;
+  border: 1px solid var(--cyan-bright);
+  background: transparent;
+}
+
+.ai-event-log li[data-kind="tool"] > i {
+  background: var(--cyan-bright);
+}
+
+.ai-event-log li[data-kind="output"] {
+  color: #f4f0e4;
+}
+
+.ai-event-log li[data-kind="output"] > i {
+  border-color: #ffb08f;
+  background: #ffb08f;
+}
+
+.ai-event-log li[data-kind="warning"] {
+  color: #ffd49b;
+}
+
+.ai-event-log li[data-kind="warning"] > i {
+  border-color: #e8a66f;
+  background: #e8a66f;
+}
+
+.ai-event-log li[data-kind="error"] {
+  color: #ffad8d;
+}
+
+.ai-event-log li[data-kind="error"] > i {
+  border-color: #ff765f;
+  background: #ff765f;
 }
 
 .ai-empty-state {

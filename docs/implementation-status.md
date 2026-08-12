@@ -322,3 +322,35 @@ Last updated: 2026-08-12
   Viewers ready, stacked all three panels, and produced no horizontal overflow.
 - Browser console output contained only the known Chrome-extension message-channel
   noise, with no application stack or failed local API response.
+
+## AI live-process refinement
+
+- Codex JSONL stdout is decoded and parsed incrementally instead of waiting for the
+  child process to exit. Safe lifecycle projections are appended to persistent Job
+  events and reach both Job-detail and event-list HTTP responses during execution.
+- The projection exposes generic session, turn, tool, proposal, usage, fallback,
+  and error states. It drops model reasoning and raw item fields, so commands,
+  searches, and proposal bodies are not copied into the browser event stream.
+- The Studio console now shows the complete event history in chronological order
+  inside a fixed-height terminal pane. Active Jobs refresh every 1.5 seconds and
+  automatically follow new events; completed Jobs remain manually scrollable.
+- Progress observers are non-authoritative telemetry. Callback failures cannot fail
+  an otherwise valid provider Run, while provider launch errors still produce a
+  normal audited Job failure.
+
+## AI live-process verification evidence
+
+- `pnpm verify` passes fixture drift detection, all TypeScript projects, all 123
+  Vitest cases, and every production build.
+- Provider tests cover split JSONL chunks, safe event projection, omitted
+  reasoning and raw proposal content, malformed events, usage summaries, and the
+  structured-output fallback notice.
+- Worker and API tests confirm provider progress is persisted and returned across
+  the HTTP boundary without changing success, retry, validation, or Revision rules.
+- Desktop browser inspection confirmed second-level timestamps, chronological
+  rendering, a 172 px scroll pane, and the existing failed-Job history without
+  clipping or horizontal overflow.
+- Normal Windows `pnpm dev` startup successfully launched both Vite and Fastify.
+  The observed `spawn EPERM` occurred only when Vitest tried to create test workers
+  inside the restricted Codex command sandbox; the same suites passed in a normal
+  Windows process.
