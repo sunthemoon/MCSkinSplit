@@ -2309,6 +2309,39 @@ feat(parts): add analyzed-skin catalog and aggregate bundles
 
 ---
 
+## M8：不可变单组件修补工作台
+
+目标：直接从部件库选择一个原子部件，对遮挡造成的缺口或人为需要调整的像素进行可审计修补，并在操作入库前即时检查平面图和白模上的单组件草稿效果。
+
+Codex 任务：
+
+1. 保持现有精细分类和 Bundle 不变，从部件库直接选择修补来源。
+2. 建立独立的 Part Edit Project 与只追加 Revision 历史，每次操作必须基于当前 HEAD。
+3. 支持有效透明 UV 补色、擦除、完全同色替换、左右肢体镜像和其他已保存部件表面复制。
+4. 为每个修补 Revision 原子保存 texture、write mask 和 revision JSON，并用 SQLite 文件元数据与 SHA-256 校验读取。
+5. 在浏览器内对不可变 HEAD/来源纹理生成未应用的 2D 与 Wide/Slim
+   中性白模 3D 草稿预览，支持静止/走动、用户拖拽旋转和滚轮缩放；只有明确应用操作才创建 Revision。
+6. 提交时创建新的不可变五文件部件，以 PartManifest `1.1` 的
+   `part_repair` derivation 记录来源部件、修补工程和修补 Revision，保留基础部件和所有修补 Revision。
+
+验收：
+
+- 透明但属于有效模型 UV 的像素可以被明确选中并着色；未使用 UV 仍须透明。
+- 历史修补 Revision、来源部件和已提交修补工程不可原地修改。
+- 过期 HEAD、文件哈希不一致、模型/表面尺寸不兼容和空部件提交均被拒绝。
+- 修补 Revision 只能引用同一修补工程内的历史 Revision；跨工程复用须通过已提交的不可变部件。
+- 换色输出必须保持非透明；删除像素须使用明确的擦除操作。
+- 修补来源、操作和提交结果可追溯；人工绘制像素明确记录为非 AI 生成。
+- 本阶段不宣称恢复被遮挡的真实原图像素，也不负责清除目标皮肤中超出新部件 write mask 的残留；后者进入 M9 替换/还原流程。
+
+建议提交：
+
+```text
+feat(parts): add immutable component repair studio
+```
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2325,7 +2358,8 @@ feat(parts): add analyzed-skin catalog and aggregate bundles
 | S6 | M5 AI Skill/Worker | S1、S2、S4 |
 | S7 | M6 拼装器 | S4、S5 |
 | S8 | M7 已分析目录与完整大类部件集 | S4、S5、S6、S7 |
-| S9 | 综合测试与审核 | 全部 |
+| S9 | M8 不可变单组件修补工作台 | S4、S5、S8 |
+| S10 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

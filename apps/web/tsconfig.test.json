@@ -11,6 +11,9 @@
   "include": [
     "src/**/*.test.ts",
     "src/lib/mcSkinPreview.ts",
+    "src/lib/partRepairCoordinates.ts",
+    "src/lib/partRepairOperations.ts",
+    "src/lib/partRepairPreview.ts",
     "src/lib/revisionApi.ts",
     "src/lib/semanticCanvasCoordinates.ts",
     "src/lib/skinFile.ts"

@@ -27,6 +27,7 @@ import {
   type BranchFromRevisionInput,
   type PartBundle,
   type RevertRevisionInput,
+  type SerializedPartRepairOperation,
 } from "@mc-skin-split/skin-revision";
 import Fastify, {
   type FastifyError,
@@ -62,6 +63,14 @@ interface ComponentParams extends RevisionParams {
 
 interface PartParams {
   readonly partId: string;
+}
+
+interface PartEditParams {
+  readonly projectId: string;
+}
+
+interface PartEditRevisionParams {
+  readonly revisionId: string;
 }
 
 interface PartBundleParams {
@@ -116,6 +125,29 @@ interface ExportPartBundleBody {
 
 interface PartsQuery {
   readonly category?: string;
+}
+
+interface PartEditsQuery {
+  readonly basePartId?: string;
+}
+
+interface CreatePartEditBody {
+  readonly basePartId: string;
+  readonly name?: string;
+}
+
+interface ApplyPartEditOperationBody {
+  readonly headRevisionId: string;
+  readonly operation: SerializedPartRepairOperation;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+interface CommitPartEditBody {
+  readonly headRevisionId: string;
+  readonly name?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
 }
 
 interface PartBundlesQuery {
@@ -578,6 +610,102 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     async (request) => ({ parts: store.listParts(request.query.category) }),
   );
 
+  app.get<{ Querystring: PartEditsQuery }>(
+    "/api/part-edits",
+    { schema: { querystring: partEditsQuerySchema } },
+    async (request) => ({
+      partEdits: store.listPartEditProjects(request.query.basePartId),
+    }),
+  );
+
+  app.post<{ Body: CreatePartEditBody }>(
+    "/api/part-edits",
+    { schema: { body: createPartEditSchema } },
+    async (request, reply) => {
+      const partEdit = await store.createPartEditProject(request.body);
+      return reply.status(201).send({ partEdit });
+    },
+  );
+
+  app.get<{ Params: PartEditParams }>(
+    "/api/part-edits/:projectId",
+    async (request) => ({
+      partEdit: store.getPartEditDetail(request.params.projectId),
+    }),
+  );
+
+  app.post<{ Params: PartEditParams; Body: ApplyPartEditOperationBody }>(
+    "/api/part-edits/:projectId/operations",
+    { schema: { body: applyPartEditOperationSchema } },
+    async (request, reply) => {
+      const partEdit = await store.applyPartEditOperation(
+        request.params.projectId,
+        request.body,
+      );
+      return reply.status(201).send({ partEdit });
+    },
+  );
+
+  app.post<{ Params: PartEditParams; Body: CommitPartEditBody }>(
+    "/api/part-edits/:projectId/commit",
+    { schema: { body: commitPartEditSchema } },
+    async (request, reply) => {
+      const result = await store.commitPartEditProject(
+        request.params.projectId,
+        request.body,
+      );
+      return reply.status(201).send({
+        partEdit: store.getPartEditDetail(request.params.projectId),
+        part: result.part,
+      });
+    },
+  );
+
+  app.get<{ Params: PartEditRevisionParams }>(
+    "/api/part-edit-revisions/:revisionId/texture.png",
+    async (request, reply) => {
+      const revision = store.getPartEditRevision(request.params.revisionId);
+      const bytes = await store.readPartEditTexturePng(revision.id);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", `\"${revision.texture.sha256}\"`)
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.get<{ Params: PartEditRevisionParams }>(
+    "/api/part-edit-revisions/:revisionId/write-mask.png",
+    async (request, reply) => {
+      const revision = store.getPartEditRevision(request.params.revisionId);
+      const bytes = await store.readPartEditWriteMaskPng(revision.id);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", `\"${revision.writeMask.sha256}\"`)
+        .send(Buffer.from(bytes));
+    },
+  );
+
+  app.get<{
+    Params: PartEditRevisionParams;
+    Querystring: PartMannequinQuery;
+  }>(
+    "/api/part-edit-revisions/:revisionId/mannequin.png",
+    { schema: { querystring: armTypeQuerySchema } },
+    async (request, reply) => {
+      const revision = store.getPartEditRevision(request.params.revisionId);
+      const detail = store.getPartEditDetail(revision.projectId);
+      const armType = request.query.armType ?? detail.basePart.armType;
+      const bytes = await store.readPartEditMannequinPng(revision.id, armType);
+      return reply
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("ETag", partEditMannequinEtag(revision.texture.sha256, armType))
+        .send(Buffer.from(bytes));
+    },
+  );
+
   app.get<{ Querystring: PartBundlesQuery }>(
     "/api/part-bundles",
     { schema: { querystring: partBundlesQuerySchema } },
@@ -878,16 +1006,18 @@ const revertSchema = {
   },
 } as const;
 
+const surfaceKeySchema = {
+  type: "string",
+  pattern:
+    "^(head|torso|rightArm|leftArm|rightLeg|leftLeg)\\.(base|outer)\\.(front|back|left|right|top|bottom)$",
+} as const;
+
 const spanSchema = {
   type: "object",
   additionalProperties: false,
   required: ["surface", "y", "x0", "x1"],
   properties: {
-    surface: {
-      type: "string",
-      pattern:
-        "^(head|torso|rightArm|leftArm|rightLeg|leftLeg)\\.(base|outer)\\.(front|back|left|right|top|bottom)$",
-    },
+    surface: surfaceKeySchema,
     y: { type: "integer", minimum: 0, maximum: 63 },
     x0: { type: "integer", minimum: 0, maximum: 63 },
     x1: { type: "integer", minimum: 0, maximum: 63 },
@@ -1027,6 +1157,174 @@ const analyzedSkinsQuerySchema = {
     projectId: { type: "string", minLength: 1, maxLength: 100 },
     kind: aggregateKindSchema,
     q: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const partEditsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    basePartId: { type: "string", minLength: 1, maxLength: 100 },
+  },
+} as const;
+
+const createPartEditSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["basePartId"],
+  properties: {
+    basePartId: { type: "string", minLength: 1, maxLength: 100 },
+    name: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const byteSchema = {
+  type: "integer",
+  minimum: 0,
+  maximum: 255,
+} as const;
+
+const rgbaSchema = {
+  type: "array",
+  minItems: 4,
+  maxItems: 4,
+  items: byteSchema,
+} as const;
+
+const opaqueRgbaSchema = {
+  type: "array",
+  minItems: 4,
+  maxItems: 4,
+  items: [
+    byteSchema,
+    byteSchema,
+    byteSchema,
+    { type: "integer", minimum: 1, maximum: 255 },
+  ],
+} as const;
+
+const repairSpansSchema = {
+  type: "array",
+  minItems: 1,
+  maxItems: 4096,
+  items: spanSchema,
+} as const;
+
+const paintColorOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "spans", "rgba"],
+  properties: {
+    type: { const: "paint_color" },
+    spans: repairSpansSchema,
+    rgba: opaqueRgbaSchema,
+  },
+} as const;
+
+const erasePixelsOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "spans"],
+  properties: {
+    type: { const: "erase_pixels" },
+    spans: repairSpansSchema,
+  },
+} as const;
+
+const replaceColorOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "from", "to"],
+  properties: {
+    type: { const: "replace_color" },
+    from: rgbaSchema,
+    to: opaqueRgbaSchema,
+    spans: repairSpansSchema,
+  },
+} as const;
+
+const partEditCopySourceSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "partId"],
+      properties: {
+        kind: { const: "part" },
+        partId: { type: "string", minLength: 1, maxLength: 100 },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "revisionId"],
+      properties: {
+        kind: { const: "edit_revision" },
+        revisionId: { type: "string", minLength: 1, maxLength: 100 },
+      },
+    },
+  ],
+} as const;
+
+const copySurfaceMappingSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sourceSurface", "targetSurface"],
+  properties: {
+    sourceSurface: surfaceKeySchema,
+    targetSurface: surfaceKeySchema,
+    transform: {
+      type: "string",
+      enum: ["identity", "mirror_u", "mirror_v", "rotate_180"],
+    },
+  },
+} as const;
+
+const copySurfacesOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "source", "mappings"],
+  properties: {
+    type: { const: "copy_surfaces" },
+    source: partEditCopySourceSchema,
+    mappings: {
+      type: "array",
+      minItems: 1,
+      maxItems: 72,
+      items: copySurfaceMappingSchema,
+    },
+    overwrite: { type: "string", enum: ["all", "transparent_only"] },
+  },
+} as const;
+
+const applyPartEditOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["headRevisionId", "operation"],
+  properties: {
+    headRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+    operation: {
+      oneOf: [
+        paintColorOperationSchema,
+        erasePixelsOperationSchema,
+        replaceColorOperationSchema,
+        copySurfacesOperationSchema,
+      ],
+    },
+    actorId: { type: "string", minLength: 1, maxLength: 120 },
+    summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const commitPartEditSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["headRevisionId"],
+  properties: {
+    headRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+    name: { type: "string", minLength: 1, maxLength: 120 },
+    actorId: { type: "string", minLength: 1, maxLength: 120 },
+    summary: { type: "string", minLength: 1, maxLength: 300 },
   },
 } as const;
 
@@ -1272,6 +1570,19 @@ function bundlePngEtag(bundle: PartBundle, variant: string): string {
         .map((member) => `${member.position}:${member.part.texture.sha256}`)
         .join("\n"),
     )
+    .digest("hex");
+  return `"sha256:${signature}"`;
+}
+
+function partEditMannequinEtag(
+  textureSha256: string,
+  armType: ArmType,
+): string {
+  const signature = createHash("sha256")
+    .update(textureSha256)
+    .update("\0")
+    .update(armType)
+    .update("\0part-edit-mannequin-v1")
     .digest("hex");
   return `"sha256:${signature}"`;
 }

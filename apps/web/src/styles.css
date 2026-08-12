@@ -2009,6 +2009,388 @@ h1 span {
   color: white;
 }
 
+.component-repair-studio {
+  margin-top: 24px;
+  overflow: hidden;
+  border: 2px solid var(--ink);
+  background: #e8e2d4;
+  box-shadow: 12px 14px 0 rgba(24, 33, 38, 0.14);
+}
+
+.repair-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 22px;
+  border-bottom: 2px solid var(--ink);
+  background:
+    linear-gradient(90deg, rgba(15, 130, 145, 0.11), transparent 52%),
+    var(--paper);
+}
+
+.repair-heading > p {
+  max-width: 570px;
+  margin: 0;
+  color: rgba(24, 33, 38, 0.58);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.66rem;
+  line-height: 1.65;
+  text-align: right;
+}
+
+.repair-project-bar {
+  display: grid;
+  grid-template-columns: 1.1fr 1.3fr 1fr auto;
+  align-items: end;
+  gap: 10px;
+  padding: 15px 22px;
+  border-bottom: 1px solid var(--ink);
+  background: #d9d3c5;
+}
+
+.repair-project-bar label,
+.repair-fields label,
+.repair-commit-box label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.repair-project-bar label > span,
+.repair-fields label > span,
+.repair-commit-box label > span {
+  color: rgba(24, 33, 38, 0.56);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.57rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.repair-project-bar input,
+.repair-project-bar select,
+.repair-fields input,
+.repair-fields select,
+.repair-commit-box input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: #fbf7ec;
+  color: var(--ink);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.64rem;
+}
+
+.repair-fields input[type="color"] {
+  padding: 3px;
+}
+
+.repair-project-bar button,
+.repair-tool-tabs button,
+.repair-selection-count button,
+.repair-apply-button,
+.repair-motion-switch button,
+.repair-commit-box button {
+  min-height: 36px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.62rem;
+  font-weight: 800;
+}
+
+.repair-project-bar button,
+.repair-apply-button,
+.repair-commit-box button {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.component-repair-studio button:hover:not(:disabled) {
+  background: var(--cyan);
+  color: white;
+}
+
+.component-repair-studio button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.repair-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.85fr) minmax(350px, 1.1fr) minmax(300px, 0.9fr);
+}
+
+.repair-grid > section {
+  min-width: 0;
+  padding: 20px;
+}
+
+.repair-grid > section + section {
+  border-left: 2px solid var(--ink);
+}
+
+.repair-tools-panel {
+  background:
+    linear-gradient(145deg, rgba(227, 108, 61, 0.1), transparent 54%),
+    #eee8da;
+}
+
+.repair-canvas-panel {
+  background: #d8d2c4;
+}
+
+.repair-preview-panel {
+  background:
+    radial-gradient(circle at 50% 38%, rgba(36, 195, 194, 0.24), transparent 44%),
+    #202c31;
+  color: var(--paper);
+}
+
+.repair-section-title {
+  margin-bottom: 14px;
+}
+
+.repair-section-title span {
+  color: var(--cyan);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.repair-section-title h3 {
+  margin: 3px 0 0;
+  font-family: "Copperplate", "Bahnschrift", sans-serif;
+  font-size: 1.05rem;
+}
+
+.repair-preview-panel .repair-section-title span {
+  color: var(--cyan-bright);
+}
+
+.repair-tool-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.repair-tool-tabs button[aria-pressed="true"],
+.repair-motion-switch button[aria-pressed="true"] {
+  background: var(--orange);
+  color: white;
+}
+
+.repair-selection-count {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 15px 0 0;
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.62rem;
+}
+
+.repair-selection-count strong {
+  color: var(--orange);
+  font-size: 1rem;
+}
+
+.repair-selection-count button {
+  min-height: 28px;
+  margin-left: auto;
+  padding-block: 3px;
+}
+
+.repair-fields {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.repair-fields-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.repair-fields > small,
+.repair-tool-help {
+  margin: 0;
+  color: rgba(24, 33, 38, 0.58);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.6rem;
+  line-height: 1.6;
+}
+
+.repair-tool-help {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px dashed var(--ink);
+}
+
+.repair-apply-button {
+  width: 100%;
+  margin-top: 15px;
+}
+
+.repair-error {
+  padding: 9px;
+  border: 1px solid var(--orange);
+  background: rgba(227, 108, 61, 0.09);
+  color: #a33c20;
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.61rem;
+  line-height: 1.5;
+}
+
+.part-repair-canvas-frame {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1;
+  place-items: center;
+  overflow: hidden;
+  border: 2px solid var(--ink);
+  background: #263238;
+  box-shadow: 6px 6px 0 rgba(24, 33, 38, 0.17);
+}
+
+.part-repair-canvas-frame > p {
+  width: 70%;
+  color: rgba(244, 240, 228, 0.7);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.68rem;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.part-repair-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.part-repair-canvas[data-disabled="true"] {
+  cursor: not-allowed;
+  filter: saturate(0.7);
+  opacity: 0.72;
+}
+
+.repair-revision-facts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 14px 0 0;
+  border: 1px solid var(--ink);
+  font-family: "Cascadia Mono", monospace;
+}
+
+.repair-revision-facts > div {
+  min-width: 0;
+  padding: 8px;
+}
+
+.repair-revision-facts > div + div {
+  border-left: 1px solid var(--ink);
+}
+
+.repair-revision-facts dt {
+  color: rgba(24, 33, 38, 0.52);
+  font-size: 0.53rem;
+}
+
+.repair-revision-facts dd {
+  overflow: hidden;
+  margin: 3px 0 0;
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-preview-frame {
+  position: relative;
+  height: 390px;
+  overflow: hidden;
+  border: 1px solid rgba(244, 240, 228, 0.22);
+}
+
+.repair-preview-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(244, 240, 228, 0.42);
+  background: rgba(24, 33, 38, 0.84);
+  color: var(--cyan-bright);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.57rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.repair-preview-status[data-state="error"] {
+  border-color: var(--orange);
+  color: #ffc5a8;
+}
+
+.skin-stage.repair-skin-stage {
+  height: 100%;
+  min-height: 0;
+}
+
+.repair-motion-switch {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  inset: 10px 10px auto auto;
+}
+
+.repair-motion-switch button {
+  min-height: 30px;
+  border-color: rgba(244, 240, 228, 0.5);
+  background: rgba(12, 20, 24, 0.76);
+  color: var(--paper);
+}
+
+.repair-commit-box {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(244, 240, 228, 0.2);
+}
+
+.repair-commit-box label > span {
+  color: rgba(244, 240, 228, 0.56);
+}
+
+.repair-commit-box button {
+  border-color: var(--paper);
+  background: var(--orange);
+}
+
+.repair-commit-box small {
+  color: rgba(244, 240, 228, 0.54);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.58rem;
+  line-height: 1.5;
+}
+
+.repair-commit-box .repair-commit-warning {
+  color: #ffc5a8;
+}
+
 .composition-studio {
   margin-top: 24px;
   overflow: hidden;
@@ -3073,6 +3455,25 @@ h1 span {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .repair-project-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .repair-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .repair-preview-panel {
+    grid-column: 1 / -1;
+    border-top: 2px solid var(--ink);
+    border-left: 0 !important;
+  }
+
+  .repair-preview-frame {
+    width: min(100%, 420px);
+    margin-inline: auto;
+  }
+
   .composition-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3211,6 +3612,38 @@ h1 span {
 
   .part-library {
     grid-template-columns: 1fr;
+  }
+
+  .repair-heading,
+  .repair-project-bar,
+  .repair-grid {
+    display: block;
+  }
+
+  .repair-heading > p {
+    margin-top: 12px;
+    text-align: left;
+  }
+
+  .repair-project-bar > * + * {
+    margin-top: 10px;
+  }
+
+  .repair-project-bar button {
+    width: 100%;
+  }
+
+  .repair-grid > section + section {
+    border-top: 2px solid var(--ink);
+    border-left: 0;
+  }
+
+  .repair-tool-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .repair-preview-frame {
+    height: 330px;
   }
 
   .semantic-form,

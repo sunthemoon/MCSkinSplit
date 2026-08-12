@@ -111,6 +111,26 @@ previews combine verified member pixels at read time. A different-color overlap
 between members is treated as corrupt bundle data instead of being silently
 flattened.
 
+## Immutable component repair
+
+M8 can open any saved atomic part directly from the library in a dedicated repair
+project. The repair canvas can select transparent pixels inside valid Wide/Slim UV
+and supports exact paint, erase, color replacement, limb mirror, and donor-surface
+copy operations. Each confirmed operation creates a new repair Revision; it does
+not alter semantic masks, the source skin Revision, or the base part.
+
+The browser applies a configured operation in memory to cached immutable HEAD and
+donor textures, then switches both the 2D texture and neutral-mannequin views to
+disposable not-yet-applied draft PNGs. Stale asynchronous results are ignored and
+their Blob URLs are revoked. Only the explicit apply action persists a validated
+child Revision. Committing creates another normal five-file part with a
+PartManifest `1.1` `part_repair` derivation and leaves the complete repair history
+readable. Repair does not replace or merge any of the fixed 23 semantic
+categories. An `edit_revision` surface-copy source must belong to the same repair
+project; content from another project is reused through a committed saved part.
+These tools reconstruct appearance through authored choices; they cannot
+determine the factual pixels that were hidden in the source image.
+
 ## Conflict preview and application
 
 Calling apply without a strategy performs a read-only preview. It reports model
@@ -144,6 +164,14 @@ GET  /api/part-bundles
 GET  /api/part-bundles/:bundleId
 GET  /api/part-bundles/:bundleId/preview.png
 GET  /api/part-bundles/:bundleId/mannequin.png?armType=slim
+GET  /api/part-edits
+POST /api/part-edits
+GET  /api/part-edits/:projectId
+POST /api/part-edits/:projectId/operations
+POST /api/part-edits/:projectId/commit
+GET  /api/part-edit-revisions/:revisionId/texture.png
+GET  /api/part-edit-revisions/:revisionId/write-mask.png
+GET  /api/part-edit-revisions/:revisionId/mannequin.png?armType=slim
 POST /api/revisions/:revisionId/apply-part
 ```
 
@@ -154,3 +182,5 @@ POST /api/revisions/:revisionId/apply-part
 The complete catalog and bundle workflow, including integrity and composition
 boundaries, is documented in
 [`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md).
+The component repair contract is documented in
+[`component-repair-workflow.md`](component-repair-workflow.md).

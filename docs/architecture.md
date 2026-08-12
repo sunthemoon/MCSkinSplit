@@ -9,12 +9,14 @@ Browser UI
     -> Deterministic skin core (M1)
     -> AI job service (M5)
     -> Composition service (M6)
+    -> Part repair service (M8)
 
 Deterministic skin core
   -> PNG RGBA decoder
   -> Classic/Slim UV layouts
   -> Atlas/surface round trip
   -> masks, spans, semantic operations, and parts
+  -> exact single-part repair operations and mask derivation
 
 Skin compositor
   -> ordered part layers over an immutable base
@@ -26,6 +28,11 @@ AI worker
   -> replaceable provider
   -> schema and pixel-ownership validator
   -> proposal returned to revision service
+
+Part repair service
+  -> append-only part-edit Revisions
+  -> atomic texture, write-mask, and operation storage
+  -> immutable five-file part commit
 ```
 
 ## M0 decisions
@@ -130,15 +137,46 @@ The detailed contract is in [`ai-analysis.md`](ai-analysis.md).
 The detailed contract is in
 [`composition-workflow.md`](composition-workflow.md).
 
+## M8 decisions
+
+- `packages/skin-core` owns exact part-repair transforms. It accepts decoded 64x64
+  RGBA images, write masks, model-aware spans, and canonical surface mappings; it
+  does not read the database, filesystem, HTTP state, or React state.
+- A repair project starts from a verified immutable atomic part selected directly
+  from the library. It has a separate linear Revision history and never mutates a
+  full-skin Revision or the base part.
+- Repair texture alpha is authoritative for the sparse write mask. Painting can
+  add valid transparent UV; erasure removes pixels; all unused UV must remain
+  transparent.
+- Donor operations persist an immutable source identity rather than embedding
+  image state in JSON. The Revision service resolves and verifies the source part
+  or repair Revision before invoking the deterministic core. Repair-Revision
+  sources are confined to the same part-edit project; cross-project reuse goes
+  through a committed immutable part.
+- Each repair Revision is written atomically as texture, write mask, and revision
+  JSON before SQLite metadata is committed. All three files are hash-verified on
+  reads.
+- Commit creates a normal immutable five-file part with a PartManifest `1.1`
+  `part_repair` derivation. Its manifest and source provenance record the base
+  part, repair project, repair HEAD, and non-generated authored status.
+- Neutral mannequin textures are derived from verified repair files. The browser
+  reuses the existing 3D adapter for Wide/Slim geometry, idle/walk display,
+  pointer rotation, and wheel zoom. It also applies the configured operation in
+  memory to cached immutable inputs and feeds disposable Blob URLs to both the 2D
+  canvas and 3D mannequin. This local draft is not persisted until the explicit
+  apply request creates a validated child Revision.
+
+The detailed contract is in
+[`component-repair-workflow.md`](component-repair-workflow.md).
+
 ## Package boundaries
 
 ```text
-apps/web                 UI, editors, AI console, compositor, and preview adapters
-apps/api                 HTTP API, revision, AI, and composition orchestration
+apps/web                 UI, editors, AI console, compositor, repair, and preview adapters
+apps/api                 HTTP API, revision, AI, composition, and repair orchestration
 apps/ai-worker           persistent isolated analysis jobs (M5)
-packages/skin-core       PNG, UV, pixels, semantic edits, and parts (M1-M6)
-packages/skin-schema     JSON schemas and shared types
-packages/skin-revision   immutable snapshots, branching, AI audit, and compositions
+packages/skin-core       PNG, UV, pixels, semantic edits, parts, and repair (M1-M8)
+packages/skin-revision   immutable snapshots, parts, repair histories, AI audit, and compositions
 packages/skin-compositor ordered layers and deterministic conflict evaluation (M6)
 packages/skin-analysis-pack deterministic analysis workspace generation (M5)
 packages/ai-provider     replaceable provider contracts and validation (M5)

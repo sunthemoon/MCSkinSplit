@@ -332,6 +332,205 @@ describe("revision API", () => {
     });
   });
 
+  it("edits a part through immutable repair revisions and commits a new part", async () => {
+    const { app } = await createApi();
+    const sourceProject = await createProject(app, "Repair API source");
+    const sourceImport = await importSkin(app, sourceProject.projectId);
+    const edited = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceImport.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "clothing.repair",
+          displayName: "待修补衣服",
+          category: "upper_clothing",
+        },
+        spans: [{ surface: "torso.base.front", y: 20, x0: 20, x1: 21 }],
+      },
+    });
+    expect(edited.statusCode).toBe(201);
+    const sourceRevisionId = edited.json<MutationResponse>().revision.id;
+    const exported = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/components/clothing.repair/export-part`,
+      payload: { name: "待修补衣服" },
+    });
+    expect(exported.statusCode).toBe(201);
+    const basePart = exported.json<{
+      part: { id: string; texture: { sha256: string } };
+    }>().part;
+    const originalTexture = await app.inject({
+      method: "GET",
+      url: `/api/parts/${encodeURIComponent(basePart.id)}/texture.png`,
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/part-edits",
+      payload: { basePartId: basePart.id, name: "衣服缺口修补" },
+    });
+    expect(created.statusCode).toBe(201);
+    const initial = created.json<{
+      partEdit: {
+        project: { id: string; status: string; headRevisionId: string };
+        headRevision: { id: string; sequence: number };
+      };
+    }>().partEdit;
+    expect(initial).toMatchObject({
+      project: { status: "draft" },
+      headRevision: { sequence: 1 },
+    });
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/part-edits?basePartId=${encodeURIComponent(basePart.id)}`,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      partEdits: [{ id: initial.project.id, basePartId: basePart.id }],
+    });
+
+    const applied = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/operations`,
+      payload: {
+        headRevisionId: initial.headRevision.id,
+        summary: "补一个像素",
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "torso.base.front", y: 20, x0: 22, x1: 22 }],
+          rgba: [122, 81, 64, 255],
+        },
+      },
+    });
+    expect(applied.statusCode).toBe(201);
+    const repaired = applied.json<{
+      partEdit: {
+        project: { id: string; headRevisionId: string };
+        headRevision: {
+          id: string;
+          sequence: number;
+          changedPixelCount: number;
+          texture: { sha256: string };
+          writeMask: { sha256: string };
+        };
+      };
+    }>().partEdit;
+    expect(repaired.headRevision).toMatchObject({
+      sequence: 2,
+      changedPixelCount: 1,
+    });
+    expect(repaired.headRevision.id).not.toBe(initial.headRevision.id);
+
+    const stale = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/operations`,
+      payload: {
+        headRevisionId: initial.headRevision.id,
+        operation: {
+          type: "erase_pixels",
+          spans: [{ surface: "torso.base.front", y: 20, x0: 20, x1: 20 }],
+        },
+      },
+    });
+    expect(stale.statusCode).toBe(409);
+
+    const invalidTransparentPaint = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/operations`,
+      payload: {
+        headRevisionId: repaired.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "torso.base.front", y: 20, x0: 23, x1: 23 }],
+          rgba: [1, 2, 3, 0],
+        },
+      },
+    });
+    expect(invalidTransparentPaint.statusCode).toBe(400);
+    expect(invalidTransparentPaint.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const invalidTransparentReplacement = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/operations`,
+      payload: {
+        headRevisionId: repaired.headRevision.id,
+        operation: {
+          type: "replace_color",
+          from: [122, 81, 64, 255],
+          to: [0, 0, 0, 0],
+        },
+      },
+    });
+    expect(invalidTransparentReplacement.statusCode).toBe(400);
+    expect(invalidTransparentReplacement.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const crossVariant = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/operations`,
+      payload: {
+        headRevisionId: repaired.headRevision.id,
+        operation: {
+          type: "erase_pixels",
+          spans: [{ surface: "torso.base.front", y: 20, x0: 23, x1: 23 }],
+          rgba: [1, 2, 3, 255],
+        },
+      },
+    });
+    expect(crossVariant.statusCode).toBe(400);
+
+    for (const fileName of ["texture.png", "write-mask.png"] as const) {
+      const asset = await app.inject({
+        method: "GET",
+        url: `/api/part-edit-revisions/${encodeURIComponent(repaired.headRevision.id)}/${fileName}`,
+      });
+      expect(asset.statusCode).toBe(200);
+      expect(asset.headers["content-type"]).toContain("image/png");
+      expect(asset.headers["cache-control"]).toContain("immutable");
+      expect(asset.headers.etag).toMatch(/^"sha256:[0-9a-f]{64}"$/);
+      expect(decodeSkinPng(asset.rawPayload)).toMatchObject({ width: 64, height: 64 });
+    }
+    const mannequin = await app.inject({
+      method: "GET",
+      url: `/api/part-edit-revisions/${encodeURIComponent(repaired.headRevision.id)}/mannequin.png?armType=slim`,
+    });
+    expect(mannequin.statusCode).toBe(200);
+    expect(mannequin.headers["cache-control"]).toContain("immutable");
+    expect(mannequin.headers.etag).toMatch(/^"sha256:[0-9a-f]{64}"$/);
+
+    const committed = await app.inject({
+      method: "POST",
+      url: `/api/part-edits/${encodeURIComponent(initial.project.id)}/commit`,
+      payload: {
+        headRevisionId: repaired.headRevision.id,
+        name: "完整修补衣服",
+        summary: "确认修补",
+      },
+    });
+    expect(committed.statusCode).toBe(201);
+    const committedBody = committed.json<{
+      partEdit: { project: { status: string; resultPartId: string } };
+      part: { id: string; name: string };
+    }>();
+    expect(committedBody).toMatchObject({
+      partEdit: { project: { status: "committed" } },
+      part: { name: "完整修补衣服" },
+    });
+    expect(committedBody.part.id).not.toBe(basePart.id);
+
+    const originalAfterCommit = await app.inject({
+      method: "GET",
+      url: `/api/parts/${encodeURIComponent(basePart.id)}/texture.png`,
+    });
+    expect(originalAfterCommit.rawPayload).toEqual(originalTexture.rawPayload);
+    expect(originalAfterCommit.headers.etag).toBe(originalTexture.headers.etag);
+  });
+
   it("creates, resolves, previews, and commits a composition project", async () => {
     const { app } = await createApi();
     const sourceProject = await createProject(app, "Composer source");

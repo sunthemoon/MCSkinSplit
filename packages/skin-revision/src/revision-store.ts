@@ -12,9 +12,11 @@ import {
   aggregateKindForCategory,
   analyzePartApplication,
   applyManualSemanticOperation,
+  applyPartRepairOperation,
   applyPartPixels,
   assessArmType,
   createPartMannequinTexture,
+  derivePartWriteMask,
   createInitialSemanticState,
   decodeSkinPng,
   encodeSkinPng,
@@ -31,6 +33,8 @@ import {
   type ManualSemanticOperation,
   type AggregateKind,
   type PartManifest,
+  type PartRepairOperation,
+  type PartRepairState,
   type SegmentationDocument,
   type SemanticState,
 } from "@mc-skin-split/skin-core";
@@ -51,6 +55,12 @@ import {
   type VerifiedPartStorage,
 } from "./part-storage";
 import {
+  PART_EDIT_FILE_NAMES,
+  PartEditStorage,
+  type PartEditFileName,
+  type VerifiedPartEditStorage,
+} from "./part-edit-storage";
+import {
   SnapshotStorage,
   type VerifiedSnapshot,
 } from "./snapshot-storage";
@@ -65,14 +75,18 @@ import {
   type AnalyzedSkinCatalogItem,
   type AnalyzedSkinCatalogQuery,
   type BranchFromRevisionInput,
+  type ApplyPartEditOperationInput,
   type CommitCompositionInput,
   type CommitCompositionResult,
+  type CommitPartEditProjectInput,
+  type CommitPartEditProjectResult,
   type CompositionDetail,
   type CompositionLayer,
   type CompositionProject,
   type CreateCompositionInput,
   type CreateProjectInput,
   type CreateProjectResult,
+  type CreatePartEditProjectInput,
   type ExportPartInput,
   type ExportPartBundleInput,
   type ImportProjectInput,
@@ -82,6 +96,10 @@ import {
   type OperationSnapshot,
   type PartApplicationPreview,
   type PartFileAsset,
+  type PartEditDetail,
+  type PartEditOperationType,
+  type PartEditProject,
+  type PartEditRevision,
   type PartBundle,
   type PartBundleMember,
   type RevisionDiff,
@@ -90,6 +108,7 @@ import {
   type RevisionOperationType,
   type RevisionStoreOptions,
   type RevertRevisionInput,
+  type SerializedPartRepairOperation,
   type ReorderCompositionLayersInput,
   type ResolveCompositionConflictInput,
   type SegmentationSnapshot,
@@ -219,6 +238,41 @@ interface PartBundleMemberRow {
   readonly created_at: string;
 }
 
+interface PartEditProjectRow {
+  readonly id: string;
+  readonly base_part_id: string;
+  readonly name: string;
+  readonly status: string;
+  readonly head_revision_id: string | null;
+  readonly result_part_id: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly committed_at: string | null;
+}
+
+interface PartEditRevisionRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly parent_revision_id: string | null;
+  readonly sequence: number;
+  readonly operation_type: string;
+  readonly operation_json: string;
+  readonly summary: string;
+  readonly actor_id: string | null;
+  readonly texture_storage_path: string;
+  readonly texture_byte_size: number;
+  readonly texture_sha256: string;
+  readonly mask_storage_path: string;
+  readonly mask_byte_size: number;
+  readonly mask_sha256: string;
+  readonly revision_storage_path: string;
+  readonly revision_byte_size: number;
+  readonly revision_sha256: string;
+  readonly changed_pixel_count: number;
+  readonly authored_provenance_json: string;
+  readonly created_at: string;
+}
+
 interface AnalyzedCatalogRow {
   readonly job_id: string;
   readonly project_id: string;
@@ -305,6 +359,7 @@ export class RevisionStore {
   readonly databasePath: string;
   readonly storage: SnapshotStorage;
   readonly partStorage: PartStorage;
+  readonly partEditStorage: PartEditStorage;
   private readonly database: Database.Database;
   private readonly nowProvider: () => Date | string;
   private readonly idProvider: (kind: RevisionIdKind) => string;
@@ -319,6 +374,7 @@ export class RevisionStore {
     mkdirSync(this.dataDirectory, { recursive: true });
     this.storage = new SnapshotStorage(this.dataDirectory);
     this.partStorage = new PartStorage(this.dataDirectory);
+    this.partEditStorage = new PartEditStorage(this.dataDirectory);
     this.databasePath = resolve(
       options.databasePath ?? resolve(this.dataDirectory, "mcskinsplit.sqlite"),
     );
@@ -428,6 +484,59 @@ export class RevisionStore {
       throw notFound("Part", partId);
     }
     return mapPart(row);
+  }
+
+  listPartEditProjects(basePartId?: string): PartEditProject[] {
+    if (basePartId !== undefined) this.getPart(basePartId);
+    const rows = (basePartId === undefined
+      ? this.database
+          .prepare("SELECT * FROM part_edit_project ORDER BY created_at, id")
+          .all()
+      : this.database
+          .prepare(
+            "SELECT * FROM part_edit_project WHERE base_part_id = ? ORDER BY created_at, id",
+          )
+          .all(basePartId)) as PartEditProjectRow[];
+    return rows.map(mapPartEditProject);
+  }
+
+  getPartEditProject(projectId: string): PartEditProject {
+    const row = this.database
+      .prepare("SELECT * FROM part_edit_project WHERE id = ?")
+      .get(projectId) as PartEditProjectRow | undefined;
+    if (!row) throw notFound("Part edit project", projectId);
+    return mapPartEditProject(row);
+  }
+
+  listPartEditRevisions(projectId: string): PartEditRevision[] {
+    this.getPartEditProject(projectId);
+    const rows = this.database
+      .prepare(
+        "SELECT * FROM part_edit_revision WHERE project_id = ? ORDER BY sequence, id",
+      )
+      .all(projectId) as PartEditRevisionRow[];
+    return rows.map(mapPartEditRevision);
+  }
+
+  getPartEditRevision(revisionId: string): PartEditRevision {
+    const row = this.database
+      .prepare("SELECT * FROM part_edit_revision WHERE id = ?")
+      .get(revisionId) as PartEditRevisionRow | undefined;
+    if (!row) throw notFound("Part edit revision", revisionId);
+    return mapPartEditRevision(row);
+  }
+
+  getPartEditDetail(projectId: string): PartEditDetail {
+    const project = this.getPartEditProject(projectId);
+    return {
+      project,
+      basePart: this.getPart(project.basePartId),
+      headRevision: this.getPartEditRevision(project.headRevisionId),
+      revisions: this.listPartEditRevisions(project.id),
+      resultPart: project.resultPartId
+        ? this.getPart(project.resultPartId)
+        : null,
+    };
   }
 
   listPartBundles(kind?: AggregateKind, sourceRevisionId?: string): PartBundle[] {
@@ -601,6 +710,30 @@ export class RevisionStore {
   ): Promise<SkinPart> {
     return this.withWriteLock(() =>
       this.exportPartUnlocked(revisionId, componentId, input),
+    );
+  }
+
+  async createPartEditProject(
+    input: CreatePartEditProjectInput,
+  ): Promise<PartEditDetail> {
+    return this.withWriteLock(() => this.createPartEditProjectUnlocked(input));
+  }
+
+  async applyPartEditOperation(
+    projectId: string,
+    input: ApplyPartEditOperationInput,
+  ): Promise<PartEditDetail> {
+    return this.withWriteLock(() =>
+      this.applyPartEditOperationUnlocked(projectId, input),
+    );
+  }
+
+  async commitPartEditProject(
+    projectId: string,
+    input: CommitPartEditProjectInput,
+  ): Promise<CommitPartEditProjectResult> {
+    return this.withWriteLock(() =>
+      this.commitPartEditProjectUnlocked(projectId, input),
     );
   }
 
@@ -844,6 +977,128 @@ export class RevisionStore {
     );
     return encodeSkinPng(
       createPartMannequinTexture(texture, writeMask, armType),
+    );
+  }
+
+  async verifyPartEditStorage(
+    revisionId: string,
+  ): Promise<VerifiedPartEditStorage> {
+    const revision = this.getPartEditRevision(revisionId);
+    let stored: VerifiedPartEditStorage;
+    try {
+      stored = await this.partEditStorage.readRevision(
+        revision.projectId,
+        revision.id,
+      );
+    } catch (error) {
+      throw partEditCorrupt(revision.id, "文件缺失", error);
+    }
+    const expected: Readonly<Record<PartEditFileName, PartFileAsset>> = {
+      "texture.png": revision.texture,
+      "write-mask.png": revision.writeMask,
+      "revision.json": revision.revisionFile,
+    };
+    for (const fileName of PART_EDIT_FILE_NAMES) {
+      const file = stored.files[fileName];
+      const asset = expected[fileName];
+      if (
+        file.storagePath !== asset.storagePath ||
+        file.sha256 !== asset.sha256 ||
+        file.bytes.byteLength !== asset.byteSize
+      ) {
+        throw partEditCorrupt(revision.id, `${fileName} 与数据库元数据不一致`);
+      }
+    }
+    const document = parsePartEditDocument(
+      stored.files["revision.json"].bytes,
+      revision.id,
+    );
+    if (
+      document.id !== revision.id ||
+      document.projectId !== revision.projectId ||
+      document.parentRevisionId !== revision.parentRevisionId ||
+      document.sequence !== revision.sequence ||
+      compactCanonicalJson(document.operation) !==
+        compactCanonicalJson(revision.operation) ||
+      document.summary !== revision.summary ||
+      document.actorId !== (revision.actorId ?? null) ||
+      document.changedPixelCount !== revision.changedPixelCount ||
+      compactCanonicalJson(document.authoredProvenance) !==
+        compactCanonicalJson(revision.authoredProvenance) ||
+      document.createdAt !== revision.createdAt
+    ) {
+      throw partEditCorrupt(revision.id, "revision.json 与数据库不一致");
+    }
+    if (revision.sequence === 1) {
+      if (revision.parentRevisionId !== null) {
+        throw partEditCorrupt(revision.id, "首个 Revision 不能声明父 Revision");
+      }
+    } else {
+      if (revision.parentRevisionId === null) {
+        throw partEditCorrupt(revision.id, "非首个 Revision 缺少父 Revision");
+      }
+      const parentRow = this.database
+        .prepare("SELECT project_id, sequence FROM part_edit_revision WHERE id = ?")
+        .get(revision.parentRevisionId) as
+        | { readonly project_id: string; readonly sequence: number }
+        | undefined;
+      if (
+        parentRow === undefined ||
+        parentRow.project_id !== revision.projectId ||
+        parentRow.sequence !== revision.sequence - 1
+      ) {
+        throw partEditCorrupt(
+          revision.id,
+          "父 Revision 必须属于同一工程并紧邻当前序号",
+        );
+      }
+    }
+    const project = this.getPartEditProject(revision.projectId);
+    const basePart = this.getPart(project.basePartId);
+    try {
+      const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+      const writeMask = rgbaImageToMask(
+        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      );
+      const derived = derivePartWriteMask(texture, basePart.armType);
+      if (!derived.every((value, index) => value === writeMask[index])) {
+        throw new RangeError("写入遮罩与纹理 alpha 不一致");
+      }
+    } catch (error) {
+      throw partEditCorrupt(revision.id, "纹理或遮罩无效", error);
+    }
+    return stored;
+  }
+
+  async readPartEditTexturePng(revisionId: string): Promise<Uint8Array> {
+    return (await this.verifyPartEditStorage(revisionId)).files[
+      "texture.png"
+    ].bytes.slice();
+  }
+
+  async readPartEditWriteMaskPng(revisionId: string): Promise<Uint8Array> {
+    return (await this.verifyPartEditStorage(revisionId)).files[
+      "write-mask.png"
+    ].bytes.slice();
+  }
+
+  async readPartEditMannequinPng(
+    revisionId: string,
+    armType: "wide" | "slim",
+  ): Promise<Uint8Array> {
+    const revision = this.getPartEditRevision(revisionId);
+    const project = this.getPartEditProject(revision.projectId);
+    const basePart = this.getPart(project.basePartId);
+    if (!basePart.manifest.compatibility.armTypes.includes(armType)) {
+      throw invalidInput("修补部件不兼容请求的白模手臂模型", {
+        revisionId,
+        armType,
+        supportedArmTypes: basePart.manifest.compatibility.armTypes,
+      });
+    }
+    const state = await this.readPartEditState(revision.id);
+    return encodeSkinPng(
+      createPartMannequinTexture(state.texture, state.writeMask, armType),
     );
   }
 
@@ -2350,6 +2605,529 @@ export class RevisionStore {
     return this.getPart(partId);
   }
 
+  private async createPartEditProjectUnlocked(
+    input: CreatePartEditProjectInput,
+  ): Promise<PartEditDetail> {
+    const basePart = this.getPart(input.basePartId);
+    const projectId = this.id("part_edit");
+    const revisionId = this.id("part_edit_revision");
+    const createdAt = this.now();
+    const name = validateText(
+      "部件修补工程名称",
+      input.name ?? `${basePart.name} 修补`,
+      120,
+    );
+    const storedPart = await this.verifyPartStorage(basePart.id);
+    const texturePng = storedPart.files["texture.png"].bytes.slice();
+    const maskPng = storedPart.files["write-mask.png"].bytes.slice();
+    const operation = {
+      type: "init",
+      basePartId: basePart.id,
+    } as const;
+    const provenance = {
+      source: "manual",
+      basePartId: basePart.id,
+      authoredOperations: 0,
+      containsGeneratedPixels: false,
+    } as const;
+    const stored = await this.writePartEditRevisionFiles({
+      projectId,
+      revisionId,
+      parentRevisionId: null,
+      sequence: 1,
+      operation,
+      summary: "从不可变部件创建修补草稿",
+      actorId: undefined,
+      changedPixelCount: 0,
+      provenance,
+      createdAt,
+      texturePng,
+      maskPng,
+    });
+    try {
+      const commit = this.database.transaction(() => {
+        this.database
+          .prepare(`
+            INSERT INTO part_edit_project (
+              id, base_part_id, name, status, head_revision_id, result_part_id,
+              created_at, updated_at, committed_at
+            ) VALUES (?, ?, ?, 'draft', NULL, NULL, ?, ?, NULL)
+          `)
+          .run(projectId, basePart.id, name, createdAt, createdAt);
+        this.insertPartEditRevision({
+          projectId,
+          revisionId,
+          parentRevisionId: null,
+          sequence: 1,
+          operation,
+          summary: "从不可变部件创建修补草稿",
+          actorId: undefined,
+          changedPixelCount: 0,
+          provenance,
+          createdAt,
+          stored,
+        });
+        this.database
+          .prepare(
+            "UPDATE part_edit_project SET head_revision_id = ? WHERE id = ?",
+          )
+          .run(revisionId, projectId);
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.partEditStorage.removeNewRevision(projectId, revisionId);
+      throw error;
+    }
+    return this.getPartEditDetail(projectId);
+  }
+
+  private async applyPartEditOperationUnlocked(
+    projectId: string,
+    input: ApplyPartEditOperationInput,
+  ): Promise<PartEditDetail> {
+    const project = this.getPartEditProject(projectId);
+    if (project.status !== "draft") {
+      throw conflict("已提交的部件修补工程不能继续编辑", { projectId });
+    }
+    if (project.headRevisionId !== input.headRevisionId) {
+      throw conflict("部件修补操作必须基于当前 HEAD", {
+        projectId,
+        suppliedHeadRevisionId: input.headRevisionId,
+        projectHeadRevisionId: project.headRevisionId,
+      });
+    }
+    const head = this.getPartEditRevision(project.headRevisionId);
+    const basePart = this.getPart(project.basePartId);
+    const state = await this.readPartEditState(head.id);
+    const operation = await this.resolvePartRepairOperation(
+      project.id,
+      input.operation,
+    );
+    let result: ReturnType<typeof applyPartRepairOperation>;
+    try {
+      result = applyPartRepairOperation(state, operation);
+    } catch (error) {
+      if (error instanceof RangeError || error instanceof TypeError) {
+        throw invalidInput(error.message);
+      }
+      throw error;
+    }
+    const revisionId = this.id("part_edit_revision");
+    const sequence = head.sequence + 1;
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const summary = validateText(
+      "修补 Revision 摘要",
+      input.summary ?? partEditOperationSummary(input.operation.type),
+      300,
+    );
+    const provenance = {
+      source: "manual",
+      basePartId: basePart.id,
+      parentRevisionId: head.id,
+      authoredOperations: sequence - 1,
+      containsGeneratedPixels: false,
+      changedPixelIds: result.changedPixelIds,
+      operation: input.operation,
+    } as const;
+    const stored = await this.writePartEditRevisionFiles({
+      projectId,
+      revisionId,
+      parentRevisionId: head.id,
+      sequence,
+      operation: input.operation,
+      summary,
+      actorId,
+      changedPixelCount: result.changedPixelIds.length,
+      provenance,
+      createdAt,
+      texturePng: encodeSkinPng(result.texture),
+      maskPng: encodeSkinPng(maskToRgbaImage(result.writeMask)),
+    });
+    try {
+      const commit = this.database.transaction(() => {
+        const fresh = this.database
+          .prepare("SELECT status, head_revision_id FROM part_edit_project WHERE id = ?")
+          .get(project.id) as
+          | { readonly status: string; readonly head_revision_id: string | null }
+          | undefined;
+        if (fresh?.status !== "draft" || fresh.head_revision_id !== head.id) {
+          throw conflict("部件修补 HEAD 已变更", {
+            projectId,
+            suppliedHeadRevisionId: head.id,
+            projectHeadRevisionId: fresh?.head_revision_id ?? null,
+          });
+        }
+        this.insertPartEditRevision({
+          projectId,
+          revisionId,
+          parentRevisionId: head.id,
+          sequence,
+          operation: input.operation,
+          summary,
+          actorId,
+          changedPixelCount: result.changedPixelIds.length,
+          provenance,
+          createdAt,
+          stored,
+        });
+        this.database
+          .prepare(`
+            UPDATE part_edit_project
+            SET head_revision_id = ?, updated_at = ?
+            WHERE id = ?
+          `)
+          .run(revisionId, createdAt, project.id);
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.partEditStorage.removeNewRevision(project.id, revisionId);
+      throw error;
+    }
+    return this.getPartEditDetail(project.id);
+  }
+
+  private async commitPartEditProjectUnlocked(
+    projectId: string,
+    input: CommitPartEditProjectInput,
+  ): Promise<CommitPartEditProjectResult> {
+    const project = this.getPartEditProject(projectId);
+    if (project.status !== "draft") {
+      throw conflict("部件修补工程已提交", {
+        projectId,
+        resultPartId: project.resultPartId,
+      });
+    }
+    if (project.headRevisionId !== input.headRevisionId) {
+      throw conflict("提交必须基于当前部件修补 HEAD", {
+        projectId,
+        suppliedHeadRevisionId: input.headRevisionId,
+        projectHeadRevisionId: project.headRevisionId,
+      });
+    }
+    const head = this.getPartEditRevision(project.headRevisionId);
+    const basePart = this.getPart(project.basePartId);
+    const storedEdit = await this.verifyPartEditStorage(head.id);
+    const state = await this.readPartEditState(head.id);
+    if (maskToPixelIds(state.writeMask).length === 0) {
+      throw invalidInput("空的修补部件不能提交", {
+        projectId,
+        headRevisionId: head.id,
+      });
+    }
+    const createdAt = this.now();
+    const name = validateText(
+      "修补部件名称",
+      input.name ?? `${basePart.name} 修补`,
+      120,
+    );
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const summary = validateText(
+      "修补提交摘要",
+      input.summary ?? `由修补工程 ${project.name} 创建新部件`,
+      300,
+    );
+    const partId = this.id("part");
+    const derivation = {
+      kind: "part_repair",
+      basePartId: basePart.id,
+      partEditProjectId: project.id,
+      partEditRevisionId: head.id,
+      containsGeneratedPixels: false,
+    } as const;
+    const manifest: PartManifest = {
+      ...basePart.manifest,
+      schemaVersion: "1.1",
+      id: partId,
+      name,
+      palette: { dominant: dominantHex(state.texture, state.writeMask) },
+      derivation,
+      createdAt,
+    };
+    const manifestJson = canonicalJson(manifest);
+    const provenance = {
+      schemaVersion: "1.1",
+      ...derivation,
+      actorId: actorId ?? null,
+      summary,
+    } as const;
+    const sourceJson = canonicalJson(provenance);
+    const storedPart = await this.partStorage.writePart({
+      partId,
+      files: {
+        "texture.png": storedEdit.files["texture.png"].bytes.slice(),
+        "write-mask.png": storedEdit.files["write-mask.png"].bytes.slice(),
+        "manifest.json": Buffer.from(manifestJson, "utf8"),
+        "preview.png": encodeSkinPng(state.texture),
+        "source.json": Buffer.from(sourceJson, "utf8"),
+      },
+    });
+    const fileIds = Object.fromEntries(
+      PART_FILE_NAMES.map((fileName) => [fileName, this.id("asset")]),
+    ) as Record<PartFileName, string>;
+    try {
+      const commit = this.database.transaction(() => {
+        const fresh = this.database
+          .prepare("SELECT status, head_revision_id FROM part_edit_project WHERE id = ?")
+          .get(project.id) as
+          | { readonly status: string; readonly head_revision_id: string | null }
+          | undefined;
+        if (fresh?.status !== "draft" || fresh.head_revision_id !== head.id) {
+          throw conflict("部件修补 HEAD 已变更", {
+            projectId,
+            suppliedHeadRevisionId: head.id,
+            projectHeadRevisionId: fresh?.head_revision_id ?? null,
+          });
+        }
+        this.insertRepairedPart({
+          partId,
+          basePart,
+          manifest,
+          provenance,
+          createdAt,
+          stored: storedPart,
+          fileIds,
+        });
+        this.database
+          .prepare(`
+            UPDATE part_edit_project
+            SET status = 'committed', result_part_id = ?, updated_at = ?, committed_at = ?
+            WHERE id = ?
+          `)
+          .run(partId, createdAt, createdAt, project.id);
+      });
+      commit.immediate();
+    } catch (error) {
+      await this.partStorage.removeNewPart(partId);
+      throw error;
+    }
+    return {
+      project: this.getPartEditProject(project.id),
+      revision: this.getPartEditRevision(head.id),
+      part: this.getPart(partId),
+    };
+  }
+
+  private async resolvePartRepairOperation(
+    targetProjectId: string,
+    operation: SerializedPartRepairOperation,
+  ): Promise<PartRepairOperation> {
+    if (operation.type !== "copy_surfaces") return operation;
+    let source: PartRepairState;
+    if (operation.source.kind === "part") {
+      const part = this.getPart(operation.source.partId);
+      const stored = await this.verifyPartStorage(part.id);
+      source = {
+        armType: part.armType,
+        texture: decodeSkinPng(stored.files["texture.png"].bytes),
+        writeMask: rgbaImageToMask(
+          decodeSkinPng(stored.files["write-mask.png"].bytes),
+        ),
+      };
+    } else {
+      const sourceRevision = this.getPartEditRevision(
+        operation.source.revisionId,
+      );
+      if (sourceRevision.projectId !== targetProjectId) {
+        throw invalidInput(
+          "只能从同一部件修补工程的当前或历史 Revision 复制表面",
+          {
+            targetProjectId,
+            sourceRevisionId: sourceRevision.id,
+            sourceProjectId: sourceRevision.projectId,
+          },
+        );
+      }
+      source = await this.readPartEditState(sourceRevision.id);
+    }
+    return {
+      type: "copy_surfaces",
+      source,
+      mappings: operation.mappings,
+      ...(operation.overwrite ? { overwrite: operation.overwrite } : {}),
+    };
+  }
+
+  private async readPartEditState(
+    revisionId: string,
+  ): Promise<PartRepairState> {
+    const revision = this.getPartEditRevision(revisionId);
+    const project = this.getPartEditProject(revision.projectId);
+    const basePart = this.getPart(project.basePartId);
+    const stored = await this.verifyPartEditStorage(revision.id);
+    return {
+      armType: basePart.armType,
+      texture: decodeSkinPng(stored.files["texture.png"].bytes),
+      writeMask: rgbaImageToMask(
+        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      ),
+    };
+  }
+
+  private async writePartEditRevisionFiles(input: {
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly parentRevisionId: string | null;
+    readonly sequence: number;
+    readonly operation: Readonly<Record<string, unknown>>;
+    readonly summary: string;
+    readonly actorId: string | undefined;
+    readonly changedPixelCount: number;
+    readonly provenance: Readonly<Record<string, unknown>>;
+    readonly createdAt: string;
+    readonly texturePng: Uint8Array;
+    readonly maskPng: Uint8Array;
+  }): Promise<VerifiedPartEditStorage> {
+    const document = {
+      schemaVersion: "1.0",
+      id: input.revisionId,
+      projectId: input.projectId,
+      parentRevisionId: input.parentRevisionId,
+      sequence: input.sequence,
+      operation: input.operation,
+      summary: input.summary,
+      actorId: input.actorId ?? null,
+      changedPixelCount: input.changedPixelCount,
+      authoredProvenance: input.provenance,
+      createdAt: input.createdAt,
+    } as const;
+    return this.partEditStorage.writeRevision({
+      projectId: input.projectId,
+      revisionId: input.revisionId,
+      files: {
+        "texture.png": input.texturePng,
+        "write-mask.png": input.maskPng,
+        "revision.json": Buffer.from(canonicalJson(document), "utf8"),
+      },
+    });
+  }
+
+  private insertPartEditRevision(input: {
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly parentRevisionId: string | null;
+    readonly sequence: number;
+    readonly operation: Readonly<Record<string, unknown>>;
+    readonly summary: string;
+    readonly actorId: string | undefined;
+    readonly changedPixelCount: number;
+    readonly provenance: Readonly<Record<string, unknown>>;
+    readonly createdAt: string;
+    readonly stored: VerifiedPartEditStorage;
+  }): void {
+    const texture = input.stored.files["texture.png"];
+    const mask = input.stored.files["write-mask.png"];
+    const revisionFile = input.stored.files["revision.json"];
+    const operationType = input.operation.type;
+    if (!isPartEditOperationType(operationType)) {
+      throw invalidInput("未知部件修补操作", { operationType });
+    }
+    this.database
+      .prepare(`
+        INSERT INTO part_edit_revision (
+          id, project_id, parent_revision_id, sequence, operation_type,
+          operation_json, summary, actor_id,
+          texture_storage_path, texture_byte_size, texture_sha256,
+          mask_storage_path, mask_byte_size, mask_sha256,
+          revision_storage_path, revision_byte_size, revision_sha256,
+          changed_pixel_count, authored_provenance_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.revisionId,
+        input.projectId,
+        input.parentRevisionId,
+        input.sequence,
+        operationType,
+        compactCanonicalJson(input.operation),
+        input.summary,
+        input.actorId ?? null,
+        texture.storagePath,
+        texture.bytes.byteLength,
+        texture.sha256,
+        mask.storagePath,
+        mask.bytes.byteLength,
+        mask.sha256,
+        revisionFile.storagePath,
+        revisionFile.bytes.byteLength,
+        revisionFile.sha256,
+        input.changedPixelCount,
+        compactCanonicalJson(input.provenance),
+        input.createdAt,
+      );
+  }
+
+  private insertRepairedPart(input: {
+    readonly partId: string;
+    readonly basePart: SkinPart;
+    readonly manifest: PartManifest;
+    readonly provenance: Readonly<Record<string, unknown>>;
+    readonly createdAt: string;
+    readonly stored: VerifiedPartStorage;
+    readonly fileIds: Record<PartFileName, string>;
+  }): void {
+    const roles: Readonly<Record<PartFileName, string>> = {
+      "texture.png": "texture",
+      "write-mask.png": "write_mask",
+      "manifest.json": "manifest",
+      "preview.png": "preview",
+      "source.json": "source",
+    };
+    const insertFile = this.database.prepare(`
+      INSERT INTO part_file_asset (
+        id, part_id, file_role, storage_path, mime_type, byte_size, sha256, created_at
+      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const fileName of PART_FILE_NAMES) {
+      const file = input.stored.files[fileName];
+      insertFile.run(
+        input.fileIds[fileName],
+        roles[fileName],
+        file.storagePath,
+        fileName.endsWith(".png") ? "image/png" : "application/json",
+        file.bytes.byteLength,
+        file.sha256,
+        input.createdAt,
+      );
+    }
+    this.database
+      .prepare(`
+        INSERT INTO part_asset (
+          id, source_project_id, source_revision_id, source_component_id,
+          name, category, subtype, arm_type, texture_asset_id, mask_asset_id,
+          manifest_asset_id, preview_asset_id, source_asset_id, created_at,
+          manifest_json, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.partId,
+        input.basePart.sourceProjectId,
+        input.basePart.sourceRevisionId,
+        input.basePart.sourceComponentId,
+        input.manifest.name,
+        input.manifest.category,
+        input.manifest.subtype ?? null,
+        input.basePart.armType,
+        input.fileIds["texture.png"],
+        input.fileIds["write-mask.png"],
+        input.fileIds["manifest.json"],
+        input.fileIds["preview.png"],
+        input.fileIds["source.json"],
+        input.createdAt,
+        canonicalJson(input.manifest).trim(),
+        compactCanonicalJson({
+          maskMode: input.manifest.maskMode,
+          ancestry: input.provenance,
+        }),
+      );
+    const attach = this.database.prepare(
+      "UPDATE part_file_asset SET part_id = ? WHERE id = ?",
+    );
+    for (const fileName of PART_FILE_NAMES) {
+      attach.run(input.partId, input.fileIds[fileName]);
+    }
+  }
+
   private async exportPartBundleUnlocked(
     revisionId: string,
     input: ExportPartBundleInput,
@@ -3357,6 +4135,86 @@ function mapPart(row: PartRow): SkinPart {
   };
 }
 
+function mapPartEditProject(row: PartEditProjectRow): PartEditProject {
+  if (
+    (row.status !== "draft" && row.status !== "committed") ||
+    !row.head_revision_id ||
+    (row.status === "draft" &&
+      (row.result_part_id !== null || row.committed_at !== null)) ||
+    (row.status === "committed" &&
+      (row.result_part_id === null || row.committed_at === null))
+  ) {
+    throw partEditCorrupt(row.id, "工程状态与 HEAD/结果部件不一致");
+  }
+  return {
+    id: row.id,
+    basePartId: row.base_part_id,
+    name: row.name,
+    status: row.status,
+    headRevisionId: row.head_revision_id,
+    resultPartId: row.result_part_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    committedAt: row.committed_at,
+  };
+}
+
+function mapPartEditRevision(row: PartEditRevisionRow): PartEditRevision {
+  if (
+    !isPartEditOperationType(row.operation_type) ||
+    !Number.isInteger(row.sequence) ||
+    row.sequence < 1 ||
+    !Number.isInteger(row.changed_pixel_count) ||
+    row.changed_pixel_count < 0
+  ) {
+    throw partEditCorrupt(row.id, "Revision 枚举或计数无效");
+  }
+  const operation = parseObjectJson(
+    row.operation_json,
+    `Part edit revision ${row.id} operation`,
+  );
+  if (operation.type !== row.operation_type) {
+    throw partEditCorrupt(row.id, "operation type 与 JSON 不一致");
+  }
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    parentRevisionId: row.parent_revision_id,
+    sequence: row.sequence,
+    operationType: row.operation_type,
+    operation,
+    summary: row.summary,
+    ...(row.actor_id !== null ? { actorId: row.actor_id } : {}),
+    texture: mapPartFile(
+      `${row.id}_texture`,
+      row.texture_storage_path,
+      "image/png",
+      row.texture_byte_size,
+      row.texture_sha256,
+    ),
+    writeMask: mapPartFile(
+      `${row.id}_mask`,
+      row.mask_storage_path,
+      "image/png",
+      row.mask_byte_size,
+      row.mask_sha256,
+    ),
+    revisionFile: mapPartFile(
+      `${row.id}_revision`,
+      row.revision_storage_path,
+      "application/json",
+      row.revision_byte_size,
+      row.revision_sha256,
+    ),
+    changedPixelCount: row.changed_pixel_count,
+    authoredProvenance: parseObjectJson(
+      row.authored_provenance_json,
+      `Part edit revision ${row.id} provenance`,
+    ),
+    createdAt: row.created_at,
+  };
+}
+
 function mapCompositionProject(row: CompositionProjectRow): CompositionProject {
   if (
     !["wide", "slim"].includes(row.arm_type) ||
@@ -3490,32 +4348,113 @@ function mapPartFile(
 function parsePartManifest(source: string, partId: string): PartManifest {
   try {
     const value = JSON.parse(source) as Partial<PartManifest>;
+    const compatibility = value.compatibility;
+    const placement = value.placement;
+    const relations = value.relations;
+    const palette = value.palette;
     if (
-      value.schemaVersion !== "1.0" ||
+      (value.schemaVersion !== "1.0" && value.schemaVersion !== "1.1") ||
       value.id !== partId ||
       typeof value.name !== "string" ||
       value.name.length === 0 ||
+      value.name.length > 120 ||
       !isSemanticCategory(value.category) ||
       value.source === undefined ||
+      value.source === null ||
+      Array.isArray(value.source) ||
+      typeof value.source !== "object" ||
       typeof value.source.projectId !== "string" ||
       typeof value.source.revisionId !== "string" ||
       typeof value.source.componentInstanceId !== "string" ||
-      value.compatibility?.resolution !== "64x64" ||
-      !Array.isArray(value.compatibility.armTypes) ||
-      value.compatibility.armTypes.some(
-        (armType) => !["wide", "slim"].includes(armType),
-      ) ||
-      !Array.isArray(value.placement?.preferredLayers) ||
-      !Array.isArray(value.placement.surfaces) ||
+      compatibility === undefined ||
+      compatibility === null ||
+      Array.isArray(compatibility) ||
+      typeof compatibility !== "object" ||
+      compatibility.resolution !== "64x64" ||
+      !isUniqueNonEmptyEnumArray(compatibility.armTypes, ["wide", "slim"]) ||
+      placement === undefined ||
+      placement === null ||
+      Array.isArray(placement) ||
+      typeof placement !== "object" ||
+      !isUniqueNonEmptyEnumArray(placement.preferredLayers, ["base", "outer"]) ||
+      !isUniqueStringArray(placement.surfaces, isSurfaceKey, true) ||
+      relations === undefined ||
+      relations === null ||
+      Array.isArray(relations) ||
+      typeof relations !== "object" ||
+      !isUniqueStringArray(relations.softConflicts, isSafeReferenceId) ||
+      !isUniqueStringArray(relations.hardConflicts, isSafeReferenceId) ||
+      palette === undefined ||
+      palette === null ||
+      Array.isArray(palette) ||
+      typeof palette !== "object" ||
+      typeof palette.dominant !== "string" ||
+      !/^#[0-9A-Fa-f]{6}$/.test(palette.dominant) ||
       value.maskMode !== "write-colored-pixels-only" ||
-      typeof value.createdAt !== "string"
+      typeof value.createdAt !== "string" ||
+      Number.isNaN(Date.parse(value.createdAt))
     ) {
       throw new TypeError("manifest 结构无效");
+    }
+    if (value.schemaVersion === "1.0") {
+      if ("derivation" in value) {
+        throw new TypeError("manifest 1.0 不能声明 derivation");
+      }
+    } else {
+      const derivation = value.derivation;
+      if (
+        derivation === null ||
+        Array.isArray(derivation) ||
+        typeof derivation !== "object" ||
+        Object.keys(derivation).sort().join(",") !==
+          "basePartId,containsGeneratedPixels,kind,partEditProjectId,partEditRevisionId" ||
+        derivation?.kind !== "part_repair" ||
+        !isSafeReferenceId(derivation.basePartId) ||
+        !isSafeReferenceId(derivation.partEditProjectId) ||
+        !isSafeReferenceId(derivation.partEditRevisionId) ||
+        derivation.containsGeneratedPixels !== false
+      ) {
+        throw new TypeError("manifest 1.1 缺少有效的 part_repair derivation");
+      }
     }
     return value as PartManifest;
   } catch (error) {
     throw partCorrupt(partId, "manifest.json 无效", error);
   }
+}
+
+function isUniqueNonEmptyEnumArray<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): value is readonly T[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((item): item is T => allowed.includes(item as T)) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isUniqueStringArray(
+  value: unknown,
+  predicate: (item: unknown) => item is string,
+  requireNonEmpty = false,
+): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    (!requireNonEmpty || value.length > 0) &&
+    value.every(predicate) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isSurfaceKey(value: unknown): value is PartManifest["placement"]["surfaces"][number] {
+  return (
+    typeof value === "string" &&
+    /^(head|torso|rightArm|leftArm|rightLeg|leftLeg)\.(base|outer)\.(front|back|left|right|top|bottom)$/.test(
+      value,
+    )
+  );
 }
 
 function partCorrupt(
@@ -3528,6 +4467,20 @@ function partCorrupt(
     `Part ${partId} 资产损坏：${message}`,
     409,
     { partId },
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+function partEditCorrupt(
+  revisionId: string,
+  message: string,
+  cause?: unknown,
+): RevisionStoreError {
+  return new RevisionStoreError(
+    "SNAPSHOT_CORRUPT",
+    `Part edit ${revisionId} 资产损坏：${message}`,
+    409,
+    { revisionId },
     cause === undefined ? undefined : { cause },
   );
 }
@@ -3885,6 +4838,58 @@ function parseOperation(bytes: Uint8Array, revisionId: string): OperationSnapsho
   }
 }
 
+interface PartEditDocument {
+  readonly schemaVersion: "1.0";
+  readonly id: string;
+  readonly projectId: string;
+  readonly parentRevisionId: string | null;
+  readonly sequence: number;
+  readonly operation: Readonly<Record<string, unknown>>;
+  readonly summary: string;
+  readonly actorId: string | null;
+  readonly changedPixelCount: number;
+  readonly authoredProvenance: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+function parsePartEditDocument(
+  bytes: Uint8Array,
+  revisionId: string,
+): PartEditDocument {
+  try {
+    const value = JSON.parse(
+      Buffer.from(bytes).toString("utf8"),
+    ) as Partial<PartEditDocument>;
+    if (
+      value.schemaVersion !== "1.0" ||
+      value.id !== revisionId ||
+      typeof value.projectId !== "string" ||
+      (value.parentRevisionId !== null &&
+        typeof value.parentRevisionId !== "string") ||
+      !Number.isInteger(value.sequence) ||
+      (value.sequence ?? 0) < 1 ||
+      value.operation === null ||
+      Array.isArray(value.operation) ||
+      typeof value.operation !== "object" ||
+      !isPartEditOperationType(value.operation.type) ||
+      typeof value.summary !== "string" ||
+      (value.actorId !== null && typeof value.actorId !== "string") ||
+      !Number.isInteger(value.changedPixelCount) ||
+      (value.changedPixelCount ?? -1) < 0 ||
+      value.authoredProvenance === null ||
+      Array.isArray(value.authoredProvenance) ||
+      typeof value.authoredProvenance !== "object" ||
+      typeof value.createdAt !== "string"
+    ) {
+      throw new TypeError("revision.json 结构无效");
+    }
+    return value as PartEditDocument;
+  } catch (error) {
+    if (error instanceof RevisionStoreError) throw error;
+    throw partEditCorrupt(revisionId, "revision.json 无效", error);
+  }
+}
+
 function parseObjectJson(
   source: string,
   label: string,
@@ -4012,10 +5017,59 @@ function validateOptionalText(
   return value === undefined ? undefined : validateText(label, value, maxLength);
 }
 
+function isPartEditOperationType(value: unknown): value is PartEditOperationType {
+  return [
+    "init",
+    "paint_color",
+    "erase_pixels",
+    "replace_color",
+    "copy_surfaces",
+  ].includes(String(value));
+}
+
+function partEditOperationSummary(
+  operationType: SerializedPartRepairOperation["type"],
+): string {
+  return {
+    paint_color: "修补选中像素",
+    erase_pixels: "擦除选中像素",
+    replace_color: "精确替换部件颜色",
+    copy_surfaces: "复制部件表面",
+  }[operationType];
+}
+
+function dominantHex(
+  texture: { readonly data: Uint8Array },
+  writeMask: Uint8Array,
+): string {
+  const counts = new Map<string, number>();
+  for (const pixelId of maskToPixelIds(writeMask)) {
+    const offset = pixelId * 4;
+    if (texture.data[offset + 3] === 0) continue;
+    const color = `#${byteHex(texture.data[offset]!)}${byteHex(texture.data[offset + 1]!)}${byteHex(texture.data[offset + 2]!)}`;
+    counts.set(color, (counts.get(color) ?? 0) + 1);
+  }
+  return (
+    [...counts].sort(([leftColor, leftCount], [rightColor, rightCount]) =>
+      rightCount === leftCount
+        ? leftColor.localeCompare(rightColor)
+        : rightCount - leftCount,
+    )[0]?.[0] ?? "#000000"
+  );
+}
+
+function byteHex(value: number): string {
+  return value.toString(16).padStart(2, "0").toUpperCase();
+}
+
 function assertSafeReferenceId(label: string, value: string): void {
-  if (!/^[a-z][a-z0-9_-]{2,100}$/.test(value)) {
+  if (!isSafeReferenceId(value)) {
     throw invalidInput(`${label} 不是安全 ID`, { value });
   }
+}
+
+function isSafeReferenceId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9_-]{2,100}$/.test(value);
 }
 
 function defaultId(kind: RevisionIdKind): string {
@@ -4027,6 +5081,8 @@ function defaultId(kind: RevisionIdKind): string {
     operation: "op",
     part: "part",
     part_bundle: "partbundle",
+    part_edit: "partedit",
+    part_edit_revision: "parteditrev",
     composition: "composition",
     composition_layer: "complayer",
   };

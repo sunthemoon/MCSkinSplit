@@ -22,6 +22,7 @@ import {
 } from "react";
 import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
 import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
+import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
 import { PartBundleShelf } from "./components/PartBundleShelf";
 import {
   SkinPreview,
@@ -1504,17 +1505,17 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SEMANTIC COMPOSITION STUDIO / M6</p>
+          <p className="eyebrow">VERSIONED SKIN REPAIR + COMPOSITION STUDIO / M8</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            Codex 辅助识别真实皮肤的语义部件；多图层混搭会逐像素报告冲突，只有明确确认覆盖规则后才创建不可变 Revision。
+            Codex 辅助识别真实皮肤的语义部件；单组件修补与多图层混搭都通过不可变 Revision 保留完整历史。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M6 像素混搭工作室">
-          <strong>M6</strong>
-          <span>PIXEL MIX</span>
+        <div className="baseline-stamp" aria-label="M8 组件修补与像素混搭工作室">
+          <strong>M8</strong>
+          <span>PART REPAIR</span>
         </div>
       </header>
 
@@ -2329,6 +2330,17 @@ export function App() {
         </section>
       </section>
 
+      <ComponentRepairStudio
+        parts={partLibrary}
+        defaultArmType={resolvedArmType}
+        onNotice={setNotice}
+        onCommittedPart={async (part) => {
+          await refreshReusableCatalog();
+          setSelectedPartId(part.id);
+          setCompositionPartId(part.id);
+        }}
+      />
+
       <section
         className="composition-studio"
         aria-label="多部件混搭与冲突处理"
@@ -2336,7 +2348,7 @@ export function App() {
       >
         <header className="composition-heading">
           <div className="panel-heading">
-            <span>07</span>
+              <span>08</span>
             <div>
               <p>PIXEL-SAFE COMPOSER</p>
               <h2>多皮肤部件混搭</h2>

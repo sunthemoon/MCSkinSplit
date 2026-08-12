@@ -2,10 +2,14 @@ import type {
   AggregateKind,
   ArmType,
   ManualSemanticOperation,
+  PartRepairCopyMapping,
+  PartRepairOverwriteMode,
   PartApplicationReport,
   PartManifest,
+  Rgba,
   SemanticComponent,
   SemanticCategory,
+  SemanticPixelSpan,
 } from "@mc-skin-split/skin-core";
 
 export interface ApiProject {
@@ -84,6 +88,69 @@ export interface ApiPart {
   readonly armType: ArmType;
   readonly manifest: PartManifest;
   readonly createdAt: string;
+}
+
+export type ApiPartEditStatus = "draft" | "committed";
+
+export type ApiPartEditOperation =
+  | {
+      readonly type: "paint_color";
+      readonly spans: readonly SemanticPixelSpan[];
+      readonly rgba: Rgba;
+    }
+  | {
+      readonly type: "erase_pixels";
+      readonly spans: readonly SemanticPixelSpan[];
+    }
+  | {
+      readonly type: "replace_color";
+      readonly from: Rgba;
+      readonly to: Rgba;
+      readonly spans?: readonly SemanticPixelSpan[];
+    }
+  | {
+      readonly type: "copy_surfaces";
+      readonly source:
+        | { readonly kind: "part"; readonly partId: string }
+        | { readonly kind: "edit_revision"; readonly revisionId: string };
+      readonly mappings: readonly PartRepairCopyMapping[];
+      readonly overwrite?: PartRepairOverwriteMode;
+    };
+
+export interface ApiPartEditProject {
+  readonly id: string;
+  readonly basePartId: string;
+  readonly name: string;
+  readonly status: ApiPartEditStatus;
+  readonly headRevisionId: string;
+  readonly resultPartId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly committedAt: string | null;
+}
+
+export interface ApiPartEditRevision {
+  readonly id: string;
+  readonly projectId: string;
+  readonly parentRevisionId: string | null;
+  readonly sequence: number;
+  readonly operationType:
+    | ApiPartEditOperation["type"]
+    | "init";
+  readonly operation: Readonly<Record<string, unknown>>;
+  readonly summary: string;
+  readonly actorId?: string;
+  readonly changedPixelCount: number;
+  readonly authoredProvenance: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+export interface ApiPartEditDetail {
+  readonly project: ApiPartEditProject;
+  readonly basePart: ApiPart;
+  readonly headRevision: ApiPartEditRevision;
+  readonly revisions: readonly ApiPartEditRevision[];
+  readonly resultPart: ApiPart | null;
 }
 
 export interface ApiPartBundleMember {
@@ -697,8 +764,105 @@ export function partPreviewUrl(partId: string): string {
   return `/api/parts/${encodeURIComponent(partId)}/preview.png`;
 }
 
+export function partTextureUrl(partId: string): string {
+  return `/api/parts/${encodeURIComponent(partId)}/texture.png`;
+}
+
 export function partMannequinUrl(partId: string, armType: ArmType): string {
   return `/api/parts/${encodeURIComponent(partId)}/mannequin.png?armType=${armType}`;
+}
+
+export async function listPartEdits(
+  basePartId?: string,
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiPartEditProject[]> {
+  const query = basePartId
+    ? `?basePartId=${encodeURIComponent(basePartId)}`
+    : "";
+  const body = await requestJson<{
+    readonly partEdits: readonly ApiPartEditProject[];
+  }>(`/api/part-edits${query}`, undefined, fetcher);
+  return body.partEdits;
+}
+
+export async function createPartEdit(
+  input: { readonly basePartId: string; readonly name?: string },
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartEditDetail> {
+  const body = await requestJson<{ readonly partEdit: ApiPartEditDetail }>(
+    "/api/part-edits",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+  return body.partEdit;
+}
+
+export async function loadPartEdit(
+  projectId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartEditDetail> {
+  const body = await requestJson<{ readonly partEdit: ApiPartEditDetail }>(
+    `/api/part-edits/${encodeURIComponent(projectId)}`,
+    undefined,
+    fetcher,
+  );
+  return body.partEdit;
+}
+
+export async function applyPartEditOperation(
+  projectId: string,
+  input: {
+    readonly headRevisionId: string;
+    readonly operation: ApiPartEditOperation;
+    readonly summary?: string;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartEditDetail> {
+  const body = await requestJson<{ readonly partEdit: ApiPartEditDetail }>(
+    `/api/part-edits/${encodeURIComponent(projectId)}/operations`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+  return body.partEdit;
+}
+
+export async function commitPartEdit(
+  projectId: string,
+  input: { readonly headRevisionId: string; readonly name?: string },
+  fetcher: Fetcher = fetch,
+): Promise<{ readonly partEdit: ApiPartEditDetail; readonly part: ApiPart }> {
+  return requestJson(
+    `/api/part-edits/${encodeURIComponent(projectId)}/commit`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+}
+
+export function partEditTextureUrl(revisionId: string): string {
+  return `/api/part-edit-revisions/${encodeURIComponent(revisionId)}/texture.png`;
+}
+
+export function partEditWriteMaskUrl(revisionId: string): string {
+  return `/api/part-edit-revisions/${encodeURIComponent(revisionId)}/write-mask.png`;
+}
+
+export function partEditMannequinUrl(
+  revisionId: string,
+  armType: ArmType,
+): string {
+  return `/api/part-edit-revisions/${encodeURIComponent(revisionId)}/mannequin.png?armType=${armType}`;
 }
 
 export async function listCompositions(

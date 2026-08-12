@@ -96,8 +96,15 @@ export type ManualSemanticOperation =
       readonly subtype?: string;
     };
 
-export interface PartManifest {
-  readonly schemaVersion: "1.0";
+export interface PartRepairDerivation {
+  readonly kind: "part_repair";
+  readonly basePartId: string;
+  readonly partEditProjectId: string;
+  readonly partEditRevisionId: string;
+  readonly containsGeneratedPixels: false;
+}
+
+interface PartManifestBase {
   readonly id: string;
   readonly name: string;
   readonly category: SemanticCategory;
@@ -125,6 +132,23 @@ export interface PartManifest {
   readonly maskMode: "write-colored-pixels-only";
   readonly createdAt: string;
 }
+
+export interface PartManifestV1 extends PartManifestBase {
+  readonly schemaVersion: "1.0";
+  readonly derivation?: never;
+}
+
+export interface PartRepairManifestV1_1 extends PartManifestBase {
+  readonly schemaVersion: "1.1";
+  readonly derivation: PartRepairDerivation;
+}
+
+/**
+ * Immutable reusable-part metadata. Version 1.1 is reserved for deterministic
+ * part-repair outputs and therefore requires repair ancestry; ordinary semantic
+ * exports remain version 1.0 and cannot claim a derivation.
+ */
+export type PartManifest = PartManifestV1 | PartRepairManifestV1_1;
 
 export type PartConflictType =
   | "hard_conflict"

@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import {
   decodeSkinPng,
   createRgbaImage,
@@ -193,6 +194,353 @@ describe("RevisionStore", () => {
       );
     } finally {
       store.close();
+    }
+  });
+
+  it("creates append-only part repair revisions and commits a new immutable part", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const originalTexture = await store.readPartTexturePng(part.id);
+      const created = await store.createPartEditProject({
+        basePartId: part.id,
+        name: "Hair repair",
+      });
+      expect(created.project).toMatchObject({
+        basePartId: part.id,
+        status: "draft",
+      });
+      expect(created.headRevision).toMatchObject({
+        sequence: 1,
+        operationType: "init",
+        changedPixelCount: 0,
+      });
+      const initialTexture = await store.readPartEditTexturePng(
+        created.headRevision.id,
+      );
+      expect(initialTexture).toEqual(originalTexture);
+      expect(
+        decodeSkinPng(
+          await store.readPartEditMannequinPng(created.headRevision.id, "slim"),
+        ),
+      ).toMatchObject({ width: 64, height: 64 });
+
+      const edited = await store.applyPartEditOperation(created.project.id, {
+        headRevisionId: created.headRevision.id,
+        actorId: "tester",
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          rgba: [17, 34, 51, 255],
+        },
+      });
+      expect(edited.revisions).toHaveLength(2);
+      expect(edited.headRevision).toMatchObject({
+        parentRevisionId: created.headRevision.id,
+        sequence: 2,
+        operationType: "paint_color",
+        changedPixelCount: 1,
+        authoredProvenance: {
+          source: "manual",
+          containsGeneratedPixels: false,
+        },
+      });
+      expect(
+        getPixel(
+          decodeSkinPng(
+            await store.readPartEditTexturePng(edited.headRevision.id),
+          ),
+          9,
+          8,
+        ),
+      ).toEqual([17, 34, 51, 255]);
+      expect(await store.readPartEditTexturePng(created.headRevision.id)).toEqual(
+        initialTexture,
+      );
+
+      await expect(
+        store.applyPartEditOperation(created.project.id, {
+          headRevisionId: created.headRevision.id,
+          operation: {
+            type: "erase_pixels",
+            spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+
+      const committed = await store.commitPartEditProject(created.project.id, {
+        headRevisionId: edited.headRevision.id,
+        name: "Repaired hair",
+      });
+      expect(committed.project).toMatchObject({
+        status: "committed",
+        resultPartId: committed.part.id,
+      });
+      expect(committed.part.id).not.toBe(part.id);
+      expect(committed.part.manifest).toMatchObject({
+        schemaVersion: "1.1",
+        derivation: {
+          kind: "part_repair",
+          basePartId: part.id,
+          partEditProjectId: created.project.id,
+          partEditRevisionId: edited.headRevision.id,
+          containsGeneratedPixels: false,
+        },
+      });
+      expect(committed.part.metadata).toMatchObject({
+        ancestry: {
+          schemaVersion: "1.1",
+          kind: "part_repair",
+          basePartId: part.id,
+          partEditProjectId: created.project.id,
+          partEditRevisionId: edited.headRevision.id,
+          containsGeneratedPixels: false,
+        },
+      });
+      expect(await store.readPartTexturePng(part.id)).toEqual(originalTexture);
+      expect(
+        getPixel(decodeSkinPng(await store.readPartTexturePng(committed.part.id)), 9, 8),
+      ).toEqual([17, 34, 51, 255]);
+      expect(
+        await readdir(join(directory, "part-edits", created.project.id, "revisions")),
+      ).toHaveLength(2);
+      await expect(
+        store.applyPartEditOperation(created.project.id, {
+          headRevisionId: edited.headRevision.id,
+          operation: {
+            type: "erase_pixels",
+            spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("resolves a serialized donor part for deterministic surface copying", async () => {
+    const { store } = await createStore();
+
+    try {
+      const target = await exportHeadPixelPart(store);
+      const donor = await exportHeadPixelPart(store, [99, 88, 77, 255]);
+      const repair = await store.createPartEditProject({ basePartId: target.id });
+      const copied = await store.applyPartEditOperation(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+        operation: {
+          type: "copy_surfaces",
+          source: { kind: "part", partId: donor.id },
+          mappings: [
+            {
+              sourceSurface: "head.base.front",
+              targetSurface: "head.base.back",
+              transform: "identity",
+            },
+          ],
+          overwrite: "all",
+        },
+      });
+      expect(copied.headRevision.operation).toMatchObject({
+        source: { kind: "part", partId: donor.id },
+      });
+      expect(copied.headRevision.operation).not.toHaveProperty(
+        "source.texture",
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("isolates repair Revision donors to the target repair project", async () => {
+    const { store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const first = await store.createPartEditProject({ basePartId: part.id });
+      const firstEdited = await store.applyPartEditOperation(first.project.id, {
+        headRevisionId: first.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          rgba: [101, 102, 103, 255],
+        },
+      });
+      const second = await store.createPartEditProject({ basePartId: part.id });
+
+      await expect(
+        store.applyPartEditOperation(second.project.id, {
+          headRevisionId: second.headRevision.id,
+          operation: {
+            type: "copy_surfaces",
+            source: {
+              kind: "edit_revision",
+              revisionId: firstEdited.headRevision.id,
+            },
+            mappings: [
+              {
+                sourceSurface: "head.base.front",
+                targetSurface: "head.base.back",
+                transform: "identity",
+              },
+            ],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_INPUT", statusCode: 400 });
+
+      await expect(
+        store.applyPartEditOperation(first.project.id, {
+          headRevisionId: firstEdited.headRevision.id,
+          operation: {
+            type: "copy_surfaces",
+            source: {
+              kind: "edit_revision",
+              revisionId: first.headRevision.id,
+            },
+            mappings: [
+              {
+                sourceSurface: "head.base.front",
+                targetSurface: "head.base.back",
+                transform: "identity",
+              },
+            ],
+          },
+        }),
+      ).resolves.toMatchObject({ headRevision: { sequence: 3 } });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("allows repairing an empty draft but rejects committing an empty part", async () => {
+    const { store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const created = await store.createPartEditProject({ basePartId: part.id });
+      const erased = await store.applyPartEditOperation(created.project.id, {
+        headRevisionId: created.headRevision.id,
+        operation: {
+          type: "erase_pixels",
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      await expect(
+        store.commitPartEditProject(created.project.id, {
+          headRevisionId: erased.headRevision.id,
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+      const repainted = await store.applyPartEditOperation(created.project.id, {
+        headRevisionId: erased.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          rgba: [12, 23, 34, 255],
+        },
+      });
+      await expect(
+        store.commitPartEditProject(created.project.id, {
+          headRevisionId: repainted.headRevision.id,
+        }),
+      ).resolves.toMatchObject({ project: { status: "committed" } });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("detects tampering in immutable part repair files", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const created = await store.createPartEditProject({ basePartId: part.id });
+      await writeFile(
+        join(directory, created.headRevision.texture.storagePath),
+        Uint8Array.of(1, 2, 3),
+      );
+      await expect(
+        store.readPartEditTexturePng(created.headRevision.id),
+      ).rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("detects database metadata that diverges from immutable repair JSON", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const created = await store.createPartEditProject({ basePartId: part.id });
+      store.close();
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database
+          .prepare("UPDATE part_edit_revision SET summary = ? WHERE id = ?")
+          .run("Tampered database summary", created.headRevision.id);
+      } finally {
+        database.close();
+      }
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        await expect(
+          reopened.verifyPartEditStorage(created.headRevision.id),
+        ).rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
+    }
+  });
+
+  it("rejects invalid nested metadata in a repaired part manifest", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const basePart = await exportHeadPixelPart(store);
+      const repair = await store.createPartEditProject({ basePartId: basePart.id });
+      const committed = await store.commitPartEditProject(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+      });
+      expect(committed.part.manifest.schemaVersion).toBe("1.1");
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        const row = database
+          .prepare("SELECT manifest_json FROM part_asset WHERE id = ?")
+          .get(committed.part.id) as { readonly manifest_json: string };
+        const manifest = JSON.parse(row.manifest_json) as {
+          compatibility: { armTypes: string[] };
+        };
+        manifest.compatibility.armTypes = [];
+        database
+          .prepare("UPDATE part_asset SET manifest_json = ? WHERE id = ?")
+          .run(JSON.stringify(manifest), committed.part.id);
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        expect(() => reopened.getPart(committed.part.id)).toThrow(
+          expect.objectContaining({ code: "SNAPSHOT_CORRUPT", statusCode: 409 }),
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
     }
   });
 
@@ -868,6 +1216,32 @@ async function exportBodyPart(
   return await store.exportPart(segmented.revision.id, componentId, {
     name: `${bodyPart} / ${fileName}`,
   });
+}
+
+async function exportHeadPixelPart(
+  store: RevisionStore,
+  rgba: readonly [number, number, number, number] = [32, 48, 64, 255],
+) {
+  const image = createRgbaImage(64, 64);
+  image.data.set(rgba, (8 * 64 + 8) * 4);
+  const imported = await store.importProject({
+    name: `Repair fixture ${rgba.join("-")}`,
+    skinPng: encodeSkinPng(image),
+    armType: "slim",
+  });
+  const componentId = "hair.repair";
+  const segmented = await store.applyManualOperation(imported.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: componentId,
+        displayName: "Repair hair",
+        category: "hair",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+    },
+  });
+  return store.exportPart(segmented.revision.id, componentId);
 }
 
 function categoryForBodyPart(bodyPart: BodyPart) {

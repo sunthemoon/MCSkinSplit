@@ -6,6 +6,7 @@ export * from "./render/contact-sheet";
 export * from "./render/scale-nearest";
 export * from "./semantic/editor";
 export * from "./semantic/mask";
+export * from "./semantic/part-repair";
 export * from "./semantic/parts";
 export * from "./semantic/taxonomy";
 export * from "./semantic/types";

@@ -2,6 +2,9 @@ import type {
   AggregateKind,
   ArmType,
   ManualSemanticOperation,
+  PartRepairCopyMapping,
+  PartRepairOperation,
+  PartRepairOverwriteMode,
   PartApplicationReport,
   PartManifest,
   SemanticComponent,
@@ -230,6 +233,84 @@ export interface SkinPart {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export type PartEditStatus = "draft" | "committed";
+export type PartEditOperationType = PartRepairOperation["type"] | "init";
+
+export type SerializedPartRepairOperation =
+  | Extract<PartRepairOperation, { readonly type: "paint_color" }>
+  | Extract<PartRepairOperation, { readonly type: "erase_pixels" }>
+  | Extract<PartRepairOperation, { readonly type: "replace_color" }>
+  | {
+      readonly type: "copy_surfaces";
+      readonly source:
+        | { readonly kind: "part"; readonly partId: string }
+        | { readonly kind: "edit_revision"; readonly revisionId: string };
+      readonly mappings: readonly PartRepairCopyMapping[];
+      readonly overwrite?: PartRepairOverwriteMode;
+    };
+
+export interface PartEditProject {
+  readonly id: string;
+  readonly basePartId: string;
+  readonly name: string;
+  readonly status: PartEditStatus;
+  readonly headRevisionId: string;
+  readonly resultPartId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly committedAt: string | null;
+}
+
+export interface PartEditRevision {
+  readonly id: string;
+  readonly projectId: string;
+  readonly parentRevisionId: string | null;
+  readonly sequence: number;
+  readonly operationType: PartEditOperationType;
+  readonly operation: Readonly<Record<string, unknown>>;
+  readonly summary: string;
+  readonly actorId?: string;
+  readonly texture: PartFileAsset;
+  readonly writeMask: PartFileAsset;
+  readonly revisionFile: PartFileAsset;
+  readonly changedPixelCount: number;
+  readonly authoredProvenance: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+export interface PartEditDetail {
+  readonly project: PartEditProject;
+  readonly basePart: SkinPart;
+  readonly headRevision: PartEditRevision;
+  readonly revisions: readonly PartEditRevision[];
+  readonly resultPart: SkinPart | null;
+}
+
+export interface CreatePartEditProjectInput {
+  readonly basePartId: string;
+  readonly name?: string;
+}
+
+export interface ApplyPartEditOperationInput {
+  readonly headRevisionId: string;
+  readonly operation: SerializedPartRepairOperation;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface CommitPartEditProjectInput {
+  readonly headRevisionId: string;
+  readonly name?: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+export interface CommitPartEditProjectResult {
+  readonly project: PartEditProject;
+  readonly revision: PartEditRevision;
+  readonly part: SkinPart;
+}
+
 export interface PartBundleMember {
   readonly bundleId: string;
   readonly partId: string;
@@ -401,6 +482,8 @@ export type RevisionIdKind =
   | "operation"
   | "part"
   | "part_bundle"
+  | "part_edit"
+  | "part_edit_revision"
   | "composition"
   | "composition_layer";
 

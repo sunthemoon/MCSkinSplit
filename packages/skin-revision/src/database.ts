@@ -33,6 +33,11 @@ const migrations: readonly Migration[] = [
     name: "aggregate part bundles",
     sql: readFileSync(new URL("./migrations/005_part_bundles.sql", import.meta.url), "utf8"),
   },
+  {
+    version: 6,
+    name: "immutable part repair revisions",
+    sql: readFileSync(new URL("./migrations/006_part_repairs.sql", import.meta.url), "utf8"),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

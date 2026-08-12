@@ -14,6 +14,7 @@ Last updated: 2026-08-12
 | M5 AI Skill and worker | Complete | Schema-valid proposals create revisions only after validation |
 | M6 compositor | Complete | Explicit conflicts and deterministic six-skin composition |
 | M7 analyzed-skin catalog and complete-category bundles | Complete | Immutable atomic bundles, derived previews, and atomic whole-bundle composition |
+| M8 immutable component repair | Complete | Append-only repair Revisions, verified files, neutral 3D preview, and new-part commit |
 
 ## M0 baseline
 
@@ -420,3 +421,83 @@ Last updated: 2026-08-12
   explicit resolution rules.
 - Bundles are immutable snapshots of one source Revision. Later corrections create
   new parts and a new Bundle instead of rewriting prior library data.
+
+## M8 deliverables
+
+- Added deterministic single-part repair operations to `packages/skin-core`:
+  painting an explicit RGBA color on valid UV, erasing sparse part pixels, exact
+  RGBA replacement, canonical limb mirroring, and verified surface copying from a
+  saved donor part or repair Revision.
+- Added SQLite-backed part-edit projects with linear, HEAD-checked, append-only
+  Revisions. Every Revision stores its parent, operation, changed-pixel count,
+  summary, authored provenance, and verified file metadata.
+- Added atomic repair storage under `data/part-edits/`. Each Revision contains
+  `texture.png`, `write-mask.png`, and `revision.json`; reads cross-check paths,
+  byte sizes, hashes, and JSON identity against SQLite.
+- Added repair commit as a new immutable five-file part. The base part and every
+  repair Revision remain unchanged. PartManifest schema `1.1` records an explicit
+  `part_repair` derivation, while `source.json` records repair ancestry and marks
+  the pixels as manually authored and non-generated.
+- Added strict HTTP routes for project list/create/detail, HEAD-checked operations,
+  commit, immutable texture and mask reads, and derived Wide/Slim mannequin
+  textures.
+- Added a responsive component-repair workspace that selects a base directly from
+  the saved part library, edits transparent valid UV, exposes the five repair
+  tools, and displays an immediate not-yet-applied draft in both the 2D canvas and
+  a neutral draggable 3D mannequin with idle/walk controls and zoom. Explicit
+  apply remains the only persistence action.
+- Documented the stable behavior in
+  [`component-repair-workflow.md`](component-repair-workflow.md).
+
+## M8 verification evidence
+
+- Core tests cover transparent-UV painting, erasure and mask derivation, scoped
+  and whole-part exact replacement, limb mapping, donor copy overwrite modes,
+  invalid selections, and input immutability.
+- Revision-service tests cover append-only history, stale-HEAD rejection, donor
+  resolution, immutable source retention, new five-file part commit, empty-part
+  rejection, and file-tamper detection.
+- API tests exercise project list/create, strict operation validation, immutable
+  PNG reads, derived mannequin output, stale-HEAD conflicts, and commit as a new
+  part. Web tests cover encoded client routes, explicit HEAD request bodies,
+  valid-UV coordinate selection, deterministic repair-operation construction,
+  local 2D/3D preview output, immutable texture caching, stale-task suppression,
+  receiver-safe browser fetch, retry after failed reads, and Blob URL cleanup.
+- `pnpm verify` passes fixture drift checks, all workspace TypeScript projects,
+  all Vitest suites, and every production build. One AI Worker test exceeded its
+  existing 5-second timeout during the first full run; an isolated rerun and the
+  complete second run both passed without code changes.
+- Browser testing created a repair project from a real saved part, painted one
+  selected UV pixel as Revision `#2`, committed it as a distinct saved part, and
+  kept the base part available. A second uncommitted paint rendered immediately
+  in the 2D draft and neutral Slim/Alex mannequin, reported the changed-pixel
+  count, kept the 3D viewer ready through idle/walk switching, and disabled
+  new-part commit until the draft was applied. Browser testing also caught and
+  fixed an unbound native `fetch` receiver before release; the regression test
+  now enforces the browser invocation contract.
+- Responsive inspection found no horizontal overflow in the default desktop
+  layout or the sub-700 px stacked layout. The repair workspace changed from
+  three columns to one, while its texture Canvas remained square and the 3D
+  preview remained contained.
+
+## M8 known boundaries
+
+- Component repair is deterministic authoring, not factual occlusion recovery.
+  When source pixels were hidden, mirror, donor, and paint results remain explicit
+  user reconstruction choices.
+- M8 does not call an AI model. Repair provenance uses `source: manual` and
+  `containsGeneratedPixels: false`.
+- Partial-alpha paint and exact replacement are supported, but no anti-aliasing,
+  interpolation, palette synthesis, or automatic skin-tone inference is applied.
+  Paint and replacement outputs must remain non-transparent; explicit erasure is
+  the only operation that removes pixels from the repair write mask.
+- Repair-Revision surface-copy sources are limited to the same repair project.
+  Cross-project content can be reused after it is committed as a saved donor part.
+- Local draft previews are disposable and are never authoritative storage. The
+  service validates the operation again before appending a repair Revision.
+- Committing a repaired part does not remove pixels from the target skin that lie
+  outside the repaired part's write mask. Target-remnant clearing and Base-layer
+  restoration, including skin-color candidates, belong to M9.
+- Repair projects use a linear HEAD rather than Branch/Revert semantics. Committed
+  projects are read-only and further corrections start from a saved part in a new
+  project.

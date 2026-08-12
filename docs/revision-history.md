@@ -16,14 +16,18 @@ MCSkinSplit treats SQLite metadata and complete Revision snapshots as the author
 ```text
 data/
 ├── mcskinsplit.sqlite
-└── projects/<project-id>/revisions/<revision-id>/
-    ├── skin.png
-    ├── segmentation.json
-    ├── operation.json
-    ├── checksum.json
-    └── components/
-        ├── unknown.mask.png
-        └── <component-instance-id>.mask.png
+├── projects/<project-id>/revisions/<revision-id>/
+│   ├── skin.png
+│   ├── segmentation.json
+│   ├── operation.json
+│   ├── checksum.json
+│   └── components/
+│       ├── unknown.mask.png
+│       └── <component-instance-id>.mask.png
+└── part-edits/<part-edit-project-id>/revisions/<part-edit-revision-id>/
+    ├── texture.png
+    ├── write-mask.png
+    └── revision.json
 ```
 
 `skin.png` and component masks are canonical 64×64 RGBA PNGs. JSON files use recursively sorted keys and a trailing newline. Hash strings use the `sha256:<hex>` form. M2/M3 snapshots without component masks remain valid historical inputs; the first later semantic edit writes a complete M4 snapshot.
@@ -57,6 +61,14 @@ GET    /api/parts/:partId
 GET    /api/parts/:partId/texture.png
 GET    /api/parts/:partId/preview.png
 POST   /api/revisions/:revisionId/apply-part
+GET    /api/part-edits
+POST   /api/part-edits
+GET    /api/part-edits/:projectId
+POST   /api/part-edits/:projectId/operations
+POST   /api/part-edits/:projectId/commit
+GET    /api/part-edit-revisions/:revisionId/texture.png
+GET    /api/part-edit-revisions/:revisionId/write-mask.png
+GET    /api/part-edit-revisions/:revisionId/mannequin.png
 ```
 
 Create a Project with JSON `{ "name": "Example" }`, then send the skin bytes to its import endpoint with `Content-Type: image/png`. Optional `fileName` and `armType=wide|slim` query parameters preserve import context or apply an explicit model override. The body limit is 1 MiB.
@@ -67,3 +79,5 @@ Create a Project with JSON `{ "name": "Example" }`, then send the skin bytes to 
 
 The M4 operation and part contracts are documented in
 [`semantic-editing-and-parts.md`](semantic-editing-and-parts.md).
+The separate M8 single-part history, hash, commit, and API contracts are documented
+in [`component-repair-workflow.md`](component-repair-workflow.md).

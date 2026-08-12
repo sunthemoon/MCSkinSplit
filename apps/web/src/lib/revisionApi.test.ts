@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   addCompositionPart,
   applyCompositionBundle,
+  applyPartEditOperation,
   applySemanticOperation,
   commitComposition,
   commitRevisionPart,
   compositionPreviewUrl,
+  commitPartEdit,
   createComposition,
+  createPartEdit,
   exportRevisionPart,
   exportRevisionBundle,
   getAnalyzedSkin,
@@ -17,6 +20,10 @@ import {
   loadRevisionSegmentation,
   loadRevisionSkin,
   partMannequinUrl,
+  partTextureUrl,
+  partEditMannequinUrl,
+  partEditTextureUrl,
+  partEditWriteMaskUrl,
   partBundleMannequinUrl,
   partBundlePreviewUrl,
   retryAiJob,
@@ -154,6 +161,9 @@ describe("revisionApi", () => {
     expect(partMannequinUrl("part / 1", "slim")).toBe(
       "/api/parts/part%20%2F%201/mannequin.png?armType=slim",
     );
+    expect(partTextureUrl("part / 1")).toBe(
+      "/api/parts/part%20%2F%201/texture.png",
+    );
   });
 
   it("commits a part only with an explicit strategy", async () => {
@@ -175,6 +185,58 @@ describe("revisionApi", () => {
       partId: "part_1",
       strategy: "use_part",
     });
+  });
+
+  it("serializes immutable part repair routes and explicit head revisions", async () => {
+    const partEdit = {
+      project: { id: "edit / 1", headRevisionId: "edit_rev_1" },
+      headRevision: { id: "edit_rev_1", sequence: 1 },
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ partEdit }, 201))
+      .mockResolvedValueOnce(jsonResponse({ partEdit }, 201))
+      .mockResolvedValueOnce(
+        jsonResponse({ partEdit, part: { id: "part_repaired" } }, 201),
+      );
+
+    await createPartEdit({ basePartId: "part / 1", name: "Repair" }, fetcher);
+    await applyPartEditOperation(
+      "edit / 1",
+      {
+        headRevisionId: "edit_rev_1",
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          rgba: [210, 160, 120, 255],
+        },
+      },
+      fetcher,
+    );
+    await commitPartEdit(
+      "edit / 1",
+      { headRevisionId: "edit_rev_2", name: "Repaired" },
+      fetcher,
+    );
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/part-edits",
+      "/api/part-edits/edit%20%2F%201/operations",
+      "/api/part-edits/edit%20%2F%201/commit",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toMatchObject({
+      headRevisionId: "edit_rev_1",
+      operation: { type: "paint_color", rgba: [210, 160, 120, 255] },
+    });
+    expect(partEditTextureUrl("rev / 2")).toBe(
+      "/api/part-edit-revisions/rev%20%2F%202/texture.png",
+    );
+    expect(partEditWriteMaskUrl("rev / 2")).toBe(
+      "/api/part-edit-revisions/rev%20%2F%202/write-mask.png",
+    );
+    expect(partEditMannequinUrl("rev / 2", "slim")).toBe(
+      "/api/part-edit-revisions/rev%20%2F%202/mannequin.png?armType=slim",
+    );
   });
 
   it("serializes the complete composition workflow with encoded ids", async () => {

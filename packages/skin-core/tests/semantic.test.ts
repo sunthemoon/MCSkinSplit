@@ -331,6 +331,8 @@ describe("reusable semantic parts", () => {
     expect(maskToPixelIds(part.writeMask)).toEqual([8 * 64 + 8, 8 * 64 + 9]);
     expect(getPixel(part.texture, 8, 8)).toEqual(getPixel(image, 8, 8));
     expect(getPixel(part.texture, 10, 8)).toEqual([0, 0, 0, 0]);
+    expect(part.manifest).toMatchObject({ schemaVersion: "1.0" });
+    expect("derivation" in part.manifest).toBe(false);
     expect(part.manifest.compatibility.armTypes).toEqual(["wide", "slim"]);
     expect(part.manifest.placement.surfaces).toEqual(["head.base.front"]);
 
