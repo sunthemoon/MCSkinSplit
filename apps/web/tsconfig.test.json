@@ -17,6 +17,7 @@
     "src/components/RestorationRecommendationPanel.tsx",
     "src/components/SemanticAiEventLog.tsx",
     "src/components/SemanticAiJobProgress.tsx",
+    "src/components/WorkflowSectionNav.tsx",
     "src/lib/mcSkinPreview.ts",
     "src/lib/libraryCatalog.ts",
     "src/lib/compositionRestoration.ts",

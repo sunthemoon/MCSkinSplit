@@ -18,6 +18,10 @@
   box-sizing: border-box;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   min-width: 320px;
   min-height: 100vh;
@@ -44,14 +48,19 @@ label:focus-within {
 }
 
 .studio-shell {
-  width: min(1480px, calc(100% - 40px));
+  display: grid;
+  width: min(1634px, calc(100% - 40px));
   min-height: 100vh;
   margin: 0 auto;
   padding: 42px 0 28px;
+  grid-template-columns: 138px minmax(0, 1480px);
+  column-gap: 16px;
+  align-items: start;
 }
 
 .studio-header {
   display: flex;
+  grid-column: 1 / -1;
   align-items: flex-end;
   justify-content: space-between;
   gap: 28px;
@@ -103,6 +112,163 @@ h1 span {
   color: #fff8e7;
   text-align: center;
   transform: rotate(2deg);
+}
+
+.studio-content {
+  min-width: 0;
+  grid-column: 2;
+}
+
+[data-workflow-section] {
+  scroll-margin-top: 20px;
+}
+
+[data-workflow-section]:focus {
+  outline: none;
+}
+
+[data-workflow-section]:focus-visible {
+  outline: 3px solid rgba(36, 195, 194, 0.7);
+  outline-offset: 5px;
+}
+
+.workflow-section-nav {
+  position: sticky;
+  z-index: 30;
+  top: 18px;
+  max-height: calc(100vh - 36px);
+  grid-column: 1;
+  overflow: hidden;
+  border: 2px solid var(--ink);
+  background: var(--paper-muted);
+  box-shadow: 6px 7px 0 rgba(24, 33, 38, 0.16);
+}
+
+.workflow-section-nav-heading {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  padding: 12px 10px 11px;
+  border-bottom: 2px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.workflow-section-nav-heading > span,
+.workflow-section-nav-heading > small,
+.workflow-section-nav a > span,
+.workflow-section-nav a > small {
+  font-family: "Cascadia Mono", "IBM Plex Mono", monospace;
+}
+
+.workflow-section-nav-heading > span {
+  color: var(--cyan-bright);
+  font-size: 0.47rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.workflow-section-nav-heading > strong {
+  font-family: "Copperplate", "Bahnschrift", sans-serif;
+  font-size: 0.86rem;
+  line-height: 1.15;
+}
+
+.workflow-section-nav-heading > small {
+  position: absolute;
+  right: 9px;
+  bottom: 10px;
+  color: rgba(244, 240, 228, 0.46);
+  font-size: 0.46rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.workflow-section-nav ol {
+  max-height: calc(100vh - 112px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-color: var(--cyan) rgba(24, 33, 38, 0.08);
+  scrollbar-width: thin;
+}
+
+.workflow-section-nav li + li {
+  border-top: 1px solid rgba(24, 33, 38, 0.18);
+}
+
+.workflow-section-nav a {
+  position: relative;
+  display: grid;
+  min-height: 64px;
+  padding: 9px 8px 8px 38px;
+  color: var(--ink);
+  text-decoration: none;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.workflow-section-nav a::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: transparent;
+  content: "";
+}
+
+.workflow-section-nav a > span {
+  position: absolute;
+  top: 11px;
+  left: 9px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid currentColor;
+  font-size: 0.5rem;
+  font-weight: 900;
+}
+
+.workflow-section-nav a > strong {
+  align-self: end;
+  font-size: 0.78rem;
+  line-height: 1.15;
+}
+
+.workflow-section-nav a > small {
+  margin-top: 4px;
+  color: rgba(24, 33, 38, 0.5);
+  font-size: 0.47rem;
+  line-height: 1.35;
+}
+
+.workflow-section-nav a:hover {
+  background: rgba(36, 195, 194, 0.12);
+  transform: translateX(2px);
+}
+
+.workflow-section-nav a:focus-visible {
+  z-index: 1;
+  outline: 3px solid rgba(36, 195, 194, 0.68);
+  outline-offset: -3px;
+}
+
+.workflow-section-nav a[aria-current="location"] {
+  background: var(--cyan);
+  color: white;
+}
+
+.workflow-section-nav a[aria-current="location"]::before {
+  background: var(--orange);
+}
+
+.workflow-section-nav a[aria-current="location"] > small {
+  color: rgba(255, 255, 255, 0.66);
 }
 
 .baseline-stamp strong {
@@ -4363,6 +4529,68 @@ h1 span {
   color: rgba(24, 33, 38, 0.56);
 }
 
+@media (max-width: 1280px) {
+  .studio-shell {
+    display: block;
+    width: min(1480px, calc(100% - 40px));
+  }
+
+  .workflow-section-nav {
+    display: grid;
+    top: 0;
+    max-height: none;
+    margin-bottom: 14px;
+    grid-template-columns: 162px minmax(0, 1fr);
+  }
+
+  .workflow-section-nav-heading {
+    border-right: 2px solid var(--ink);
+    border-bottom: 0;
+  }
+
+  .workflow-section-nav-heading > small {
+    bottom: 9px;
+  }
+
+  .workflow-section-nav ol {
+    display: flex;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .workflow-section-nav li {
+    flex: 0 0 152px;
+  }
+
+  .workflow-section-nav li + li {
+    border-top: 0;
+    border-left: 1px solid rgba(24, 33, 38, 0.18);
+  }
+
+  .workflow-section-nav a {
+    min-height: 66px;
+  }
+
+  .workflow-section-nav a:hover {
+    transform: translateY(-2px);
+  }
+
+  [data-workflow-section] {
+    scroll-margin-top: 82px;
+  }
+
+  .library-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1281px) and (max-width: 1700px) {
+  .library-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1060px) {
   .current-head-bundle-export {
     grid-template-columns: 1fr 1fr;
@@ -4491,6 +4719,49 @@ h1 span {
   .studio-shell {
     width: min(100% - 22px, 520px);
     padding-top: 24px;
+  }
+
+  .workflow-section-nav {
+    grid-template-columns: 102px minmax(0, 1fr);
+  }
+
+  .workflow-section-nav-heading {
+    padding: 9px 8px;
+  }
+
+  .workflow-section-nav-heading > span {
+    display: none;
+  }
+
+  .workflow-section-nav-heading > strong {
+    align-self: center;
+    font-size: 0.72rem;
+  }
+
+  .workflow-section-nav-heading > small {
+    right: 8px;
+    bottom: 8px;
+  }
+
+  .workflow-section-nav li {
+    flex-basis: 128px;
+  }
+
+  .workflow-section-nav a {
+    min-height: 56px;
+    padding-block: 7px;
+  }
+
+  .workflow-section-nav a > span {
+    top: 9px;
+  }
+
+  .workflow-section-nav a > small {
+    display: none;
+  }
+
+  [data-workflow-section] {
+    scroll-margin-top: 72px;
   }
 
   .studio-header {
@@ -4805,6 +5076,10 @@ h1 span {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+
   *,
   *::before,
   *::after {

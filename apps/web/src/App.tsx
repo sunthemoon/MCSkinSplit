@@ -30,6 +30,7 @@ import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PartBundleShelf } from "./components/PartBundleShelf";
 import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
+import { WorkflowSectionNav } from "./components/WorkflowSectionNav";
 import {
   SkinPreview,
   type PreviewMotion,
@@ -2157,7 +2158,7 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M11</p>
+          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M12</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
@@ -2165,13 +2166,23 @@ export function App() {
             Codex 辅助识别真实皮肤的语义部件，并对确定性还原候选给出受限建议；单组件修补、多图层混搭与目标残留还原均保留可追溯历史。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M11 可治理组件库与目标皮肤还原工作室">
-          <strong>M11</strong>
-          <span>CURATE + REUSE</span>
+        <div className="baseline-stamp" aria-label="M12 可导航的组件治理与皮肤还原工作室">
+          <strong>M12</strong>
+          <span>NAVIGATE + CURATE</span>
         </div>
       </header>
 
-      <section className="history-panel" aria-label="Revision 时间线">
+      <WorkflowSectionNav />
+
+      <div className="studio-content">
+
+        <section
+          id="workspace-history"
+          className="history-panel"
+          aria-label="Revision 时间线"
+          data-workflow-section
+          tabIndex={-1}
+        >
         <div className="history-toolbar">
           <div className="panel-heading">
             <span>00</span>
@@ -2302,7 +2313,7 @@ export function App() {
         </div>
 
         {historyError && <p className="history-error">{historyError}</p>}
-      </section>
+        </section>
 
       <AnalyzedSkinCatalog
         items={analyzedSkins}
@@ -2346,9 +2357,12 @@ export function App() {
       </section>
 
       <section
+        id="workspace-ai"
         className="ai-console"
         data-status={aiJob?.status ?? "idle"}
         aria-label="AI 语义识别任务"
+        data-workflow-section
+        tabIndex={-1}
       >
         <div className="ai-console-heading">
           <div className="panel-heading">
@@ -2534,7 +2548,13 @@ export function App() {
         </div>
       </section>
 
-      <section className="workbench" aria-label="皮肤预览工作台">
+      <section
+        id="workspace-preview"
+        className="workbench"
+        aria-label="皮肤预览工作台"
+        data-workflow-section
+        tabIndex={-1}
+      >
         <aside className="control-panel panel">
           <div className="panel-heading">
             <span>01</span>
@@ -2706,7 +2726,13 @@ export function App() {
         </section>
       </section>
 
-      <section className="semantic-workspace" aria-label="人工语义编辑与部件库">
+      <section
+        id="workspace-semantic"
+        className="semantic-workspace"
+        aria-label="人工语义编辑与部件库"
+        data-workflow-section
+        tabIndex={-1}
+      >
         <section className="semantic-panel semantic-editor-panel">
           <div className="panel-heading">
             <span>04</span>
@@ -3049,9 +3075,12 @@ export function App() {
       />
 
       <section
+        id="workspace-composition"
         className="composition-studio"
         aria-label="多部件混搭与冲突处理"
         data-status={composition?.status ?? "idle"}
+        data-workflow-section
+        tabIndex={-1}
       >
         <header className="composition-heading">
           <div className="panel-heading">
@@ -3663,11 +3692,12 @@ export function App() {
         </div>
       </section>
 
-      <footer className="status-bar" role="status" aria-live="polite">
-        <span>STATUS</span>
-        <p>{notice}</p>
-        <code>immutable edits · pixel composition · {layout.id}</code>
-      </footer>
+        <footer className="status-bar" role="status" aria-live="polite">
+          <span>STATUS</span>
+          <p>{notice}</p>
+          <code>immutable edits · pixel composition · {layout.id}</code>
+        </footer>
+      </div>
     </main>
   );
 }

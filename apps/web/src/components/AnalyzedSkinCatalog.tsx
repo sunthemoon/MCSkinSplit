@@ -62,7 +62,13 @@ export function AnalyzedSkinCatalog({
   );
 
   return (
-    <section className="analyzed-catalog" aria-label="已分析皮肤目录">
+    <section
+      id="workspace-catalog"
+      className="analyzed-catalog"
+      aria-label="已分析皮肤目录"
+      data-workflow-section
+      tabIndex={-1}
+    >
       <header className="analyzed-catalog-heading">
         <div className="panel-heading">
           <span>A+</span>

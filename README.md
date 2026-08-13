@@ -2,10 +2,13 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, and M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles, and M12 adds a responsive workflow index for navigating the long-form Studio.
 
 The current Studio can:
 
+- navigate seven stable workflow sections through native hash links, with a
+  desktop left-side sticky index, a sticky horizontal index at 1280 px and
+  below, scroll-aware `aria-current` state, and reduced-motion support;
 - fully decode 64×64 PNG files to RGBA, including indexed-color PNGs with `tRNS`;
 - infer Wide/Classic or Slim/Alex arm layouts and let the user override the result;
 - map an Atlas to 72 canonical body surfaces and reconstruct every RGBA pixel;

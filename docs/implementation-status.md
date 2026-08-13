@@ -18,6 +18,7 @@ Last updated: 2026-08-13
 | M9 composition remnant cleanup and Base restoration | Complete | Deterministic candidates, versioned/audited plans, restored previews, and compose provenance |
 | M10 constrained AI replacement recommendation | Complete | Repository Skill, ID-only validated proposal, shared Job/Run/Event telemetry, and explicit user Apply boundary |
 | M11 source-aware library lifecycle and correction | Complete | Whole-component unassign, provenance filters, soft retirement, immutable Bundle revision, and corrected-HEAD re-export |
+| M12 responsive workflow navigation | Complete | Seven stable section targets, sticky desktop/mobile navigation, scroll-aware active state, native hash links, and reduced-motion behavior |
 
 ## M0 baseline
 
@@ -767,3 +768,50 @@ Last updated: 2026-08-13
 - Whole-component unassign corrects semantic ownership only. It does not erase
   RGBA pixels from the skin texture; those pixels become `unknown` in the new
   Revision and remain available for a later correct classification.
+
+## M12 deliverables
+
+- Added seven stable navigation targets for the long-form Studio: Revision
+  history; analyzed catalog plus corrected-HEAD export; AI analysis; 01–03 skin
+  loading, UV, and avatar preview; 04–06 semantic editing and component library;
+  07 component repair; and 08 composition, restoration, and conflict handling.
+- Added a compact left-side workflow index that remains sticky on desktop. At
+  viewport widths of 1280 px and below, the same ordered index becomes a sticky,
+  horizontally scrollable bar so it does not reduce the editing canvas width.
+- Kept every entry as a native fragment link so direct URLs and no-script anchor
+  navigation retain their browser semantics. The active entry exposes
+  `aria-current="location"`.
+- Active-section selection derives from measured section geometry during scroll,
+  resize, and hash changes. Updates are coalesced through
+  `requestAnimationFrame`, and reaching the document end selects the final
+  composition section.
+- Section focus targets and scroll margins account for the responsive sticky
+  index. Global reduced-motion preferences disable smooth scrolling and shorten
+  navigation transitions.
+
+## M12 verification evidence
+
+- The final `pnpm verify` passes deterministic fixture checks, every workspace
+  TypeScript project, all `253` Vitest cases, and every production build. Package
+  totals are core `71`, compositor `8`, analysis pack `4`, provider `23`, Revision
+  `32`, Worker `15`, API `12`, and Web `88`.
+- Web tests cover the ordered native links, unique section identities, exact hash
+  validation, activation-line boundaries, non-finite geometry fallback, and the
+  document-end selection rule.
+- A real Chrome smoke test verified the left sticky index at `1600×900`, the
+  sticky horizontally scrollable index at `1200×820` and `700×800`, direct deep
+  links, click navigation, active-section updates, and browser Back restoration.
+  Each tested viewport had zero document-level horizontal overflow; the active
+  item remained visible inside the narrow horizontal list.
+- The only observed console message was an external Chrome-extension message
+  channel warning during navigation; the application itself emitted no runtime
+  error. The existing Vite warning for chunks larger than 500 kB remains
+  advisory and does not fail the build.
+
+## M12 boundaries
+
+- The index groups related surfaces into seven stable workflow destinations; it
+  does not add an entry for every nested card or editor control.
+- Navigation changes the viewport location and active-link presentation only. It
+  does not select a Project, Revision, Part, Bundle, repair, or Composition, and
+  it does not create or mutate persisted data.

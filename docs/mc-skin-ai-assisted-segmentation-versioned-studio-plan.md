@@ -2440,6 +2440,44 @@ feat(parts): add immutable component repair studio
 
 ---
 
+## M12：长页面工作流定位
+
+目标：在不拆散既有纵向工作台和视觉体系的前提下，为长页面提供稳定、可达且
+能反映当前位置的快速导航。
+
+实现：
+
+1. 将页面归纳为 7 个稳定区段：历次记录、已分析目录与修正 HEAD、AI 识别、
+   01–03 载入预览、04–06 组件拆分、07 组件修补、08 混搭合成。
+2. 桌面端在工作台左侧提供粘性定位索引；视口宽度不超过 1280 px 时，切换为
+   不压缩画布的顶部粘性横向索引。
+3. 每一项使用原生 hash 链接，目标区段提供稳定 ID 和焦点语义，便于直接链接、
+   键盘操作及浏览器原生回退。
+4. 通过区段相对视口的几何位置判断当前区段；scroll、resize 和 hashchange
+   更新统一经 `requestAnimationFrame` 合并，避免每个滚动事件同步重排状态。
+5. 当前项使用 `aria-current="location"` 暴露给辅助技术；横向索引自动保持当前
+   项可见。
+6. 区段 scroll margin 适配粘性索引高度；用户启用 reduced motion 时禁用平滑
+   滚动并将过渡压缩至最短。
+
+验收：
+
+- 7 个导航项与页面目标一一对应，顺序与实际工作流一致。
+- 点击任一项能定位到目标，滚动页面时当前项随区段变化，滚至页面底部时混搭
+  合成项被选中。
+- 桌面端索引位于左侧并保持可见；1280 px 及以下不产生页面横向溢出，窄屏可
+  横向浏览全部导航项。
+- 原生 hash 链接、键盘焦点、`aria-current` 与 reduced-motion 设置均可用。
+- 导航不修改 Project、Revision、Part、Bundle、修补或 Composition 数据。
+
+建议提交：
+
+```text
+feat(web): add responsive workflow navigation
+```
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2460,7 +2498,8 @@ feat(parts): add immutable component repair studio
 | S10 | M9 目标残留清理与 Base 肤色还原 | S6、S8 |
 | S11 | M10 受限 AI 换装候选建议 | S10 |
 | S12 | M11 组件库治理与误识别修正 | S5、S8、S9 |
-| S13 | 综合测试与审核 | 全部 |
+| S13 | M12 长页面工作流定位 | S12 |
+| S14 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

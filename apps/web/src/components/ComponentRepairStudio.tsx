@@ -381,7 +381,13 @@ export function ComponentRepairStudio({
   const displayedMannequinUrl = localPreview?.mannequinUrl ?? committedMannequinUrl;
 
   return (
-    <section className="component-repair-studio" aria-label="单一组件像素修补工作台">
+    <section
+      id="workspace-repair"
+      className="component-repair-studio"
+      aria-label="单一组件像素修补工作台"
+      data-workflow-section
+      tabIndex={-1}
+    >
       <header className="repair-heading">
         <div className="panel-heading">
           <span>07</span>
