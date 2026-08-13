@@ -123,6 +123,10 @@ export interface ProviderProgressEvent {
   readonly kind: ProviderProgressKind;
   readonly message: string;
   readonly status?: "started" | "completed" | "failed";
+  /** Sanitized correlation metadata; never contains tool output or reasoning. */
+  readonly itemId?: string;
+  readonly commandSummary?: string;
+  readonly exitCode?: number;
 }
 
 export interface ProviderAnalysisResult {

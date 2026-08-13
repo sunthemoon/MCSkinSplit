@@ -352,30 +352,31 @@ AI_KEEP_RUN_WORKSPACE=true
 - 即使线程可以恢复，下一次分析仍要显式提供当前 Revision 的完整分析包。
 - 数据库和快照文件才是权威状态。
 
-### 方案 B：`codex exec`，脚本化回退
+### 方案 B：`codex exec`，当前本地默认实现
 
 适合：
 
-- 快速验证 Skill；
-- CI 或本地任务队列；
-- 希望直接使用 JSON Schema 约束最终输出。
+- 本地任务队列；
+- 通过附图与内联的不可变语义输入调用模型；
+- 希望优先使用 JSON Schema 约束最终输出，并在传输能力失败时保留宿主校验回退。
 
-示意命令：
+当前实现由 Provider 直接构造参数并通过 stdin 传递内联契约；等价的权限边界示意如下：
 
 ```bash
 codex exec \
-  --sandbox workspace-write \
-  --output-schema ./schemas/analysis-proposal.schema.json \
-  -o ./runs/$RUN_ID/output/analysis-proposal.json \
-  "Use $mc-skin-segmenter to analyze the job in ./runs/$RUN_ID/job.json. Do not modify source files."
+  --sandbox read-only \
+  --ephemeral \
+  --json \
+  --output-schema ./runs/$RUN_ID/schema/analysis-proposal.schema.json \
+  --output-last-message ./runs/$RUN_ID/output/analysis-proposal.json \
+  "<inline immutable semantic contract and inputs>"
 ```
 
-需要运行过程事件时：
-
-```bash
-codex exec --json "Use $mc-skin-segmenter to analyze this job" \
-  > ./runs/$RUN_ID/codex-events.jsonl
-```
+Provider 还会关闭 shell、web、browser、computer、image generation、apps、
+plugins、MCP 与多代理等能力，附加经过确定性生成的皮肤视图，并捕获 JSONL 与
+stderr。结构化输出传输失败时只允许移除 `--output-schema` 重试；最终 JSON 仍由
+同一宿主 Schema 与像素归属 Validator 校验。当前 Skill 版本为 `1.2.0`，prompt
+版本为 `semantic-proposal-v3-tool-free`。
 
 ### 方案 C：Responses API，部署型补充
 
@@ -2587,13 +2588,14 @@ The proposal must classify exact candidate regions and must conform to the provi
 
 ## 30.2 Codex 权限
 
-- `codex exec` 使用 `--sandbox workspace-write`；
-- 写权限仅限单次 Run Workspace；
+- 语义分析与换装建议的默认 `codex exec` 均使用 `--sandbox read-only`；
+- 语义输入内联到 prompt，皮肤视图作为附图提供；模型不读取或写入 Run Workspace；
+- 关闭 shell、web、browser、computer、image generation、apps/plugins/MCP 与多代理等工具能力；
 - 不使用 `danger-full-access`；
 - 不让 Codex 接触数据库凭据；
 - 不把认证文件提交到仓库；
 - 运行超时并可取消；
-- 记录 stderr/JSONL 事件供排查。
+- 记录 stderr/JSONL 事件供排查；超时与取消也保留终止前已捕获的有界诊断。
 
 ## 30.3 数据隐私
 

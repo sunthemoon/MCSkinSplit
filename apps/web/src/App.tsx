@@ -26,6 +26,7 @@ import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
 import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
 import { CompositionRestorationPanel } from "./components/CompositionRestorationPanel";
 import { PartBundleShelf } from "./components/PartBundleShelf";
+import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
 import {
   SkinPreview,
@@ -2240,32 +2241,11 @@ export function App() {
                   ))}
                 </div>
 
-                <div className="ai-live-stream-heading">
-                  <span>LIVE PROCESS</span>
-                  <small>
-                    {aiJobRunning ? "实时刷新 · 自动跟随" : "运行记录"}
-                  </small>
-                </div>
-                <ol
-                  className="ai-event-log"
-                  ref={aiEventLogRef}
-                  aria-label="AI 识别实时过程"
-                  aria-live="polite"
-                  aria-relevant="additions"
-                >
-                  {aiJobDetail?.events.map((event) => (
-                    <li
-                      key={event.id}
-                      data-kind={aiEventKind(event.eventType)}
-                    >
-                      <time dateTime={event.createdAt}>
-                        {formatEventTime(event.createdAt)}
-                      </time>
-                      <i aria-hidden="true" />
-                      <span>{event.message}</span>
-                    </li>
-                  ))}
-                </ol>
+                <SemanticAiEventLog
+                  events={aiJobDetail?.events ?? []}
+                  running={aiJobRunning}
+                  logRef={aiEventLogRef}
+                />
               </>
             ) : (
               <>
@@ -3373,35 +3353,4 @@ function formatRevisionTime(value: string): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
-}
-
-function formatEventTime(value: string): string {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
-}
-
-function aiEventKind(
-  eventType: string,
-): "stage" | "tool" | "output" | "warning" | "error" {
-  if (eventType === "failed" || eventType === "cancelled" || eventType === "provider_error") {
-    return "error";
-  }
-  if (eventType === "provider_warning") {
-    return "warning";
-  }
-  if (eventType === "provider_tool") {
-    return "tool";
-  }
-  if (eventType === "provider_output" || eventType === "provider_usage") {
-    return "output";
-  }
-  return "stage";
 }

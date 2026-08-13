@@ -3,7 +3,7 @@ import replacementProposalSchema from "./replacement-plan.schema.json" with { ty
 
 export const ANALYSIS_PROPOSAL_SCHEMA = proposalSchema;
 export const AI_SKILL_NAME = "mc-skin-segmenter";
-export const AI_SKILL_VERSION = "1.1.0";
+export const AI_SKILL_VERSION = "1.2.0";
 export const PROPOSAL_VALIDATOR_VERSION = "semantic-proposal-validator-v1";
 export const REPLACEMENT_PLAN_SCHEMA = replacementProposalSchema;
 export const REPLACEMENT_PLANNER_SKILL_NAME = "mc-skin-replacement-planner";

@@ -1134,6 +1134,15 @@ h1 span {
   letter-spacing: 0.08em;
 }
 
+.ai-job-error::before {
+  color: #ff8f6e;
+  content: "TERMINAL JOB ERROR";
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.52rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
 .ai-review-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1252,6 +1261,19 @@ h1 span {
   line-height: 1.45;
 }
 
+.ai-event-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.ai-event-copy > small {
+  color: rgba(244, 240, 228, 0.42);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.51rem;
+  line-height: 1.45;
+}
+
 .ai-event-log time {
   color: rgba(36, 195, 194, 0.72);
   font-family: "Cascadia Mono", monospace;
@@ -1267,6 +1289,25 @@ h1 span {
 
 .ai-event-log li[data-kind="tool"] > i {
   background: var(--cyan-bright);
+}
+
+.ai-event-log li[data-status="active"] > i {
+  background: transparent;
+  box-shadow: 0 0 0 2px rgba(36, 195, 194, 0.14);
+}
+
+.ai-event-log li[data-status="recoverable"] {
+  color: #ffd49b;
+}
+
+.ai-event-log li[data-status="recoverable"] > i {
+  border-color: #e8a66f;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px #e8a66f;
+}
+
+.ai-event-log li[data-status="recoverable"] .ai-event-copy > small {
+  color: #e8b77d;
 }
 
 .ai-event-log li[data-kind="output"] {
@@ -1287,13 +1328,18 @@ h1 span {
   background: #e8a66f;
 }
 
-.ai-event-log li[data-kind="error"] {
+.ai-event-log li[data-kind="terminal"] {
   color: #ffad8d;
+  font-weight: 800;
 }
 
-.ai-event-log li[data-kind="error"] > i {
+.ai-event-log li[data-kind="terminal"] > i {
   border-color: #ff765f;
   background: #ff765f;
+}
+
+.ai-event-log li[data-kind="terminal"] .ai-event-copy > small {
+  color: #ff8f74;
 }
 
 .ai-empty-state {

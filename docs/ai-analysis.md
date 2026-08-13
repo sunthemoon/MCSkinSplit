@@ -20,6 +20,10 @@ selected Branch HEAD Revision
 The output Revision changes semantic segmentation only. Its `skin.png` is copied
 byte-for-byte from the input Revision.
 
+The current semantic runtime pins `mc-skin-segmenter` Skill `1.2.0` and prompt
+`semantic-proposal-v3-tool-free`. Those values are stored on every new Job so a
+retry remains attributable to the contract that actually ran.
+
 ## Analysis workspace
 
 `packages/skin-analysis-pack` creates one private directory per Run. It contains:
@@ -51,59 +55,74 @@ and uses supported options from the [CLI command reference](https://learn.chatgp
 For semantic analysis, the adapter:
 
 - starts the command directly without a shell;
-- uses the Run directory as `--cd` with `--sandbox workspace-write`, `--ephemeral`,
+- uses the Run directory as `--cd` with `--sandbox read-only`, `--ephemeral`,
   `--ignore-rules`, JSONL events, attached analysis images, and a bounded timeout;
-- sends the Skill instruction through stdin so variadic image arguments cannot
-  consume the prompt;
+- disables shell, web, browser, computer, image-generation, app, plugin, MCP,
+  delegation, and related tool capabilities, and inherits no shell environment;
+- inlines the immutable public Job, compact candidate summary, palette, prior
+  component summary, and classification rules through stdin. The model neither
+  reads the workspace nor writes the proposal file; Codex captures its final
+  response through `--output-last-message`;
 - resolves the Windows `codex.cmd` shim to the installed Node entry point instead
   of executing a batch file through a shell;
 - captures thread ID, token usage, stdout events, stderr, and final output with a
   16 MiB combined log limit;
+- preserves the stdout/stderr captured before timeout, cancellation, launch error,
+  or output-limit termination and lets the worker register those files as failure
+  assets when persistence succeeds;
 - projects JSONL stdout incrementally into safe Job events for the Studio process
   display while the provider is still running;
 - first requests schema-constrained output and, only for a structured-output
   transport/capability failure, may retry transport without `--output-schema`.
 
 The fallback never weakens host validation. The same Ajv and pixel validator checks
-the final JSON in both paths.
+the final JSON in both paths. A successful fallback proves that the provider can
+return host-valid JSON without schema-constrained transport; it does not establish
+that the selected external endpoint supports structured output.
 
-By default semantic analysis retains the user's Codex configuration so existing
-authentication and custom provider settings work. The model value
-`codex-config-default` means “use the model selected by that configuration.” The Run
-still has a private working directory and explicit sandbox. Set
+By default semantic analysis retains the user's model/provider selection so
+existing authentication and custom provider routing work, while the adapter
+overrides tool and sandbox capabilities for this invocation. The model value
+`codex-config-default` means “use the model selected by that configuration.” Set
 `AI_IGNORE_USER_CONFIG=true` only when an independently authenticated default Codex
-configuration is available.
+configuration is available; this additionally ignores user configuration rather
+than changing the mandatory tool-free restrictions.
 
-Replacement recommendation uses a stricter invocation. It always adds
+Replacement recommendation uses the same tool-free boundary but a smaller input.
+It always adds
 `--ignore-user-config` (Codex authentication still comes from `CODEX_HOME`), uses
-the read-only sandbox, disables shell, web, browser, computer, image, app, plugin,
-MCP, and delegation capabilities, and inherits no shell environment. The provider
-inlines the immutable public Job and candidate catalog into the prompt, so the
-model does not need file-read access. The checked-in Skill remains the versioned
-decision contract and manual validation tool; schema validation and exact catalog
-validation remain authoritative host checks.
+no attached images, and inlines only the immutable public Job and candidate
+catalog. The checked-in Skill remains the versioned decision contract and manual
+validation tool; schema validation and exact catalog validation remain
+authoritative host checks.
 
 ## Live process display
 
 While a Job is active, the provider converts supported Codex JSONL lifecycle events
-into generic session, turn, tool, proposal, usage, fallback, and error messages. The
+into generic session, turn, tool, output, usage, fallback, and error messages. The
 worker persists those messages in the existing Job event stream, and the Studio
 refreshes the Job every 1.5 seconds, renders events in chronological order, and
 automatically follows newly appended entries.
 
-The projection deliberately excludes `reasoning` items and never copies command
-text, search queries, agent-message bodies, or other raw item payloads into the HTTP
-event response. Complete JSONL remains available only as the local `raw_events`
-audit asset. Progress reporting is telemetry: a display or persistence callback
-failure cannot change the provider Run result.
+The projection deliberately excludes `reasoning` and agent-message bodies. When a
+tool-capable historical/provider event supplies them, the event stream may include
+a sanitized item ID, bounded command summary, and integer exit code, never command
+output or private reasoning. The Studio pairs matching tool start/result events
+where possible. A failed tool or provider-stage error is shown as recoverable and
+non-terminal; only the Job's `failed`/`cancelled` lifecycle event and dedicated Job
+error banner represent the terminal result. Repeated provider errors are collapsed,
+and an agent-message completion is presented as a stage update rather than proof
+that a validated proposal exists. Complete JSONL remains a local `raw_events` audit
+asset. Progress reporting is telemetry: a display or persistence callback failure
+cannot change the provider Run result.
 
 ## Proposal validation
 
 A proposal is accepted only when all of the following hold:
 
 - JSON matches the repository schema and the source Revision/model metadata;
-- every candidate ID exists and occurs exactly once, either in one component or in
-  the unassigned bucket;
+- every candidate ID exists and occurs exactly once: in one component, in the
+  unassigned bucket, or in exactly one review item;
 - component IDs are unique and component references point to existing components;
 - `sameOutfitGroup` is treated as an opaque grouping identifier, not a component
   reference;
@@ -130,9 +149,12 @@ Each model attempt is a separate Run. Available audit roles are:
 - `validator_report`
 - `stderr`
 
-Failures retain every artifact that was available at failure time. Retrying creates
-a new Job against the same historical input and records the currently installed
-Skill/prompt versions. It does not create a Revision unless requested and validated.
+Failures retain every artifact that was available at failure time. Provider
+timeouts and cancellations carry their captured JSONL/stderr to the worker instead
+of replacing those diagnostics with empty files; if nothing was emitted, an asset
+can still be empty. Retrying creates a new Job against the same historical input
+and records the currently installed Skill/prompt versions. It does not create a
+Revision unless requested and validated.
 
 A successful proposal creates a Revision only if the original input is still the
 target Branch HEAD, the source/result hashes match, and the successful Run ID is
@@ -183,9 +205,21 @@ pre-analysis coverage is:
 | `8d9ecb2e49f9d3df.png` | 223 | 1,909 |
 | `9058f3af3ffb104c.png` | 419 | 1,989 |
 
-The recorded end-to-end A1 Codex run produced 10 components covering all 1,860
-pixels with zero `unknown` pixels. Its first attempt failed validation and remained
-auditable; the bounded repair attempt succeeded and created the AI Revision.
+The earlier recorded end-to-end A1 Codex run produced 10 components covering all
+1,860 pixels with zero `unknown` pixels. Its first attempt failed validation and
+remained auditable; the bounded repair attempt succeeded and created the AI
+Revision.
+
+On 2026-08-13, a separate real-browser run started from the Studio against
+`9058f3af3ffb104c.png` with `max` reasoning, Skill `1.2.0`, and prompt
+`semantic-proposal-v3-tool-free`. The one observed Job/Run completed in 429.5
+seconds (7 minutes 9.5 seconds), passed host validation in Run attempt 1, produced 15
+components covering all 1,989 visible pixels with zero `unknown` pixels, and
+created an immutable `ai_segment` Revision. It emitted zero `provider_tool` events,
+confirming tool-free execution for that run. Its first schema-constrained transport
+request failed and the narrow local-JSON fallback succeeded, so this observation is
+neither a latency benchmark nor evidence that the selected external endpoint
+supports structured output.
 
 ## Privacy and operational boundaries
 
@@ -206,6 +240,8 @@ resetting earlier progress; failure or cancellation remains attached to the last
 evidenced stage. After machine validation succeeds, the card separately marks the
 handoff to manual review because AI success does not mean that component review is
 complete. The live event list remains the detailed record beneath this outline.
+Paired tool rows and recoverable warnings reduce duplicate noise without changing
+the stored event history or the fixed five-stage progress model.
 
 ## Constrained replacement recommendation
 

@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 ## Milestones
 
@@ -332,9 +332,10 @@ Last updated: 2026-08-12
 - Codex JSONL stdout is decoded and parsed incrementally instead of waiting for the
   child process to exit. Safe lifecycle projections are appended to persistent Job
   events and reach both Job-detail and event-list HTTP responses during execution.
-- The projection exposes generic session, turn, tool, proposal, usage, fallback,
-  and error states. It drops model reasoning and raw item fields, so commands,
-  searches, and proposal bodies are not copied into the browser event stream.
+- The projection exposes generic session, turn, tool, output, usage, fallback,
+  and error states. It drops model reasoning, command output, searches, proposal
+  bodies, and raw item fields. Tool-capable events may carry only a sanitized item
+  ID, bounded command summary, and integer exit code for correlation and diagnosis.
 - The Studio console now shows the complete event history in chronological order
   inside a fixed-height terminal pane. Active Jobs refresh every 1.5 seconds and
   automatically follow new events; completed Jobs remain manually scrollable.
@@ -342,10 +343,45 @@ Last updated: 2026-08-12
   an otherwise valid provider Run, while provider launch errors still produce a
   normal audited Job failure.
 
+## AI semantic provider hardening
+
+- Semantic analysis now pins `mc-skin-segmenter` Skill `1.2.0` and prompt
+  `semantic-proposal-v3-tool-free`. The provider inlines the immutable public Job,
+  compact candidate summary, palette, previous-component summary, and rules while
+  attaching the prepared skin views.
+- Semantic Codex runs use a read-only sandbox with shell, web, browser, computer,
+  image generation, apps/plugins/MCP, delegation, and related tools disabled. The
+  model returns one final JSON response; it cannot read or write the Run workspace.
+- Captured JSONL and stderr survive provider timeout, cancellation, launch errors,
+  and output-limit termination and are registered as failure assets when possible.
+  The narrow structured-output transport fallback remains locally JSON- and
+  pixel-validated; it does not imply endpoint support for structured output.
+- The Studio pairs tool start/result events where correlation permits, labels tool
+  failures and provider-stage errors as recoverable/non-terminal, collapses
+  duplicate provider errors, and reserves terminal styling for the Job error and
+  terminal lifecycle event. The five-stage progress model is unchanged.
+
+## AI semantic provider hardening verification evidence
+
+- A real Chrome flow started `aijob_7c7431b119c146f9be34813036fa2f23`
+  from the Studio against `9058f3af3ffb104c.png` using `max` reasoning. The one
+  observed Job/Run took 429.5 seconds (7 minutes 9.5 seconds) and succeeded after
+  the schema transport request fell back to host-validated JSON.
+- The successful Run attempt 1 created Revision
+  `rev_9c599f7ceffb492aa21d33b1807eacac` with 15 components covering all 1,989
+  visible pixels and zero `unknown` pixels. One low-confidence component remained
+  marked for review by the validator.
+- The successful run recorded zero `provider_tool` events and retained non-empty
+  JSONL, proposal, validator-report, and stderr audit assets. This demonstrates the
+  tool-free profile for that run; the observed duration is not a performance
+  guarantee or benchmark.
+
 ## AI live-process verification evidence
 
-- `pnpm verify` passes fixture drift detection, all TypeScript projects, all 123
-  Vitest cases, and every production build.
+- The final `pnpm verify` passes fixture drift detection, every workspace
+  TypeScript project, 239 Vitest cases, and every production build. Package totals
+  are skin core 71, web 80, analysis pack 4, compositor 8, Revision store 26,
+  AI provider 23, AI worker 15, and API 12.
 - Provider tests cover split JSONL chunks, safe event projection, omitted
   reasoning and raw proposal content, malformed events, usage summaries, and the
   structured-output fallback notice.
@@ -626,10 +662,10 @@ Last updated: 2026-08-12
 
 ## M10 verification evidence
 
-- `pnpm verify` passes all workspace checks: fixture integrity, type checks, 215
+- `pnpm verify` passes all workspace checks: fixture integrity, type checks, 239
   tests, and production builds. The package totals are skin core 71, compositor
-  8, analysis pack 4, AI provider 15, Revision store 26, AI worker 15, API 12,
-  and web 64 tests.
+  8, analysis pack 4, AI provider 23, Revision store 26, AI worker 15, API 12,
+  and web 80 tests.
 - The replacement Skill scripts pass syntax checks, the contract self-test, and
   repository Skill validation. The provider output schema is byte-for-byte equal
   to the Skill's checked-in schema.

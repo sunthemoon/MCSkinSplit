@@ -116,11 +116,17 @@ The detailed contract is in
   output, and log directories. Input and Skill hashes are verified after provider
   execution before any proposal can be accepted.
 - `packages/ai-provider` owns the replaceable model boundary. The default adapter
-  starts `codex exec` without a shell, applies timeout/cancellation/log limits, and
-  captures JSONL diagnostics.
-- The model can write only a JSON proposal. Host-side Ajv and deterministic pixel
-  checks require complete, non-overlapping ownership before the proposal is
-  converted to semantic masks.
+  starts `codex exec` without a shell in a read-only, tool-free profile, inlines
+  the immutable semantic contract, attaches only the prepared skin views, applies
+  timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.2.0`
+  and prompt `semantic-proposal-v3-tool-free` identify this runtime contract.
+- The model returns only a JSON proposal captured by the provider. It cannot read
+  or write the Run workspace. Host-side Ajv and deterministic pixel checks require
+  complete, non-overlapping ownership before the proposal is converted to semantic
+  masks. Structured-output transport failure may trigger one local-JSON fallback;
+  host validation remains identical.
+- Provider failures, including timeout and cancellation, carry captured JSONL and
+  stderr into audited Run assets when those streams contain data.
 - `apps/ai-worker` persists Job, Run, Asset, and Event records. One repair attempt is
   allowed by default; every attempt remains independently auditable.
 - Failed and cancelled jobs never create a Revision. A successful job can create an
@@ -222,9 +228,10 @@ The detailed contract is in
   verifies all input hashes after provider execution. No images are attached.
 - The default replacement provider ignores user configuration, clears MCP/apps,
   disables shell, web, browser, computer, image, plugin, and delegation tools,
-  uses a read-only sandbox, and inlines the public catalog. This tool-free profile
-  is specific to replacement recommendation; semantic analysis keeps its existing
-  configurable image-and-workspace invocation.
+  uses a read-only sandbox, and inlines the public catalog. Semantic analysis now
+  uses the same tool-free/read-only capability boundary with attached skin views
+  and an inline semantic contract, while retaining configured model/provider
+  routing unless `AI_IGNORE_USER_CONFIG` is enabled.
 - `packages/ai-provider` accepts only the planner's structured ID recommendation.
   Deterministic validation requires exact Job/Composition/candidate-set identity,
   every Base group, exact per-group ID permutations, a complete selected

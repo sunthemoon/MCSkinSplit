@@ -12,6 +12,7 @@ import {
   validateAnalysisProposal,
   validateReplacementPlanProposal,
   type ProposalValidationReport,
+  type ProviderProgressEvent,
   type ReplacementPlanValidationReport,
   type SkinSemanticAiProvider,
 } from "@mc-skin-split/ai-provider";
@@ -452,12 +453,7 @@ export class AiJobManager {
                 jobId,
                 `provider_${event.kind}`,
                 event.message,
-                {
-                  runId: progressRun.id,
-                  attempt,
-                  kind: event.kind,
-                  ...(event.status ? { status: event.status } : {}),
-                },
+                providerProgressEventData(progressRun.id, attempt, event),
               );
             } catch {
               // Progress telemetry must never decide the analysis result.
@@ -680,12 +676,7 @@ export class AiJobManager {
                 jobId,
                 `provider_${event.kind}`,
                 event.message,
-                {
-                  runId: progressRun.id,
-                  attempt,
-                  kind: event.kind,
-                  ...(event.status ? { status: event.status } : {}),
-                },
+                providerProgressEventData(progressRun.id, attempt, event),
               );
             } catch {
               // Progress telemetry must never decide the recommendation result.
@@ -1171,6 +1162,39 @@ function errorToJobError(error: unknown): AiJobError {
     code: "AI_WORKER_FAILED",
     message: error instanceof Error ? error.message : "AI Worker 无法完成任务",
   };
+}
+
+function providerProgressEventData(
+  runId: string,
+  attempt: number,
+  event: ProviderProgressEvent,
+): Readonly<Record<string, unknown>> {
+  const commandSummary = sanitizeProviderCommandSummary(event.commandSummary);
+  return {
+    runId,
+    attempt,
+    kind: event.kind,
+    ...(event.status ? { status: event.status } : {}),
+    ...(event.itemId && /^[a-zA-Z0-9._:-]{1,128}$/u.test(event.itemId)
+      ? { itemId: event.itemId }
+      : {}),
+    ...(commandSummary ? { commandSummary } : {}),
+    ...(event.exitCode !== undefined && Number.isInteger(event.exitCode)
+      ? { exitCode: event.exitCode }
+      : {}),
+  };
+}
+
+function sanitizeProviderCommandSummary(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value
+    .replace(/[\r\n\t]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .replace(/\b(?:[a-z][a-z0-9]*_)*(?:api_?key|access_?token|auth_?token|password|secret)\s*=\s*\S+/giu, "[REDACTED]")
+    .replace(/(--?(?:api[-_]?key|token|password|secret)|authorization)\s*(?::|=|\s)\s*(?:bearer\s+)?\S+/giu, "$1 [REDACTED]")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+(?::[^\s/@]*)?@/giu, "$1[REDACTED]@")
+    .trim();
+  return normalized ? normalized.slice(0, 240) : undefined;
 }
 
 function cryptoRandomSuffix(): string {

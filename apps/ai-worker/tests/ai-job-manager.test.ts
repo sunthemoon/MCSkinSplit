@@ -73,6 +73,13 @@ describe("AiJobManager", () => {
         "succeeded",
       ]),
     );
+    const sessionEvent = detail.events.find(
+      (event) => event.eventType === "provider_session",
+    );
+    expect(sessionEvent?.data).toMatchObject({
+      commandSummary: "[REDACTED] run",
+    });
+    expect(JSON.stringify(sessionEvent?.data)).not.toContain("sk-provider-secret");
     const revision = store.getRevision(finished.resultRevisionId!);
     expect(revision).toMatchObject({
       operationType: "ai_segment",
@@ -303,8 +310,8 @@ describe("AiJobManager", () => {
     });
 
     expect(retry).toMatchObject({
-      skillVersion: "1.1.0",
-      promptVersion: "semantic-proposal-v2",
+      skillVersion: "1.2.0",
+      promptVersion: "semantic-proposal-v3-tool-free",
     });
     await manager.waitForJob(retry.id);
   });
@@ -658,6 +665,7 @@ class ScriptedProvider implements SkinSemanticAiProvider {
       kind: "session",
       status: "started",
       message: "Codex 会话已建立",
+      commandSummary: "OPENAI_API_KEY=sk-provider-secret run",
     });
     input.onProgress?.({
       kind: "output",

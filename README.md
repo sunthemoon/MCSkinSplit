@@ -20,8 +20,10 @@ The current Studio can:
 - export a component as a verified five-file 64×64 part asset;
 - preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision;
 - prepare an integrity-checked analysis workspace for every AI run;
-- run the repository `mc-skin-segmenter` Skill through the local Codex CLI;
-- inspect job progress, attempts, validation artifacts, and review items in the Studio;
+- run the repository `mc-skin-segmenter` Skill 1.2 contract through a read-only,
+  tool-free local Codex CLI invocation with inline semantic inputs and attached views;
+- inspect five-stage Job progress, paired tool events, recoverable provider events,
+  validation artifacts, and review items in the Studio;
 - create an `ai_segment` Revision only after strict schema and pixel-ownership validation;
 - browse successful AI result Revisions as a persistent analyzed-skin catalog;
 - batch-export complete hair, clothing, or accessory groups without removing any of the 23 fine semantic categories;
@@ -65,7 +67,7 @@ Open `http://127.0.0.1:5173`. The command starts both the Fastify API (`127.0.0.
 
 Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` before starting the API to use another directory.
 
-AI analysis and replacement recommendation default to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. Both are optional: deterministic editing, candidate generation, manual selection, history, previews, and parts remain available without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, and audit behavior.
+AI analysis and replacement recommendation default to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. Semantic analysis uses the versioned Skill 1.2 / `semantic-proposal-v3-tool-free` contract: public semantic inputs are inlined, skin views are attached, and model tools are disabled. The provider first requests schema-constrained output and can narrowly fall back to locally validated JSON when that transport capability fails. Timeout and cancellation failures retain captured JSONL/stderr diagnostics when available. AI remains optional: deterministic editing, candidate generation, manual selection, history, previews, and parts work without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, verification evidence, and audit behavior.
 
 Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution and every requested Base restoration pixel has a validated source. Complete-category bundles and restoration target groups are convenience views over immutable fine parts and the unchanged 23-category taxonomy; neither flattens or deletes fine semantic components. Component repair provides deterministic authored reconstruction, while composition restoration clears selected target remnants and fills exposed Base pixels from explicit candidates. Neither workflow claims to recover factual pixels that were hidden in the source artwork. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer and conflict behavior, [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md) for cleanup, candidate, audit, and provenance contracts, [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog and whole-bundle workflow, and [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md) for repair tools and history.
 

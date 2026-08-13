@@ -9,7 +9,7 @@ import type {
 
 export const CANDIDATE_REGION_ALGORITHM_VERSION = "bounded-color80-surface-cc-v2";
 export const TAXONOMY_VERSION = "coarse-v1";
-export const PROMPT_VERSION = "semantic-proposal-v2";
+export const PROMPT_VERSION = "semantic-proposal-v3-tool-free";
 export const ANALYSIS_REASONING_EFFORTS = [
   "low",
   "medium",
