@@ -2402,6 +2402,44 @@ feat(parts): add immutable component repair studio
 
 ---
 
+## M11：来源可检索的组件库治理与误识别修正
+
+目标：保留 Part、Bundle 和 Revision 的不可变证据，同时让用户能够修正整
+组件误识别、区分不同来源皮肤，并停止继续使用错误或过时的库资产。
+
+实现：
+
+1. 保留现有 23 个精细类别和三类聚合视图。整组件误识别通过两步确认的
+   `unassign_pixels` 操作将其完整 mask 退回 `unknown`，并创建子 Revision；
+   混合组件仍使用选择像素后的拆分、重分类或局部退回。
+2. Part 与 Bundle 列表返回来源 Project、Branch 和 Revision 序号，支持按
+   名称/来源搜索、按来源工程与 Revision、精细类别/聚合类别、使用中/已退役
+   状态筛选。显示分组使用 Project ID 保证同名工程仍可区分。
+3. `part_asset` 与 `part_bundle` 增加可恢复的 active/retired 生命周期。退役
+   只改变库可发现性和新引用权限，不删除纹理、mask、manifest、成员关系或
+   历史引用；管理视图仍可预览并恢复。
+4. Active Bundle 阻止直接退役其成员 Part。用户可先退役 Bundle，或选择
+   同一来源 Revision、相同聚合类别且模型兼容的修补 Part 生成新 Bundle；
+   新旧 Bundle 在同一事务内分别创建和退役。
+5. 人工修正后的当前 Branch HEAD 可以重新导出完整头发、衣服或饰品，无需
+   伪装成新的 AI 结果，也不会覆盖原 Bundle。
+6. 新应用、修补 base/donor、Bundle 加入和混搭图层拒绝 retired 资产。
+   修补操作/提交和混搭提交会再次检查状态，避免草稿打开后退役产生绕过。
+
+验收：
+
+- 错误的完整组件可在新 Revision 中明确退回 unknown，原 RGBA 与旧 Revision
+  不变。
+- 多皮肤 Part/Bundle 可按来源工程和 Revision 搜索、分组与筛选。
+- 修补 Part 可生成替换成员的新 Bundle；旧 Bundle 可追溯但默认不再出现。
+- 退役资产不能创建新引用，既有 Revision、混搭、修补历史及预览仍可读取。
+- 退役与 Bundle 修订失败不会留下半完成目录或部分数据库状态。
+
+详细合同见 [`semantic-editing-and-parts.md`](semantic-editing-and-parts.md) 与
+[`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2419,7 +2457,10 @@ feat(parts): add immutable component repair studio
 | S7 | M6 拼装器 | S4、S5 |
 | S8 | M7 已分析目录与完整大类部件集 | S4、S5、S6、S7 |
 | S9 | M8 不可变单组件修补工作台 | S4、S5、S8 |
-| S10 | 综合测试与审核 | 全部 |
+| S10 | M9 目标残留清理与 Base 肤色还原 | S6、S8 |
+| S11 | M10 受限 AI 换装候选建议 | S10 |
+| S12 | M11 组件库治理与误识别修正 | S5、S8、S9 |
+| S13 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

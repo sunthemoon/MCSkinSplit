@@ -247,8 +247,39 @@ describe("revision API", () => {
     const listed = await app.inject({ method: "GET", url: "/api/parts?category=hair" });
     expect(listed.statusCode).toBe(200);
     expect(listed.json()).toMatchObject({
-      parts: [{ id: part.id, name: "API 头发", category: "hair" }],
+      parts: [{
+        id: part.id,
+        name: "API 头发",
+        category: "hair",
+        libraryStatus: "active",
+        sourceProjectName: "Semantic API source",
+        sourceBranchName: "main",
+      }],
     });
+    const retired = await app.inject({
+      method: "POST",
+      url: `/api/parts/${part.id}/retire`,
+      payload: { reason: "识别错误" },
+    });
+    expect(retired.statusCode).toBe(200);
+    expect(retired.json()).toMatchObject({
+      part: { id: part.id, libraryStatus: "retired", retiredReason: "识别错误" },
+    });
+    expect((await app.inject({ method: "GET", url: "/api/parts" })).json()).toEqual({ parts: [] });
+    const retiredList = await app.inject({
+      method: "GET",
+      url: `/api/parts?status=retired&q=${encodeURIComponent("Semantic API")}`,
+    });
+    expect(retiredList.json()).toMatchObject({ parts: [{ id: part.id }] });
+    const invalidQuery = await app.inject({ method: "GET", url: "/api/parts?status=deleted" });
+    expect(invalidQuery.statusCode).toBe(400);
+    const restore = await app.inject({
+      method: "POST",
+      url: `/api/parts/${part.id}/restore`,
+      payload: {},
+    });
+    expect(restore.statusCode).toBe(200);
+    expect(restore.json()).toMatchObject({ part: { libraryStatus: "active" } });
     const texture = await app.inject({
       method: "GET",
       url: `/api/parts/${part.id}/texture.png`,
@@ -1036,6 +1067,39 @@ describe("revision API", () => {
     expect(bundleDetail.statusCode).toBe(200);
     expect(bundleDetail.json()).toMatchObject({ bundle: { id: bundle.id } });
 
+    const blockedMemberRetire = await app.inject({
+      method: "POST",
+      url: `/api/parts/${bundle.members[0]!.partId}/retire`,
+      payload: {},
+    });
+    expect(blockedMemberRetire.statusCode).toBe(409);
+    expect(blockedMemberRetire.json()).toMatchObject({
+      error: { code: "CONFLICT", details: { bundleIds: [bundle.id] } },
+    });
+
+    const retiredBundle = await app.inject({
+      method: "POST",
+      url: `/api/part-bundles/${bundle.id}/retire`,
+      payload: { reason: "错误的完整头发" },
+    });
+    expect(retiredBundle.statusCode).toBe(200);
+    expect(retiredBundle.json()).toMatchObject({
+      bundle: { libraryStatus: "retired", retiredReason: "错误的完整头发" },
+    });
+    expect((await app.inject({ method: "GET", url: "/api/part-bundles" })).json())
+      .toEqual({ bundles: [] });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/part-bundles?status=retired&projectId=${sourceProject.projectId}&q=${encodeURIComponent("女仆")}`,
+    })).json()).toMatchObject({ bundles: [{ id: bundle.id }] });
+    const restoredBundle = await app.inject({
+      method: "POST",
+      url: `/api/part-bundles/${bundle.id}/restore`,
+      payload: {},
+    });
+    expect(restoredBundle.statusCode).toBe(200);
+    expect(restoredBundle.json()).toMatchObject({ bundle: { libraryStatus: "active" } });
+
     const preview = await app.inject({
       method: "GET",
       url: `/api/part-bundles/${bundle.id}/preview.png`,
@@ -1101,6 +1165,18 @@ describe("revision API", () => {
       analyzedSkin: {
         groups: [{ kind: "hair", exportedBundleId: bundle.id }],
       },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/part-bundles/${bundle.id}/retire`,
+      payload: { reason: "不再作为导出结果" },
+    });
+    const catalogAfterRetire = await app.inject({
+      method: "GET",
+      url: `/api/analyzed-skins/${analyzedRevisionId}`,
+    });
+    expect(catalogAfterRetire.json()).toMatchObject({
+      analyzedSkin: { groups: [{ kind: "hair", exportedBundleId: null }] },
     });
   });
 

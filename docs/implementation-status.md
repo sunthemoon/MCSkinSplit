@@ -17,6 +17,7 @@ Last updated: 2026-08-13
 | M8 immutable component repair | Complete | Append-only repair Revisions, verified files, neutral 3D preview, and new-part commit |
 | M9 composition remnant cleanup and Base restoration | Complete | Deterministic candidates, versioned/audited plans, restored previews, and compose provenance |
 | M10 constrained AI replacement recommendation | Complete | Repository Skill, ID-only validated proposal, shared Job/Run/Event telemetry, and explicit user Apply boundary |
+| M11 source-aware library lifecycle and correction | Complete | Whole-component unassign, provenance filters, soft retirement, immutable Bundle revision, and corrected-HEAD re-export |
 
 ## M0 baseline
 
@@ -692,3 +693,77 @@ Last updated: 2026-08-13
   does not need to be installed as a global Codex Skill.
 - Manual candidate selection remains the full no-AI fallback, including when a
   recommendation is stale, deferred, invalid, cancelled, or failed.
+
+## M11 deliverables
+
+- Added an explicit two-step whole-component correction action. It submits the
+  selected component's complete stored spans as `unassign_pixels`, creates a new
+  semantic Revision, and returns those pixels to `unknown`; the old Revision and
+  any already exported Parts or Bundles remain unchanged.
+- Added source-aware Part and Bundle browsing. Library rows expose source Project
+  name, source Branch name, and source Revision sequence, and the browser can
+  search names/provenance or filter by Project, semantic category/aggregate kind,
+  and `active`/`retired` state. List APIs default to active assets and accept
+  strict `status`, `projectId`, `sourceRevisionId`, `q`, and category/kind filters.
+- Added a soft library lifecycle to immutable `part_asset` and `part_bundle`
+  records. Retirement stores time and an optional reason; restoration clears
+  those lifecycle fields. Texture, masks, manifests, files, member ordering, and
+  historical references are never deleted or rewritten.
+- An active Bundle protects its members from direct retirement and reports the
+  blocking Bundle IDs. A Bundle may instead be retired as a whole or revised by
+  replacing one or more members.
+- Bundle revision validates active state, source Project/Revision, aggregate
+  kind, model intersection, unique resulting membership, stored hashes, and
+  conflicting pixel overlap. One immediate transaction creates a new immutable
+  Bundle, copies the resulting ordered member references, records the old/new
+  mapping in metadata, and retires the former Bundle.
+- Added corrected-HEAD aggregate export beside the analyzed-skin catalog. After
+  reclassifying or returning mistaken pixels to `unknown`, users can export the
+  current Branch HEAD as a new complete hair, clothing, or accessory Bundle. No
+  successful AI Job is required for this corrective re-export path.
+- Retired assets remain available through detail, PNG preview, repair history,
+  composition history, and existing reference reads. Operations that create a
+  new reference reject retired assets: applying a Part, creating or continuing a
+  repair, copying an external donor Part, and adding a Part or Bundle to a
+  Composition. Composition commit also rechecks every persisted layer so a Part
+  retired after draft creation cannot be committed accidentally.
+- The analyzed-skin catalog reports an exported Bundle only while that Bundle is
+  active. Retiring it makes the group available for a fresh export without
+  erasing the prior Bundle.
+
+## M11 verification evidence
+
+- The final `pnpm verify` passes deterministic fixture checks, every workspace
+  TypeScript project, all `249` Vitest cases, and every production build. Package
+  totals are core `71`, compositor `8`, analysis pack `4`, provider `23`, Revision
+  `32`, Worker `15`, API `12`, and Web `84`.
+- The focused Revision-store suite covers migration defaults and lifecycle
+  consistency, source/search/status filters, immutable reads after retirement,
+  active-Bundle retirement conflicts, restoration, Bundle revision validation,
+  atomic failure, member replacement evidence, and retired-reference guards.
+- The API suite covers strict query validation, Part and Bundle retirement and
+  restoration, `409` responses with blocking Bundle IDs, source-aware list
+  results, preview readability, and active-only analyzed-catalog export state.
+- Web tests cover source grouping/filter helpers, lifecycle controls,
+  corrected-HEAD actions, whole-component correction, Bundle member replacement,
+  and disabled new-reference actions for retired library entries.
+- A real Chrome smoke test loaded the persisted `9058f3af3ffb104c` source,
+  filtered its three active Bundles, opened the retired prior complete-hair Bundle,
+  confirmed the active replacement Bundle contains `Long Crimson Hair · 修补`,
+  and found the original erroneous Part in retired management. Selecting the
+  source hair component exposed the two-step whole-component removal confirmation
+  without executing its second mutation step. A temporary 700 px viewport had no
+  document or library-toolbar horizontal overflow, and the app emitted no browser
+  console errors. The existing Vite build-size advisory remains non-blocking.
+
+## M11 boundaries
+
+- Retirement is reversible library visibility and reference control, not data
+  deletion. It does not remove files, rewrite manifests, edit Bundle membership,
+  or purge historical Revisions, repair projects, or Composition layers.
+- A repaired Part does not silently replace its ancestor or every Bundle that
+  contains it. Users explicitly revise the chosen Bundle, which produces a new
+  identity and keeps the prior Bundle readable as retired history.
+- Whole-component unassign corrects semantic ownership only. It does not erase
+  RGBA pixels from the skin texture; those pixels become `unknown` in the new
+  Revision and remain available for a later correct classification.

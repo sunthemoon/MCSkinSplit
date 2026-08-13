@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, and M10 added a separate constrained AI recommendation step over those host-generated restoration candidates.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, and M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles.
 
 The current Studio can:
 
@@ -17,7 +17,12 @@ The current Studio can:
 - restore an old state as a new Revision or continue it on a new Branch;
 - classify exact UV pixels into a fixed semantic taxonomy through a 64×64 draft canvas;
 - merge, split, reclassify, or return component pixels to `unknown` without editing history in place;
+- remove a whole mistaken component classification by returning all of its pixels to `unknown` in a new Revision;
 - export a component as a verified five-file 64×64 part asset;
+- search and filter Parts and complete-category Bundles by source Project, Branch/Revision provenance, semantic kind, and active/retired state;
+- retire or restore immutable library entries without deleting files or breaking historical reads;
+- revise a complete-category Bundle by replacing repaired members, creating a new Bundle and retiring the old Bundle atomically;
+- re-export hair, clothing, or accessories from a corrected current Branch HEAD without overwriting earlier library versions;
 - preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision;
 - prepare an integrity-checked analysis workspace for every AI run;
 - run the repository `mc-skin-segmenter` Skill 1.2 contract through a read-only,

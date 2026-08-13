@@ -1,4 +1,5 @@
 import {
+  SEMANTIC_CATEGORIES,
   SEMANTIC_CATEGORY_LABELS,
   getSkinLayout,
   type ArmType,
@@ -30,14 +31,23 @@ import {
 } from "../lib/partRepairPreview";
 import { PartRepairCanvas } from "./PartRepairCanvas";
 import { SkinPreview, type PreviewMotion } from "./SkinPreview";
+import { LibraryToolbar } from "./LibraryToolbar";
 import {
   buildPartRepairOperation,
   resolveRepairBasePart,
   type RepairTool,
 } from "../lib/partRepairOperations";
+import {
+  DEFAULT_LIBRARY_FILTERS,
+  filterLibraryAssets,
+  librarySourceLabel,
+  type LibraryFilters,
+  type LibraryProjectOption,
+} from "../lib/libraryCatalog";
 
 interface ComponentRepairStudioProps {
   readonly parts: readonly ApiPart[];
+  readonly projectOptions: readonly LibraryProjectOption[];
   readonly defaultArmType: ArmType;
   readonly onCommittedPart: (part: ApiPart) => void | Promise<void>;
   readonly onNotice?: (message: string) => void;
@@ -45,6 +55,7 @@ interface ComponentRepairStudioProps {
 
 export function ComponentRepairStudio({
   parts,
+  projectOptions,
   defaultArmType,
   onCommittedPart,
   onNotice,
@@ -54,6 +65,9 @@ export function ComponentRepairStudio({
   const [basePartId, setBasePartId] = useState("");
   const [donorPartId, setDonorPartId] = useState("");
   const [projectName, setProjectName] = useState("组件修补草稿");
+  const [libraryFilters, setLibraryFilters] = useState<LibraryFilters>({
+    ...DEFAULT_LIBRARY_FILTERS,
+  });
   const [committedName, setCommittedName] = useState("修补后的组件");
   const [tool, setTool] = useState<RepairTool>("paint");
   const [selectedPixelIds, setSelectedPixelIds] = useState<readonly number[]>([]);
@@ -82,16 +96,23 @@ export function ComponentRepairStudio({
   previewUrlStoreRef.current ??= new PartRepairPreviewUrlStore();
   previewTaskRef.current ??= new LatestPartRepairPreviewTask();
 
+  const filteredParts = useMemo(
+    () => filterLibraryAssets(parts, libraryFilters),
+    [libraryFilters, parts],
+  );
+
   useEffect(() => {
     if (!detail) {
       setBasePartId((current) =>
-        parts.some((part) => part.id === current) ? current : (parts[0]?.id ?? ""),
+        filteredParts.some((part) => part.id === current) ? current : (filteredParts[0]?.id ?? ""),
       );
     }
     setDonorPartId((current) =>
-      parts.some((part) => part.id === current) ? current : (parts[1]?.id ?? parts[0]?.id ?? ""),
+      filteredParts.some((part) => part.id === current)
+        ? current
+        : (filteredParts[1]?.id ?? filteredParts[0]?.id ?? ""),
     );
-  }, [detail, parts]);
+  }, [detail, filteredParts]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,10 +128,10 @@ export function ComponentRepairStudio({
     };
   }, []);
 
-  const selectedBasePart = resolveRepairBasePart(detail, parts, basePartId);
-  const selectableBaseParts = detail && !parts.some((part) => part.id === detail.basePart.id)
-    ? [detail.basePart, ...parts]
-    : parts;
+  const selectedBasePart = resolveRepairBasePart(detail, filteredParts, basePartId);
+  const selectableBaseParts = detail && !filteredParts.some((part) => part.id === detail.basePart.id)
+    ? [detail.basePart, ...filteredParts]
+    : filteredParts;
   const armType = compatibleArmType(selectedBasePart, defaultArmType);
   const surfaceKeys = useMemo(
     () => getSkinLayout(armType).surfaceOrder,
@@ -122,7 +143,9 @@ export function ComponentRepairStudio({
     : selectedBasePart
       ? partTextureUrl(selectedBasePart.id)
       : "";
-  const selectedDonorPart = parts.find((part) => part.id === donorPartId);
+  const selectedDonorPart = filteredParts.find((part) => part.id === donorPartId);
+  const groupedSelectableBaseParts = groupPartsBySource(selectableBaseParts, projectOptions);
+  const groupedDonorParts = groupPartsBySource(filteredParts, projectOptions);
   const canApply = Boolean(draft && !busy);
 
   const hasConfiguredOperation = Boolean(
@@ -372,6 +395,18 @@ export function ComponentRepairStudio({
         </p>
       </header>
 
+      <LibraryToolbar
+        filters={libraryFilters}
+        projects={projectOptions}
+        typeLabel="CATEGORY"
+        typeOptions={SEMANTIC_CATEGORIES.map((category) => ({
+          value: category,
+          label: SEMANTIC_CATEGORY_LABELS[category],
+        }))}
+        showStatus={false}
+        onChange={setLibraryFilters}
+      />
+
       <div className="repair-project-bar">
         <label>
           <span>OPEN REPAIR</span>
@@ -396,10 +431,14 @@ export function ComponentRepairStudio({
             onChange={(event) => setBasePartId(event.target.value)}
           >
             {selectableBaseParts.length === 0 && <option value="">暂无已保存组件</option>}
-            {selectableBaseParts.map((part) => (
-              <option key={part.id} value={part.id}>
-                {part.name} · {SEMANTIC_CATEGORY_LABELS[part.category]}
-              </option>
+            {groupedSelectableBaseParts.map((group) => (
+              <optgroup key={group.key} label={group.label}>
+                {group.parts.map((part) => (
+                  <option key={part.id} value={part.id}>
+                    {part.name} · {SEMANTIC_CATEGORY_LABELS[part.category]}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </label>
@@ -478,7 +517,14 @@ export function ComponentRepairStudio({
               <label>
                 <span>DONOR PART</span>
                 <select value={donorPartId} onChange={(event) => setDonorPartId(event.target.value)}>
-                  {parts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
+                  {filteredParts.length === 0 && <option value="">当前检索条件下没有可用来源</option>}
+                  {groupedDonorParts.map((group) => (
+                    <optgroup key={group.key} label={group.label}>
+                      {group.parts.map((part) => (
+                        <option key={part.id} value={part.id}>{part.name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               </label>
               <label>
@@ -578,6 +624,27 @@ export function ComponentRepairStudio({
 
 function requiresPixels(tool: RepairTool): boolean {
   return tool === "paint" || tool === "erase";
+}
+
+function groupPartsBySource(
+  parts: readonly ApiPart[],
+  projectOptions: readonly LibraryProjectOption[],
+): readonly {
+  readonly key: string;
+  readonly label: string;
+  readonly parts: readonly ApiPart[];
+}[] {
+  const groups = new Map<string, { label: string; parts: ApiPart[] }>();
+  for (const part of parts) {
+    const key = `${part.sourceProjectId}:${part.sourceRevisionId}`;
+    const group = groups.get(key) ?? {
+      label: librarySourceLabel(part, projectOptions),
+      parts: [],
+    };
+    group.parts.push(part);
+    groups.set(key, group);
+  }
+  return [...groups].map(([key, group]) => ({ key, ...group }));
 }
 
 function hasPreviewableOperation(

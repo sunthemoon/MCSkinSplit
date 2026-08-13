@@ -109,11 +109,13 @@ import {
   type OperationSnapshot,
   type PartApplicationPreview,
   type PartFileAsset,
+  type PartLibraryQuery,
   type PartEditDetail,
   type PartEditOperationType,
   type PartEditProject,
   type PartEditRevision,
   type PartBundle,
+  type PartBundleLibraryQuery,
   type PartBundleMember,
   type PersistedCompositionRestorationPlan,
   type RevisionDiff,
@@ -121,6 +123,8 @@ import {
   type RevisionMutationResult,
   type RevisionOperationType,
   type RevisionStoreOptions,
+  type RevisePartBundleInput,
+  type RevisePartBundleResult,
   type RevertRevisionInput,
   type SerializedPartRepairOperation,
   type ReorderCompositionLayersInput,
@@ -200,11 +204,17 @@ interface PartRow {
   readonly source_project_id: string;
   readonly source_revision_id: string;
   readonly source_component_id: string;
+  readonly source_project_name: string;
+  readonly source_branch_name: string;
+  readonly source_revision_sequence: number;
   readonly name: string;
   readonly category: string;
   readonly subtype: string | null;
   readonly arm_type: string;
   readonly created_at: string;
+  readonly library_status: string;
+  readonly retired_at: string | null;
+  readonly retired_reason: string | null;
   readonly manifest_json: string;
   readonly metadata_json: string;
   readonly texture_id: string;
@@ -238,11 +248,17 @@ interface PartBundleRow {
   readonly id: string;
   readonly source_project_id: string;
   readonly source_revision_id: string;
+  readonly source_project_name: string;
+  readonly source_branch_name: string;
+  readonly source_revision_sequence: number;
   readonly name: string;
   readonly kind: string;
   readonly source_group_key: string | null;
   readonly arm_types_json: string;
   readonly created_at: string;
+  readonly library_status: string;
+  readonly retired_at: string | null;
+  readonly retired_reason: string | null;
   readonly metadata_json: string;
 }
 
@@ -349,6 +365,9 @@ const REVISION_SELECT = `
 const PART_SELECT = `
   SELECT
     part.*,
+    source_project.name AS source_project_name,
+    source_branch.name AS source_branch_name,
+    source_revision.sequence AS source_revision_sequence,
     texture.id AS texture_id,
     texture.storage_path AS texture_storage_path,
     texture.mime_type AS texture_mime_type,
@@ -375,11 +394,26 @@ const PART_SELECT = `
     source.byte_size AS source_byte_size,
     source.sha256 AS source_sha256
   FROM part_asset AS part
+  JOIN skin_project AS source_project ON source_project.id = part.source_project_id
+  JOIN skin_revision AS source_revision ON source_revision.id = part.source_revision_id
+  JOIN skin_branch AS source_branch ON source_branch.id = source_revision.branch_id
   JOIN part_file_asset AS texture ON texture.id = part.texture_asset_id
   JOIN part_file_asset AS mask ON mask.id = part.mask_asset_id
   JOIN part_file_asset AS manifest ON manifest.id = part.manifest_asset_id
   JOIN part_file_asset AS preview ON preview.id = part.preview_asset_id
   JOIN part_file_asset AS source ON source.id = part.source_asset_id
+`;
+
+const PART_BUNDLE_SELECT = `
+  SELECT
+    bundle.*,
+    source_project.name AS source_project_name,
+    source_branch.name AS source_branch_name,
+    source_revision.sequence AS source_revision_sequence
+  FROM part_bundle AS bundle
+  JOIN skin_project AS source_project ON source_project.id = bundle.source_project_id
+  JOIN skin_revision AS source_revision ON source_revision.id = bundle.source_revision_id
+  JOIN skin_branch AS source_branch ON source_branch.id = source_revision.branch_id
 `;
 
 export class RevisionStore {
@@ -488,19 +522,44 @@ export class RevisionStore {
     return rows.map(mapAsset);
   }
 
-  listParts(category?: string): SkinPart[] {
-    if (category !== undefined && !isSemanticCategory(category)) {
-      throw invalidInput(`未知部件分类：${category}`);
+  listParts(category?: string): SkinPart[];
+  listParts(query?: PartLibraryQuery): SkinPart[];
+  listParts(input?: string | PartLibraryQuery): SkinPart[] {
+    const query: PartLibraryQuery =
+      typeof input === "string" ? { category: input as PartLibraryQuery["category"] } : (input ?? {});
+    if (query.category !== undefined && !isSemanticCategory(query.category)) {
+      throw invalidInput(`未知部件分类：${query.category}`);
     }
-    const rows = (category === undefined
-      ? this.database
-          .prepare(`${PART_SELECT} ORDER BY part.created_at, part.id`)
-          .all()
-      : this.database
-          .prepare(
-            `${PART_SELECT} WHERE part.category = ? ORDER BY part.created_at, part.id`,
-          )
-          .all(category)) as PartRow[];
+    validateLibraryStatus(query.status);
+    const conditions: string[] = [];
+    const parameters: string[] = [];
+    if ((query.status ?? "active") !== "all") {
+      conditions.push("part.library_status = ?");
+      parameters.push(query.status ?? "active");
+    }
+    if (query.category) {
+      conditions.push("part.category = ?");
+      parameters.push(query.category);
+    }
+    if (query.projectId) {
+      this.getProject(query.projectId);
+      conditions.push("part.source_project_id = ?");
+      parameters.push(query.projectId);
+    }
+    if (query.sourceRevisionId) {
+      this.getRevision(query.sourceRevisionId);
+      conditions.push("part.source_revision_id = ?");
+      parameters.push(query.sourceRevisionId);
+    }
+    if (query.q) {
+      const term = `%${escapeLike(validateText("搜索关键词", query.q, 120))}%`;
+      conditions.push("(part.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR source_project.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR source_branch.name LIKE ? ESCAPE '\\' COLLATE NOCASE)");
+      parameters.push(term, term, term);
+    }
+    const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.database
+      .prepare(`${PART_SELECT}${where} ORDER BY part.created_at, part.id`)
+      .all(...parameters) as PartRow[];
     return rows.map(mapPart);
   }
 
@@ -512,6 +571,41 @@ export class RevisionStore {
       throw notFound("Part", partId);
     }
     return mapPart(row);
+  }
+
+  private retirePartUnlocked(partId: string, reason?: string): SkinPart {
+    const retire = this.database.transaction(() => {
+      const part = this.getPart(partId);
+      if (part.libraryStatus === "retired") return;
+      const rows = this.database.prepare(`
+        SELECT DISTINCT bundle.id
+        FROM part_bundle_member AS member
+        JOIN part_bundle AS bundle ON bundle.id = member.bundle_id
+        WHERE member.part_id = ? AND bundle.library_status = 'active'
+        ORDER BY bundle.id
+      `).all(partId) as Array<{ id: string }>;
+      if (rows.length) {
+        throw conflict("部件被启用中的完整大类引用，请先修订或停用部件集", {
+          partId,
+          bundleIds: rows.map((row) => row.id),
+        });
+      }
+      this.database.prepare(`
+        UPDATE part_asset SET library_status = 'retired', retired_at = ?, retired_reason = ?
+        WHERE id = ?
+      `).run(this.now(), validateRetireReason(reason), partId);
+    });
+    retire.immediate();
+    return this.getPart(partId);
+  }
+
+  private restorePartUnlocked(partId: string): SkinPart {
+    this.getPart(partId);
+    this.database.prepare(`
+      UPDATE part_asset SET library_status = 'active', retired_at = NULL, retired_reason = NULL
+      WHERE id = ?
+    `).run(partId);
+    return this.getPart(partId);
   }
 
   listPartEditProjects(basePartId?: string): PartEditProject[] {
@@ -567,34 +661,87 @@ export class RevisionStore {
     };
   }
 
-  listPartBundles(kind?: AggregateKind, sourceRevisionId?: string): PartBundle[] {
+  listPartBundles(kind?: AggregateKind, sourceRevisionId?: string): PartBundle[];
+  listPartBundles(query?: PartBundleLibraryQuery): PartBundle[];
+  listPartBundles(input?: AggregateKind | PartBundleLibraryQuery, legacySourceRevisionId?: string): PartBundle[] {
+    const query = typeof input === "string"
+      ? { kind: input, ...(legacySourceRevisionId ? { sourceRevisionId: legacySourceRevisionId } : {}) }
+      : (input ?? (legacySourceRevisionId ? { sourceRevisionId: legacySourceRevisionId } : {}));
+    const kind = query.kind;
+    const sourceRevisionId = query.sourceRevisionId;
     if (kind !== undefined && !isAggregateKind(kind)) {
       throw invalidInput(`未知部件集分类：${kind}`);
     }
-    if (sourceRevisionId !== undefined) this.getRevision(sourceRevisionId);
+    validateLibraryStatus(query.status);
     const conditions: string[] = [];
     const parameters: string[] = [];
+    if ((query.status ?? "active") !== "all") {
+      conditions.push("bundle.library_status = ?");
+      parameters.push(query.status ?? "active");
+    }
     if (kind !== undefined) {
-      conditions.push("kind = ?");
+      conditions.push("bundle.kind = ?");
       parameters.push(kind);
     }
     if (sourceRevisionId !== undefined) {
-      conditions.push("source_revision_id = ?");
+      this.getRevision(sourceRevisionId);
+      conditions.push("bundle.source_revision_id = ?");
       parameters.push(sourceRevisionId);
+    }
+    if (query.projectId) {
+      this.getProject(query.projectId);
+      conditions.push("bundle.source_project_id = ?");
+      parameters.push(query.projectId);
+    }
+    if (query.q) {
+      const term = `%${escapeLike(validateText("搜索关键词", query.q, 120))}%`;
+      conditions.push("(bundle.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR source_project.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR source_branch.name LIKE ? ESCAPE '\\' COLLATE NOCASE)");
+      parameters.push(term, term, term);
     }
     const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.database
-      .prepare(`SELECT * FROM part_bundle${where} ORDER BY created_at, id`)
+      .prepare(`${PART_BUNDLE_SELECT}${where} ORDER BY bundle.created_at, bundle.id`)
       .all(...parameters) as PartBundleRow[];
     return rows.map((row) => this.mapPartBundle(row));
   }
 
   getPartBundle(bundleId: string): PartBundle {
     const row = this.database
-      .prepare("SELECT * FROM part_bundle WHERE id = ?")
+      .prepare(`${PART_BUNDLE_SELECT} WHERE bundle.id = ?`)
       .get(bundleId) as PartBundleRow | undefined;
     if (!row) throw notFound("Part bundle", bundleId);
     return this.mapPartBundle(row);
+  }
+
+  private retirePartBundleUnlocked(bundleId: string, reason?: string): PartBundle {
+    const bundle = this.getPartBundle(bundleId);
+    if (bundle.libraryStatus === "retired") return bundle;
+    this.database.prepare(`
+      UPDATE part_bundle SET library_status = 'retired', retired_at = ?, retired_reason = ?
+      WHERE id = ?
+    `).run(this.now(), validateRetireReason(reason), bundleId);
+    return this.getPartBundle(bundleId);
+  }
+
+  private restorePartBundleUnlocked(bundleId: string): PartBundle {
+    const restore = this.database.transaction(() => {
+      const bundle = this.getPartBundle(bundleId);
+      const retiredMemberIds = bundle.members
+        .filter((member) => member.part.libraryStatus === "retired")
+        .map((member) => member.partId);
+      if (retiredMemberIds.length) {
+        throw conflict("部件集包含已停用部件，无法恢复", {
+          bundleId,
+          partIds: retiredMemberIds,
+        });
+      }
+      this.database.prepare(`
+        UPDATE part_bundle SET library_status = 'active', retired_at = NULL, retired_reason = NULL
+        WHERE id = ?
+      `).run(bundleId);
+    });
+    restore.immediate();
+    return this.getPartBundle(bundleId);
   }
 
   private mapPartBundle(row: PartBundleRow): PartBundle {
@@ -637,12 +784,23 @@ export class RevisionStore {
       id: row.id,
       sourceProjectId: row.source_project_id,
       sourceRevisionId: row.source_revision_id,
+      sourceProjectName: row.source_project_name,
+      sourceBranchName: row.source_branch_name,
+      sourceRevisionSequence: row.source_revision_sequence,
       name: row.name,
       kind: row.kind,
       sourceGroupKey: row.source_group_key,
       armTypes,
       members,
       createdAt: row.created_at,
+      libraryStatus: assertLibraryStatus(
+        row.library_status,
+        row.id,
+        row.retired_at,
+        row.retired_reason,
+      ),
+      retiredAt: row.retired_at,
+      retiredReason: row.retired_reason,
       metadata: parseObjectJson(row.metadata_json, `Part bundle ${row.id} metadata`),
     };
   }
@@ -741,6 +899,14 @@ export class RevisionStore {
     );
   }
 
+  async retirePart(partId: string, reason?: string): Promise<SkinPart> {
+    return this.withWriteLock(async () => this.retirePartUnlocked(partId, reason));
+  }
+
+  async restorePart(partId: string): Promise<SkinPart> {
+    return this.withWriteLock(async () => this.restorePartUnlocked(partId));
+  }
+
   async createPartEditProject(
     input: CreatePartEditProjectInput,
   ): Promise<PartEditDetail> {
@@ -772,6 +938,21 @@ export class RevisionStore {
     return this.withWriteLock(() =>
       this.exportPartBundleUnlocked(revisionId, input),
     );
+  }
+
+  async retirePartBundle(bundleId: string, reason?: string): Promise<PartBundle> {
+    return this.withWriteLock(async () => this.retirePartBundleUnlocked(bundleId, reason));
+  }
+
+  async restorePartBundle(bundleId: string): Promise<PartBundle> {
+    return this.withWriteLock(async () => this.restorePartBundleUnlocked(bundleId));
+  }
+
+  async revisePartBundle(
+    bundleId: string,
+    input: RevisePartBundleInput,
+  ): Promise<RevisePartBundleResult> {
+    return this.withWriteLock(() => this.revisePartBundleUnlocked(bundleId, input));
   }
 
   async applyPart(
@@ -1196,10 +1377,21 @@ export class RevisionStore {
 
   private async readVerifiedBundleTexture(bundleId: string) {
     const bundle = this.getPartBundle(bundleId);
+    return this.validateBundleMemberPixels(
+      bundle.members.map((member) => member.part),
+      bundle.id,
+    );
+  }
+
+  private async validateBundleMemberPixels(
+    parts: readonly SkinPart[],
+    bundleId: string,
+    overlapMode: "snapshot" | "proposal" = "snapshot",
+  ) {
     const data = new Uint8Array(64 * 64 * 4);
     const written = new Uint8Array(64 * 64);
-    for (const member of bundle.members) {
-      const stored = await this.verifyPartStorage(member.partId);
+    for (const part of parts) {
+      const stored = await this.verifyPartStorage(part.id);
       const texture = decodeSkinPng(stored.files["texture.png"].bytes);
       const mask = rgbaImageToMask(
         decodeSkinPng(stored.files["write-mask.png"].bytes),
@@ -1208,14 +1400,21 @@ export class RevisionStore {
         const offset = pixelId * 4;
         const alpha = texture.data[offset + 3]!;
         if (alpha === 0) {
-          throw snapshotCorrupt(bundle.id, `部件 ${member.partId} 写入了透明像素`);
+          throw snapshotCorrupt(bundleId, `部件 ${part.id} 写入了透明像素`);
         }
         if (written[pixelId]) {
           const same = [0, 1, 2, 3].every(
             (channel) => data[offset + channel] === texture.data[offset + channel],
           );
           if (!same) {
-            throw snapshotCorrupt(bundle.id, `部件集成员在像素 ${pixelId} 存在不同颜色重叠`);
+            if (overlapMode === "proposal") {
+              throw invalidInput("修订后的部件集成员存在不同颜色重叠", {
+                bundleId,
+                pixelId,
+                partId: part.id,
+              });
+            }
+            throw snapshotCorrupt(bundleId, `部件集成员在像素 ${pixelId} 存在不同颜色重叠`);
           }
           continue;
         }
@@ -1804,6 +2003,7 @@ export class RevisionStore {
       });
     }
     const part = this.getPart(input.partId);
+    this.assertActivePart(part, "加入混搭");
     await this.verifyPartStorage(part.id);
     const position = input.position ?? existing.length;
     if (!Number.isInteger(position) || position < 0 || position > existing.length) {
@@ -1847,6 +2047,10 @@ export class RevisionStore {
   ): Promise<CompositionDetail> {
     const composition = this.requireDraftComposition(compositionId);
     const bundle = this.getPartBundle(input.bundleId);
+    this.assertActiveBundle(bundle, "加入混搭");
+    for (const member of bundle.members) {
+      this.assertActivePart(member.part, "加入混搭");
+    }
     if (!bundle.armTypes.includes(composition.armType)) {
       throw invalidInput("部件集不兼容当前混搭模型", {
         bundleId: bundle.id,
@@ -2238,6 +2442,15 @@ export class RevisionStore {
       });
     }
     const layers = this.listCompositionLayers(composition.id);
+    const retiredLayerParts = layers
+      .map((layer) => layer.part)
+      .filter((part) => part.libraryStatus === "retired");
+    if (retiredLayerParts.length > 0) {
+      throw conflict("混搭图层引用了已退役部件，不能创建 Revision", {
+        compositionId,
+        partIds: retiredLayerParts.map((part) => part.id),
+      });
+    }
     const evaluated = await this.evaluateComposition(composition, layers);
     if (!evaluated.report.committable) {
       throw conflict("混搭仍有未解决冲突，不能创建 Revision", {
@@ -2774,6 +2987,7 @@ export class RevisionStore {
     }
 
     const part = this.getPart(input.partId);
+    this.assertActivePart(part, "应用部件");
     const [snapshot, storedPart] = await Promise.all([
       this.verifyRevisionSnapshot(sourceRevision.id),
       this.verifyPartStorage(part.id),
@@ -3093,6 +3307,7 @@ export class RevisionStore {
     input: CreatePartEditProjectInput,
   ): Promise<PartEditDetail> {
     const basePart = this.getPart(input.basePartId);
+    this.assertActivePart(basePart, "创建部件修补工程");
     const projectId = this.id("part_edit");
     const revisionId = this.id("part_edit_revision");
     const createdAt = this.now();
@@ -3182,6 +3397,7 @@ export class RevisionStore {
     }
     const head = this.getPartEditRevision(project.headRevisionId);
     const basePart = this.getPart(project.basePartId);
+    this.assertActivePart(basePart, "继续部件修补");
     const state = await this.readPartEditState(head.id);
     const operation = await this.resolvePartRepairOperation(
       project.id,
@@ -3291,6 +3507,7 @@ export class RevisionStore {
     }
     const head = this.getPartEditRevision(project.headRevisionId);
     const basePart = this.getPart(project.basePartId);
+    this.assertActivePart(basePart, "提交部件修补");
     const storedEdit = await this.verifyPartEditStorage(head.id);
     const state = await this.readPartEditState(head.id);
     if (maskToPixelIds(state.writeMask).length === 0) {
@@ -3400,6 +3617,7 @@ export class RevisionStore {
     let source: PartRepairState;
     if (operation.source.kind === "part") {
       const part = this.getPart(operation.source.partId);
+      this.assertActivePart(part, "复制部件表面");
       const stored = await this.verifyPartStorage(part.id);
       source = {
         armType: part.armType,
@@ -3756,6 +3974,108 @@ export class RevisionStore {
       throw error;
     }
     return this.getPartBundle(bundleId);
+  }
+
+  private async revisePartBundleUnlocked(
+    bundleId: string,
+    input: RevisePartBundleInput,
+  ): Promise<RevisePartBundleResult> {
+    const source = this.getPartBundle(bundleId);
+    this.assertActiveBundle(source, "修订部件集");
+    if (!Array.isArray(input.replacements) || input.replacements.length === 0) {
+      throw invalidInput("部件集修订至少需要一个成员替换");
+    }
+    const oldIds = input.replacements.map((item) => item.memberPartId);
+    const replacementIds = input.replacements.map((item) => item.replacementPartId);
+    if (new Set(oldIds).size !== oldIds.length || new Set(replacementIds).size !== replacementIds.length) {
+      throw invalidInput("修订项中的原成员和替换部件均不能重复");
+    }
+    const membersById = new Map(source.members.map((member) => [member.partId, member]));
+    for (const memberPartId of oldIds) {
+      if (!membersById.has(memberPartId)) {
+        throw invalidInput("修订的原部件不是该部件集成员", { bundleId, memberPartId });
+      }
+    }
+    const replacements = new Map<string, SkinPart>();
+    for (const item of input.replacements) {
+      const part = this.getPart(item.replacementPartId);
+      this.assertActivePart(part, "修订部件集");
+      if (
+        part.sourceProjectId !== source.sourceProjectId ||
+        part.sourceRevisionId !== source.sourceRevisionId
+      ) {
+        throw invalidInput("替换部件必须与原部件集来自同一 Project/Revision", {
+          bundleId,
+          replacementPartId: part.id,
+        });
+      }
+      if (aggregateKindForCategory(part.category) !== source.kind) {
+        throw invalidInput("替换部件与原部件集大类不一致", {
+          bundleId,
+          replacementPartId: part.id,
+          kind: source.kind,
+        });
+      }
+      replacements.set(item.memberPartId, part);
+    }
+    const resultingParts = source.members.map(
+      (member) => replacements.get(member.partId) ?? member.part,
+    );
+    const resultingIds = resultingParts.map((part) => part.id);
+    if (new Set(resultingIds).size !== resultingIds.length) {
+      throw invalidInput("修订后的部件集不能包含重复部件", { bundleId });
+    }
+    const armTypes = intersectArmTypes(
+      resultingParts.map((part) => part.manifest.compatibility.armTypes),
+    );
+    if (armTypes.length === 0) {
+      throw invalidInput("修订后的部件集成员没有共同兼容模型");
+    }
+    await Promise.all(resultingParts.map((part) => this.verifyPartStorage(part.id)));
+    await this.validateBundleMemberPixels(resultingParts, source.id, "proposal");
+    const revisedBundleId = this.id("part_bundle");
+    const createdAt = this.now();
+    const name = validateText("部件集名称", input.name ?? source.name, 120);
+    const reason = validateRetireReason(input.reason) ?? `由 ${revisedBundleId} 替代`;
+    const revise = this.database.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO part_bundle (
+          id, source_project_id, source_revision_id, name, kind,
+          source_group_key, arm_types_json, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        revisedBundleId,
+        source.sourceProjectId,
+        source.sourceRevisionId,
+        name,
+        source.kind,
+        source.sourceGroupKey,
+        compactCanonicalJson(armTypes),
+        createdAt,
+        compactCanonicalJson({
+          ...source.metadata,
+          revisionOfBundleId: source.id,
+          replacements: input.replacements,
+          reason,
+        }),
+      );
+      const insertMember = this.database.prepare(`
+        INSERT INTO part_bundle_member (bundle_id, part_id, position, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      resultingParts.forEach((part, position) =>
+        insertMember.run(revisedBundleId, part.id, position, createdAt),
+      );
+      this.database.prepare(`
+        UPDATE part_bundle SET library_status = 'retired', retired_at = ?, retired_reason = ?
+        WHERE id = ? AND library_status = 'active'
+      `).run(createdAt, reason, source.id);
+    });
+    revise.immediate();
+    return {
+      bundle: this.getPartBundle(revisedBundleId),
+      retiredBundle: this.getPartBundle(source.id),
+    };
   }
 
   private insertPreparedPart(
@@ -4536,6 +4856,28 @@ export class RevisionStore {
     return id;
   }
 
+  private assertActivePart(part: SkinPart, action: string): void {
+    if (part.libraryStatus === "retired") {
+      throw conflict(`${action}不能引用已停用部件`, {
+        partId: part.id,
+        libraryStatus: part.libraryStatus,
+        retiredAt: part.retiredAt,
+        retiredReason: part.retiredReason,
+      });
+    }
+  }
+
+  private assertActiveBundle(bundle: PartBundle, action: string): void {
+    if (bundle.libraryStatus === "retired") {
+      throw conflict(`${action}不能引用已停用部件集`, {
+        bundleId: bundle.id,
+        libraryStatus: bundle.libraryStatus,
+        retiredAt: bundle.retiredAt,
+        retiredReason: bundle.retiredReason,
+      });
+    }
+  }
+
   private now(): string {
     const value = this.nowProvider();
     const date = value instanceof Date ? value : new Date(value);
@@ -4574,6 +4916,9 @@ function mapPart(row: PartRow): SkinPart {
     sourceProjectId: row.source_project_id,
     sourceRevisionId: row.source_revision_id,
     sourceComponentId: row.source_component_id,
+    sourceProjectName: row.source_project_name,
+    sourceBranchName: row.source_branch_name,
+    sourceRevisionSequence: row.source_revision_sequence,
     name: row.name,
     category: row.category,
     ...(row.subtype ? { subtype: row.subtype } : {}),
@@ -4615,6 +4960,14 @@ function mapPart(row: PartRow): SkinPart {
       row.source_sha256,
     ),
     createdAt: row.created_at,
+    libraryStatus: assertLibraryStatus(
+      row.library_status,
+      row.id,
+      row.retired_at,
+      row.retired_reason,
+    ),
+    retiredAt: row.retired_at,
+    retiredReason: row.retired_reason,
     metadata: parseObjectJson(row.metadata_json, `Part ${row.id} metadata`),
   };
 }
@@ -5432,6 +5785,39 @@ function compactCanonicalJson(value: unknown): string {
   return canonicalJson(value).trim();
 }
 
+function validateLibraryStatus(value: unknown): void {
+  if (value !== undefined && value !== "active" && value !== "retired" && value !== "all") {
+    throw invalidInput(`未知资产状态：${String(value)}`);
+  }
+}
+
+function assertLibraryStatus(
+  value: string,
+  id: string,
+  retiredAt: string | null,
+  retiredReason: string | null,
+): "active" | "retired" {
+  if (value !== "active" && value !== "retired") {
+    throw snapshotCorrupt(id, "部件库状态无效");
+  }
+  if (
+    (value === "active" && (retiredAt !== null || retiredReason !== null)) ||
+    (value === "retired" &&
+      (retiredAt === null || Number.isNaN(Date.parse(retiredAt))))
+  ) {
+    throw snapshotCorrupt(id, "部件库状态与停用信息不一致");
+  }
+  return value;
+}
+
+function validateRetireReason(value: string | undefined): string | null {
+  return value === undefined ? null : validateText("停用原因", value, 300);
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0;
 }
@@ -6083,6 +6469,7 @@ function aggregateCatalogGroups(
         .reverse()
         .find(
           (bundle) =>
+            bundle.libraryStatus === "active" &&
             bundle.kind === bucket.kind &&
             bundle.sourceGroupKey === bucket.sourceGroupKey &&
             bundle.members.length === componentIds.length &&

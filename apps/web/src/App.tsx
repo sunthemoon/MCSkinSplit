@@ -25,6 +25,8 @@ import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
 import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
 import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
 import { CompositionRestorationPanel } from "./components/CompositionRestorationPanel";
+import { LibraryLifecycleControls } from "./components/LibraryLifecycleControls";
+import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PartBundleShelf } from "./components/PartBundleShelf";
 import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
@@ -71,6 +73,11 @@ import {
   partMannequinUrl,
   partPreviewUrl,
   previewRevisionPart,
+  restorePart,
+  restorePartBundle,
+  retirePart,
+  retirePartBundle,
+  revisePartBundle,
   retryAiJob,
   removeCompositionLayer,
   reorderCompositionLayers,
@@ -94,6 +101,14 @@ import {
   type ApiRevision,
   type ApiSegmentation,
 } from "./lib/revisionApi";
+import {
+  BUNDLE_KIND_LABELS,
+  DEFAULT_LIBRARY_FILTERS,
+  buildLibraryProjectOptions,
+  filterLibraryAssets,
+  librarySourceLabel,
+  type LibraryFilters,
+} from "./lib/libraryCatalog";
 import {
   defaultRestorationCandidateIds,
   loadRestorationRecommendationSelection,
@@ -264,6 +279,17 @@ export function App() {
   const [semanticBusy, setSemanticBusy] = useState(false);
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
   const [partBundles, setPartBundles] = useState<readonly ApiPartBundle[]>([]);
+  const [partLibraryFilters, setPartLibraryFilters] = useState<LibraryFilters>({
+    ...DEFAULT_LIBRARY_FILTERS,
+  });
+  const [compositionPartFilters, setCompositionPartFilters] = useState<LibraryFilters>({
+    ...DEFAULT_LIBRARY_FILTERS,
+  });
+  const [bundleLibraryFilters, setBundleLibraryFilters] = useState<LibraryFilters>({
+    ...DEFAULT_LIBRARY_FILTERS,
+  });
+  const [libraryLifecycleBusy, setLibraryLifecycleBusy] = useState(false);
+  const [removeComponentArmedId, setRemoveComponentArmedId] = useState<string | null>(null);
   const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
   const [analyzedSkins, setAnalyzedSkins] =
     useState<readonly ApiAnalyzedSkin[]>([]);
@@ -331,6 +357,8 @@ export function App() {
   const restorationRecommendationContextRef = useRef(0);
   const handledAiJobsRef = useRef(new Set<string>());
   const aiEventLogRef = useRef<HTMLOListElement>(null);
+  const partPreviewRequestRef = useRef(0);
+  const libraryLifecycleBusyRef = useRef(false);
 
   const releaseObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -341,19 +369,21 @@ export function App() {
 
   const refreshReusableCatalog = useCallback(async () => {
     const [parts, bundles, catalog] = await Promise.all([
-      listParts(),
-      listPartBundles(),
+      listParts({ status: "all" }),
+      listPartBundles({ status: "all" }),
       listAnalyzedSkins(),
     ]);
     setPartLibrary(parts);
     setPartBundles(bundles);
     setAnalyzedSkins(catalog);
-    setSelectedPartId((current) => current ?? parts[0]?.id ?? null);
-    setCompositionPartId((current) => current ?? parts[0]?.id ?? null);
+    const firstActivePart = parts.find((part) => part.libraryStatus === "active");
+    const firstActiveBundle = bundles.find((bundle) => bundle.libraryStatus === "active");
+    setSelectedPartId((current) => current ?? firstActivePart?.id ?? null);
+    setCompositionPartId((current) => current ?? firstActivePart?.id ?? null);
     setSelectedBundleId((current) =>
       bundles.some((bundle) => bundle.id === current)
         ? current
-        : (bundles[0]?.id ?? null),
+        : (firstActiveBundle?.id ?? null),
     );
   }, []);
 
@@ -945,6 +975,54 @@ export function App() {
   const activeComponent = segmentation?.components.find(
     (component) => component.instanceId === activeComponentId,
   );
+  const libraryProjectOptions = useMemo(
+    () => buildLibraryProjectOptions([...partLibrary, ...partBundles]),
+    [partBundles, partLibrary],
+  );
+  const filteredPartLibrary = useMemo(
+    () => filterLibraryAssets(partLibrary, partLibraryFilters),
+    [partLibrary, partLibraryFilters],
+  );
+  const filteredCompositionParts = useMemo(
+    () => filterLibraryAssets(partLibrary, compositionPartFilters),
+    [compositionPartFilters, partLibrary],
+  );
+  const filteredPartBundles = useMemo(
+    () => filterLibraryAssets(partBundles, bundleLibraryFilters),
+    [bundleLibraryFilters, partBundles],
+  );
+  const activePartLibrary = useMemo(
+    () => partLibrary.filter((part) => part.libraryStatus === "active"),
+    [partLibrary],
+  );
+  useEffect(() => {
+    setSelectedPartId((current) =>
+      filteredPartLibrary.some((part) => part.id === current)
+        ? current
+        : (filteredPartLibrary[0]?.id ?? null),
+    );
+  }, [filteredPartLibrary]);
+  useEffect(() => {
+    partPreviewRequestRef.current += 1;
+    setPartPreview(null);
+  }, [selectedRevisionId, selectedPartId]);
+  useEffect(() => {
+    setRemoveComponentArmedId(null);
+  }, [selectedRevisionId, activeComponentId]);
+  useEffect(() => {
+    setCompositionPartId((current) =>
+      filteredCompositionParts.some((part) => part.id === current)
+        ? current
+        : (filteredCompositionParts[0]?.id ?? null),
+    );
+  }, [filteredCompositionParts]);
+  useEffect(() => {
+    setSelectedBundleId((current) =>
+      filteredPartBundles.some((bundle) => bundle.id === current)
+        ? current
+        : (filteredPartBundles[0]?.id ?? null),
+    );
+  }, [filteredPartBundles]);
   const selectedPart = partLibrary.find((part) => part.id === selectedPartId);
   const compositionPart = partLibrary.find(
     (part) => part.id === compositionPartId,
@@ -1350,6 +1428,28 @@ export function App() {
     );
   };
 
+  const removeActiveComponentRecognition = () => {
+    if (!activeComponent) {
+      setNotice("先选择要移除识别的组件");
+      return;
+    }
+    if (removeComponentArmedId !== activeComponent.instanceId) {
+      setRemoveComponentArmedId(activeComponent.instanceId);
+      setNotice(
+        `再次确认后，${activeComponent.displayName} 的全部像素将退回 unknown；旧 Revision 不会被改写`,
+      );
+      return;
+    }
+    setRemoveComponentArmedId(null);
+    void commitSemanticOperation(
+      {
+        type: "unassign_pixels",
+        spans: activeComponent.spans,
+      },
+      `移除 ${activeComponent.displayName} 的组件识别`,
+    );
+  };
+
   const chooseComponent = (instanceId: string) => {
     const component = segmentation?.components.find(
       (candidate) => candidate.instanceId === instanceId,
@@ -1362,6 +1462,98 @@ export function App() {
     setComponentName(component.displayName);
     setComponentCategory(component.category);
     setComponentSubtype(component.subtype ?? "");
+    setRemoveComponentArmedId(null);
+  };
+
+  const changePartLibraryStatus = async (
+    part: ApiPart,
+    action: "retire" | "restore",
+    reason?: string,
+  ) => {
+    if (libraryLifecycleBusyRef.current) return;
+    libraryLifecycleBusyRef.current = true;
+    setLibraryLifecycleBusy(true);
+    setHistoryError(null);
+    try {
+      const updated = action === "retire"
+        ? await retirePart(part.id, reason)
+        : await restorePart(part.id);
+      await refreshReusableCatalog();
+      if (updated.libraryStatus === "retired") {
+        setPartLibraryFilters((filters) =>
+          filters.status === "active" ? { ...filters, status: "retired" } : filters,
+        );
+      }
+      setSelectedPartId(updated.id);
+      setNotice(action === "retire" ? `已退役组件 ${updated.name}` : `已恢复组件 ${updated.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`组件库状态修改失败：${message}`);
+    } finally {
+      libraryLifecycleBusyRef.current = false;
+      setLibraryLifecycleBusy(false);
+    }
+  };
+
+  const changeBundleLibraryStatus = async (
+    bundle: ApiPartBundle,
+    action: "retire" | "restore",
+    reason?: string,
+  ) => {
+    if (libraryLifecycleBusyRef.current) return;
+    libraryLifecycleBusyRef.current = true;
+    setLibraryLifecycleBusy(true);
+    setCompositionError(null);
+    try {
+      const updated = action === "retire"
+        ? await retirePartBundle(bundle.id, reason)
+        : await restorePartBundle(bundle.id);
+      await refreshReusableCatalog();
+      if (updated.libraryStatus === "retired") {
+        setBundleLibraryFilters((filters) =>
+          filters.status === "active" ? { ...filters, status: "retired" } : filters,
+        );
+      }
+      setSelectedBundleId(updated.id);
+      setNotice(action === "retire" ? `已退役完整大类 ${updated.name}` : `已恢复完整大类 ${updated.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompositionError(message);
+      setNotice(`完整大类状态修改失败：${message}`);
+    } finally {
+      libraryLifecycleBusyRef.current = false;
+      setLibraryLifecycleBusy(false);
+    }
+  };
+
+  const replaceBundleMember = async (
+    bundle: ApiPartBundle,
+    memberPartId: string,
+    replacementPartId: string,
+    reason?: string,
+  ) => {
+    if (libraryLifecycleBusyRef.current) return;
+    libraryLifecycleBusyRef.current = true;
+    setLibraryLifecycleBusy(true);
+    setCompositionError(null);
+    try {
+      const result = await revisePartBundle(bundle.id, {
+        name: bundle.name,
+        replacements: [{ memberPartId, replacementPartId }],
+        ...(reason?.trim() ? { reason: reason.trim() } : {}),
+      });
+      await refreshReusableCatalog();
+      setSelectedBundleId(result.bundle.id);
+      setNotice(`已生成 ${result.bundle.name} 新版本；旧完整大类已退役`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompositionError(message);
+      setNotice(`完整大类成员替换失败：${message}`);
+    } finally {
+      libraryLifecycleBusyRef.current = false;
+      setLibraryLifecycleBusy(false);
+    }
   };
 
   const activateAnalyzedSkin = async (item: ApiAnalyzedSkin) => {
@@ -1426,6 +1618,39 @@ export function App() {
     }
   };
 
+  const exportCurrentHeadGroup = async (kind: ApiAnalyzedSkinGroup["kind"]) => {
+    if (!selectedRevision?.isBranchHead || !segmentation || !historyProject) {
+      setNotice("完整大类重新入库只允许基于当前 Branch HEAD");
+      return;
+    }
+    const componentIds = segmentation.components
+      .filter((component) => categoryBelongsToAggregate(component.category, kind))
+      .map((component) => component.instanceId);
+    if (componentIds.length === 0) {
+      setNotice(`当前 HEAD 没有可组成${BUNDLE_KIND_LABELS[kind]}的已确认组件`);
+      return;
+    }
+    const busyKey = `${selectedRevision.id}:current-head:${kind}`;
+    setBusyCatalogGroupKey(busyKey);
+    setCatalogError(null);
+    try {
+      const bundle = await exportRevisionBundle(selectedRevision.id, {
+        name: `${historyProject.name} · ${BUNDLE_KIND_LABELS[kind]} · ${selectedRevision.branchName} #${selectedRevision.sequence}`,
+        kind,
+        componentIds,
+      });
+      await refreshReusableCatalog();
+      setSelectedBundleId(bundle.id);
+      setNotice(`已从修正后的当前 HEAD 重新入库 ${bundle.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogError(message);
+      setNotice(`当前 HEAD 完整大类入库失败：${message}`);
+    } finally {
+      setBusyCatalogGroupKey(null);
+    }
+  };
+
   const exportActiveComponent = async () => {
     if (!selectedRevision || !activeComponent) {
       return;
@@ -1456,18 +1681,23 @@ export function App() {
     if (!selectedRevision || !selectedPart) {
       return;
     }
+    const revisionId = selectedRevision.id;
+    const partId = selectedPart.id;
+    const requestId = ++partPreviewRequestRef.current;
     setSemanticBusy(true);
     setHistoryError(null);
     try {
       const preview = await previewRevisionPart(
-        selectedRevision.id,
-        selectedPart.id,
+        revisionId,
+        partId,
       );
+      if (requestId !== partPreviewRequestRef.current) return;
       setPartPreview(preview);
       setNotice(
         `冲突预览：${preview.report.hardConflictCount} 个硬冲突，尚未创建 Revision`,
       );
     } catch (error) {
+      if (requestId !== partPreviewRequestRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       setHistoryError(message);
       setNotice(`部件冲突分析失败：${message}`);
@@ -1479,7 +1709,13 @@ export function App() {
   const commitSelectedPart = async (
     strategy: "use_part" | "keep_base",
   ) => {
-    if (!selectedRevision || !selectedPart || !partPreview) {
+    if (
+      !selectedRevision ||
+      !selectedPart ||
+      !partPreview ||
+      partPreview.revisionId !== selectedRevision.id ||
+      partPreview.part.id !== selectedPart.id
+    ) {
       return;
     }
     setSemanticBusy(true);
@@ -1543,6 +1779,7 @@ export function App() {
 
   const addPartToComposition = async (part: ApiPart) => {
     if (
+      part.libraryStatus === "retired" ||
       !composition ||
       !compositionDraft ||
       compositionDetail?.layers.some((layer) => layer.partId === part.id)
@@ -1559,7 +1796,12 @@ export function App() {
   };
 
   const addBundleToComposition = async (bundle: ApiPartBundle) => {
-    if (!composition || !compositionDraft || selectedBundleAlreadyLayered) {
+    if (
+      bundle.libraryStatus === "retired" ||
+      !composition ||
+      !compositionDraft ||
+      selectedBundleAlreadyLayered
+    ) {
       return;
     }
     setSelectedBundleId(bundle.id);
@@ -1915,7 +2157,7 @@ export function App() {
     <main className="studio-shell">
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M10</p>
+          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M11</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
@@ -1923,9 +2165,9 @@ export function App() {
             Codex 辅助识别真实皮肤的语义部件，并对确定性还原候选给出受限建议；单组件修补、多图层混搭与目标残留还原均保留可追溯历史。
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M10 受限 AI 换装建议与目标皮肤还原工作室">
-          <strong>M10</strong>
-          <span>ADVISE + RESTORE</span>
+        <div className="baseline-stamp" aria-label="M11 可治理组件库与目标皮肤还原工作室">
+          <strong>M11</strong>
+          <span>CURATE + REUSE</span>
         </div>
       </header>
 
@@ -2071,6 +2313,37 @@ export function App() {
         onActivate={(item) => void activateAnalyzedSkin(item)}
         onExportGroup={(item, group) => void exportAnalyzedGroup(item, group)}
       />
+
+      <section className="current-head-bundle-export" aria-label="当前 HEAD 完整大类重新入库">
+        <div>
+          <span>CORRECTED HEAD</span>
+          <h2>当前 HEAD 完整大类重新入库</h2>
+          <p>
+            先在下方修正误识别，再从最新 Branch HEAD 导出新 Bundle；旧 Bundle 不会被覆盖，可单独退役。
+          </p>
+        </div>
+        <dl>
+          <div><dt>PROJECT</dt><dd>{historyProject?.name ?? "未选择工程"}</dd></div>
+          <div><dt>HEAD</dt><dd>{selectedRevision ? `${selectedRevision.branchName} #${selectedRevision.sequence}` : "未选择 Revision"}</dd></div>
+        </dl>
+        <div className="current-head-bundle-actions">
+          {(["hair", "clothing", "accessory"] as const).map((kind) => {
+            const busyKey = `${selectedRevision?.id}:current-head:${kind}`;
+            const count = segmentation?.components.filter((component) =>
+              categoryBelongsToAggregate(component.category, kind)).length ?? 0;
+            return (
+              <button
+                key={kind}
+                type="button"
+                disabled={!selectedRevision?.isBranchHead || count === 0 || busyCatalogGroupKey !== null}
+                onClick={() => void exportCurrentHeadGroup(kind)}
+              >
+                {busyCatalogGroupKey === busyKey ? "正在入库…" : `${BUNDLE_KIND_LABELS[kind]} · ${count} 组件`}
+              </button>
+            );
+          })}
+        </div>
+      </section>
 
       <section
         className="ai-console"
@@ -2602,7 +2875,7 @@ export function App() {
               disabled={!canEditSemantic || !activeComponent || semanticBusy}
               onClick={reclassifyActiveComponent}
             >
-              修改所选分类
+              修改所选组件分类
             </button>
             <button
               type="button"
@@ -2611,7 +2884,21 @@ export function App() {
             >
               合并勾选组件
             </button>
+            <button
+              className="semantic-remove-component"
+              type="button"
+              disabled={!canEditSemantic || !activeComponent || semanticBusy}
+              data-armed={removeComponentArmedId === activeComponent?.instanceId}
+              onClick={removeActiveComponentRecognition}
+            >
+              {removeComponentArmedId === activeComponent?.instanceId
+                ? "确认全部退回 unknown"
+                : "移除所选组件识别"}
+            </button>
           </div>
+          <p className="semantic-destructive-help">
+            移除识别会创建新 Revision：所选组件的全部像素退回 unknown，旧 Revision 和已导出部件保持不变。
+          </p>
           <button
             className="export-part-button"
             type="button"
@@ -2629,19 +2916,31 @@ export function App() {
               <p>PART LIBRARY</p>
               <h2>复用与冲突</h2>
             </div>
-            <strong>{partLibrary.length}</strong>
+            <strong>{filteredPartLibrary.length}</strong>
           </div>
 
-          <div className="part-library" data-empty={partLibrary.length === 0}>
-            {partLibrary.length === 0 ? (
-              <p>从组件树保存头发、衣服、手套或鞋后，部件会出现在这里。</p>
+          <LibraryToolbar
+            filters={partLibraryFilters}
+            projects={libraryProjectOptions}
+            typeLabel="CATEGORY"
+            typeOptions={SEMANTIC_CATEGORIES.map((category) => ({
+              value: category,
+              label: SEMANTIC_CATEGORY_LABELS[category],
+            }))}
+            onChange={setPartLibraryFilters}
+          />
+
+          <div className="part-library" data-empty={filteredPartLibrary.length === 0}>
+            {filteredPartLibrary.length === 0 ? (
+              <p>{partLibrary.length === 0 ? "从组件树保存头发、衣服、手套或鞋后，部件会出现在这里。" : "当前检索条件下没有组件。"}</p>
             ) : (
-              partLibrary.map((part) => (
+              filteredPartLibrary.map((part) => (
                 <button
                   key={part.id}
                   className="part-card"
                   type="button"
                   data-active={part.id === selectedPartId}
+                  data-library-status={part.libraryStatus}
                   disabled={semanticBusy}
                   onClick={() => {
                     setSelectedPartId(part.id);
@@ -2654,6 +2953,9 @@ export function App() {
                     <small>
                       {SEMANTIC_CATEGORY_LABELS[part.category]} · {part.manifest.compatibility.armTypes.join("/")}
                     </small>
+                    <small className="library-source-chip">
+                      {librarySourceLabel(part, libraryProjectOptions)}
+                    </small>
                   </span>
                 </button>
               ))
@@ -2665,15 +2967,28 @@ export function App() {
               <div>
                 <strong>{selectedPart.name}</strong>
                 <span>{selectedPart.manifest.placement.surfaces.length} surfaces</span>
+                <span>{librarySourceLabel(selectedPart, libraryProjectOptions)}</span>
               </div>
               <button
                 type="button"
-                disabled={!selectedRevision || semanticBusy}
+                disabled={!selectedRevision || semanticBusy || selectedPart.libraryStatus === "retired"}
                 onClick={() => void previewSelectedPart()}
               >
                 先分析冲突
               </button>
             </div>
+          )}
+
+          {selectedPart && (
+            <LibraryLifecycleControls
+              assetId={selectedPart.id}
+              name={selectedPart.name}
+              status={selectedPart.libraryStatus}
+              retiredReason={selectedPart.retiredReason}
+              busy={libraryLifecycleBusy}
+              onRetire={(reason) => changePartLibraryStatus(selectedPart, "retire", reason)}
+              onRestore={() => changePartLibraryStatus(selectedPart, "restore")}
+            />
           )}
 
           {partPreview && (
@@ -2722,7 +3037,8 @@ export function App() {
       </section>
 
       <ComponentRepairStudio
-        parts={partLibrary}
+        parts={activePartLibrary}
+        projectOptions={libraryProjectOptions}
         defaultArmType={resolvedArmType}
         onNotice={setNotice}
         onCommittedPart={async (part) => {
@@ -2795,16 +3111,25 @@ export function App() {
             </dl>
 
             <PartBundleShelf
-              bundles={partBundles}
+              bundles={filteredPartBundles}
+              allParts={activePartLibrary}
+              filters={bundleLibraryFilters}
+              projectOptions={libraryProjectOptions}
               selectedBundle={selectedBundle}
               targetArmType={compositionTargetArmType}
               draftReady={Boolean(compositionDraft)}
               busy={compositionBusy}
+              lifecycleBusy={libraryLifecycleBusy}
               allMembersLayered={selectedBundleAlreadyLayered}
               motion={bundleInspectorMotion}
               onSelect={setSelectedBundleId}
               onAdd={(bundle) => void addBundleToComposition(bundle)}
               onMotionChange={setBundleInspectorMotion}
+              onFiltersChange={setBundleLibraryFilters}
+              onRetire={(bundle, reason) => changeBundleLibraryStatus(bundle, "retire", reason)}
+              onRestore={(bundle) => changeBundleLibraryStatus(bundle, "restore")}
+              onReplaceMember={(bundle, memberPartId, replacementPartId, reason) =>
+                replaceBundleMember(bundle, memberPartId, replacementPartId, reason)}
             />
 
             <div className="composition-section-title atomic-parts-title">
@@ -2813,13 +3138,24 @@ export function App() {
               <small>保留原有 23 类语义组件与单件冲突处理。</small>
             </div>
 
+            <LibraryToolbar
+              filters={compositionPartFilters}
+              projects={libraryProjectOptions}
+              typeLabel="CATEGORY"
+              typeOptions={SEMANTIC_CATEGORIES.map((category) => ({
+                value: category,
+                label: SEMANTIC_CATEGORY_LABELS[category],
+              }))}
+              onChange={setCompositionPartFilters}
+            />
+
             <div
               className="composition-part-library"
-              data-empty={partLibrary.length === 0}
+              data-empty={filteredCompositionParts.length === 0}
               aria-label="混搭组件库"
             >
-              {partLibrary.length ? (
-                partLibrary.map((part) => {
+              {filteredCompositionParts.length ? (
+                filteredCompositionParts.map((part) => {
                   const layered = Boolean(
                     compositionDetail?.layers.some(
                       (layer) => layer.partId === part.id,
@@ -2849,6 +3185,9 @@ export function App() {
                           <small>
                             {SEMANTIC_CATEGORY_LABELS[part.category]} · {part.manifest.compatibility.armTypes.join("/")}
                           </small>
+                          <small className="library-source-chip">
+                            {librarySourceLabel(part, libraryProjectOptions)}
+                          </small>
                         </span>
                       </button>
                       <button
@@ -2876,7 +3215,7 @@ export function App() {
                   );
                 })
               ) : (
-                <p>保存语义组件后，它会直接出现在这里，不必回到上方点选。</p>
+                <p>{partLibrary.length ? "当前检索条件下没有组件。" : "保存语义组件后，它会直接出现在这里，不必回到上方点选。"}</p>
               )}
             </div>
 
@@ -2925,6 +3264,7 @@ export function App() {
                     className="component-inspector-add"
                     type="button"
                     disabled={
+                      compositionPart.libraryStatus === "retired" ||
                       !compositionDraft ||
                       compositionBusy ||
                       compositionPartAlreadyLayered ||

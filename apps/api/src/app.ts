@@ -22,6 +22,7 @@ import {
   type AggregateKind,
   type ArmType,
   type ManualSemanticOperation,
+  type SemanticCategory,
 } from "@mc-skin-split/skin-core";
 import {
   RevisionStore,
@@ -125,8 +126,25 @@ interface ExportPartBundleBody {
   readonly sourceGroupKey?: string;
 }
 
+interface RetireLibraryAssetBody {
+  readonly reason?: string;
+}
+
+interface RevisePartBundleBody {
+  readonly name?: string;
+  readonly replacements: readonly {
+    readonly memberPartId: string;
+    readonly replacementPartId: string;
+  }[];
+  readonly reason?: string;
+}
+
 interface PartsQuery {
-  readonly category?: string;
+  readonly category?: SemanticCategory;
+  readonly status?: "active" | "retired" | "all";
+  readonly projectId?: string;
+  readonly sourceRevisionId?: string;
+  readonly q?: string;
 }
 
 interface PartEditsQuery {
@@ -155,6 +173,9 @@ interface CommitPartEditBody {
 interface PartBundlesQuery {
   readonly kind?: AggregateKind;
   readonly sourceRevisionId?: string;
+  readonly status?: "active" | "retired" | "all";
+  readonly projectId?: string;
+  readonly q?: string;
 }
 
 interface AnalyzedSkinsQuery {
@@ -628,18 +649,25 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
 
   app.get<{ Querystring: PartsQuery }>(
     "/api/parts",
-    {
-      schema: {
-        querystring: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            category: { type: "string", enum: SEMANTIC_CATEGORIES },
-          },
-        },
-      },
-    },
-    async (request) => ({ parts: store.listParts(request.query.category) }),
+    { schema: { querystring: partsQuerySchema } },
+    async (request) => ({ parts: store.listParts(request.query) }),
+  );
+
+  app.post<{ Params: PartParams; Body: RetireLibraryAssetBody }>(
+    "/api/parts/:partId/retire",
+    { schema: { body: retireLibraryAssetSchema } },
+    async (request) => ({
+      part: await store.retirePart(
+        request.params.partId,
+        (request.body as RetireLibraryAssetBody | undefined)?.reason,
+      ),
+    }),
+  );
+
+  app.post<{ Params: PartParams; Body: Record<string, never> }>(
+    "/api/parts/:partId/restore",
+    { schema: { body: emptyObjectSchema } },
+    async (request) => ({ part: await store.restorePart(request.params.partId) }),
   );
 
   app.get<{ Querystring: PartEditsQuery }>(
@@ -742,11 +770,33 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     "/api/part-bundles",
     { schema: { querystring: partBundlesQuerySchema } },
     async (request) => ({
-      bundles: store.listPartBundles(
-        request.query.kind,
-        request.query.sourceRevisionId,
+      bundles: store.listPartBundles(request.query),
+    }),
+  );
+
+  app.post<{ Params: PartBundleParams; Body: RetireLibraryAssetBody }>(
+    "/api/part-bundles/:bundleId/retire",
+    { schema: { body: retireLibraryAssetSchema } },
+    async (request) => ({
+      bundle: await store.retirePartBundle(
+        request.params.bundleId,
+        (request.body as RetireLibraryAssetBody | undefined)?.reason,
       ),
     }),
+  );
+
+  app.post<{ Params: PartBundleParams; Body: Record<string, never> }>(
+    "/api/part-bundles/:bundleId/restore",
+    { schema: { body: emptyObjectSchema } },
+    async (request) => ({ bundle: await store.restorePartBundle(request.params.bundleId) }),
+  );
+
+  app.post<{ Params: PartBundleParams; Body: RevisePartBundleBody }>(
+    "/api/part-bundles/:bundleId/revise",
+    { schema: { body: revisePartBundleSchema } },
+    async (request, reply) => reply.status(201).send(
+      await store.revisePartBundle(request.params.bundleId, request.body),
+    ),
   );
 
   app.get<{ Params: PartBundleParams }>(
@@ -1253,6 +1303,64 @@ const analyzedSkinsQuerySchema = {
   },
 } as const;
 
+const libraryStatusSchema = {
+  type: "string",
+  enum: ["active", "retired", "all"],
+} as const;
+
+const librarySearchProperties = {
+  status: libraryStatusSchema,
+  projectId: { type: "string", minLength: 1, maxLength: 100 },
+  sourceRevisionId: { type: "string", minLength: 1, maxLength: 100 },
+  q: { type: "string", minLength: 1, maxLength: 120 },
+} as const;
+
+const partsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...librarySearchProperties,
+    category: { type: "string", enum: SEMANTIC_CATEGORIES },
+  },
+} as const;
+
+const retireLibraryAssetSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reason: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const emptyObjectSchema = {
+  type: "object",
+  additionalProperties: false,
+} as const;
+
+const revisePartBundleSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["replacements"],
+  properties: {
+    name: { type: "string", minLength: 1, maxLength: 120 },
+    reason: { type: "string", minLength: 1, maxLength: 300 },
+    replacements: {
+      type: "array",
+      minItems: 1,
+      maxItems: 256,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["memberPartId", "replacementPartId"],
+        properties: {
+          memberPartId: { type: "string", minLength: 1, maxLength: 100 },
+          replacementPartId: { type: "string", minLength: 1, maxLength: 100 },
+        },
+      },
+    },
+  },
+} as const;
+
 const partEditsQuerySchema = {
   type: "object",
   additionalProperties: false,
@@ -1432,8 +1540,8 @@ const partBundlesQuerySchema = {
   type: "object",
   additionalProperties: false,
   properties: {
+    ...librarySearchProperties,
     kind: aggregateKindSchema,
-    sourceRevisionId: { type: "string", minLength: 1, maxLength: 100 },
   },
 } as const;
 

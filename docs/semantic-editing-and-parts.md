@@ -49,6 +49,13 @@ operations sends it to the Revision service, validates the complete resulting
 state, and creates a child Revision on the current Branch. Editing a historical
 node directly is rejected; branch or restore it first.
 
+The Studio also exposes a two-step **remove selected component recognition**
+action. It submits the component's complete stored spans as `unassign_pixels`.
+The new Revision has no such component and returns all of its pixels to
+`unknown`; it does not erase RGBA pixels or alter the source Revision. Mixed
+components should instead be split or selectively unassigned so correctly
+classified pixels remain owned.
+
 Each semantic Revision snapshot contains:
 
 ```text
@@ -88,6 +95,13 @@ Project, Revision, and component identity from which the part was exported.
 Part directories are first written to a private sibling directory and then
 atomically renamed. SQLite records all five hashes, byte sizes, MIME types, and
 paths. Reads verify both the files and database metadata.
+
+M11 adds source-aware search and a reversible `active`/`retired` lifecycle to
+Parts. List entries expose their source Project, Branch, and Revision. Retirement
+hides an asset from normal reuse and rejects new applications, repair bases,
+external donors, and Composition layers without deleting its files or historical
+references. An active Bundle must be retired or revised before one of its members
+can be retired.
 
 For 3D inspection, the server generates a complete neutral mannequin texture at
 read time. It fills only valid base-layer UV faces for the requested Wide or Slim
@@ -155,15 +169,20 @@ ownership, and written part pixels receive a provenance-backed component.
 POST /api/revisions/:revisionId/operations
 POST /api/revisions/:revisionId/components/:componentId/export-part
 POST /api/revisions/:revisionId/export-bundle
-GET  /api/parts
+GET  /api/parts?category=&projectId=&sourceRevisionId=&status=&q=
 GET  /api/parts/:partId
 GET  /api/parts/:partId/texture.png
 GET  /api/parts/:partId/preview.png
 GET  /api/parts/:partId/mannequin.png?armType=slim
-GET  /api/part-bundles
+POST /api/parts/:partId/retire
+POST /api/parts/:partId/restore
+GET  /api/part-bundles?kind=&projectId=&sourceRevisionId=&status=&q=
 GET  /api/part-bundles/:bundleId
 GET  /api/part-bundles/:bundleId/preview.png
 GET  /api/part-bundles/:bundleId/mannequin.png?armType=slim
+POST /api/part-bundles/:bundleId/retire
+POST /api/part-bundles/:bundleId/restore
+POST /api/part-bundles/:bundleId/revise
 GET  /api/part-edits
 POST /api/part-edits
 GET  /api/part-edits/:projectId
@@ -175,7 +194,8 @@ GET  /api/part-edit-revisions/:revisionId/mannequin.png?armType=slim
 POST /api/revisions/:revisionId/apply-part
 ```
 
-`GET /api/parts` accepts an optional `category` query. Send only `{ "partId":
+`GET /api/parts` defaults to active entries and accepts the filters shown above.
+Send only `{ "partId":
 "..." }` to preview application. Add `"strategy": "use_part"` or
 `"strategy": "keep_base"` to create a Revision.
 

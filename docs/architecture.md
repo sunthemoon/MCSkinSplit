@@ -247,6 +247,25 @@ The detailed contract is in
   task-specific Skill is a repository-scoped asset copied into its Run workspace,
   not a required global Codex install.
 
+## M11 decisions
+
+- Semantic mistakes are corrected through the existing immutable Revision model.
+  Whole-component removal is a host-authored `unassign_pixels` operation over the
+  component's stored spans, not a texture edit or destructive database delete.
+- `part_asset` and `part_bundle` remain immutable content records. Their separate
+  library lifecycle is reversible `active`/`retired` metadata; files, hashes,
+  membership, provenance, and historical references remain readable.
+- Source Project, Branch, and Revision provenance is joined into Part and Bundle
+  list DTOs instead of being copied into display-name prefixes. Search and filters
+  therefore remain stable when users rename an asset or two Projects share a name.
+- Bundle member replacement creates a new immutable Bundle and retires the old
+  identity in one transaction. It does not mutate `part_bundle_member` rows in
+  place or silently replace the same Part in every Bundle.
+- Creating new references requires active assets. Repair apply/commit and
+  Composition commit repeat active-state checks so retirement after a draft was
+  opened cannot bypass the lifecycle decision. Historical previews and committed
+  snapshots continue to resolve retired IDs.
+
 ## Package boundaries
 
 ```text

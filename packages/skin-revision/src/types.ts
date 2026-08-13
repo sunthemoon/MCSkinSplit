@@ -214,11 +214,47 @@ export interface PartFileAsset {
   readonly sha256: string;
 }
 
+export type LibraryStatus = "active" | "retired";
+export type LibraryStatusFilter = LibraryStatus | "all";
+
+export interface PartLibraryQuery {
+  readonly status?: LibraryStatusFilter;
+  readonly projectId?: string;
+  readonly sourceRevisionId?: string;
+  readonly q?: string;
+  readonly category?: PartManifest["category"];
+}
+
+export interface PartBundleLibraryQuery {
+  readonly status?: LibraryStatusFilter;
+  readonly projectId?: string;
+  readonly sourceRevisionId?: string;
+  readonly q?: string;
+  readonly kind?: AggregateKind;
+}
+
+export interface RevisePartBundleInput {
+  readonly name?: string;
+  readonly replacements: readonly {
+    readonly memberPartId: string;
+    readonly replacementPartId: string;
+  }[];
+  readonly reason?: string;
+}
+
+export interface RevisePartBundleResult {
+  readonly bundle: PartBundle;
+  readonly retiredBundle: PartBundle;
+}
+
 export interface SkinPart {
   readonly id: string;
   readonly sourceProjectId: string;
   readonly sourceRevisionId: string;
   readonly sourceComponentId: string;
+  readonly sourceProjectName: string;
+  readonly sourceBranchName: string;
+  readonly sourceRevisionSequence: number;
   readonly name: string;
   readonly category: PartManifest["category"];
   readonly subtype?: string;
@@ -230,6 +266,9 @@ export interface SkinPart {
   readonly preview: PartFileAsset;
   readonly source: PartFileAsset;
   readonly createdAt: string;
+  readonly libraryStatus: LibraryStatus;
+  readonly retiredAt: string | null;
+  readonly retiredReason: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
@@ -323,12 +362,18 @@ export interface PartBundle {
   readonly id: string;
   readonly sourceProjectId: string;
   readonly sourceRevisionId: string;
+  readonly sourceProjectName: string;
+  readonly sourceBranchName: string;
+  readonly sourceRevisionSequence: number;
   readonly name: string;
   readonly kind: AggregateKind;
   readonly sourceGroupKey: string | null;
   readonly armTypes: readonly ArmType[];
   readonly members: readonly PartBundleMember[];
   readonly createdAt: string;
+  readonly libraryStatus: LibraryStatus;
+  readonly retiredAt: string | null;
+  readonly retiredReason: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 

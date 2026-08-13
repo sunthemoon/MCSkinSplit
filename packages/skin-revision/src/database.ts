@@ -54,6 +54,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 9,
+    name: "part library soft lifecycle",
+    sql: readFileSync(
+      new URL("./migrations/009_part_library_lifecycle.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

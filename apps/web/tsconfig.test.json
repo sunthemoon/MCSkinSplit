@@ -12,10 +12,13 @@
   "include": [
     "src/**/*.test.ts",
     "src/components/CompositionRestorationPanel.tsx",
+    "src/components/LibraryLifecycleControls.tsx",
+    "src/components/LibraryToolbar.tsx",
     "src/components/RestorationRecommendationPanel.tsx",
     "src/components/SemanticAiEventLog.tsx",
     "src/components/SemanticAiJobProgress.tsx",
     "src/lib/mcSkinPreview.ts",
+    "src/lib/libraryCatalog.ts",
     "src/lib/compositionRestoration.ts",
     "src/lib/partRepairCoordinates.ts",
     "src/lib/partRepairOperations.ts",

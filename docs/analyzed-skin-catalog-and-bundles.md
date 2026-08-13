@@ -71,6 +71,29 @@ them independently, and normal conflict resolution still applies. Adding a Bundl
 does not create a skin Revision; only the existing composition commit operation can
 create an immutable `compose` Revision.
 
+## Source-aware library lifecycle
+
+M11 keeps every Part and Bundle immutable while making the shared library
+manageable across many source skins. List results include source Project name,
+Branch name, and Revision sequence. The Studio can search names and provenance or
+filter by source Project, exact source Revision, semantic category/aggregate kind,
+and `active` or `retired` status. Active entries are the default; retired entries
+remain available in the management view and through direct historical reads.
+
+Retirement never deletes files, membership rows, or provenance. It stores a time
+and optional reason and prevents new applications, repair projects, donors, and
+Composition layers from referencing that asset. Existing Revision, repair, and
+Composition history remains readable. An active Bundle protects its member Parts
+from direct retirement, so users explicitly retire or revise that Bundle first.
+
+Revising a Bundle replaces selected members with compatible active Parts from the
+same source Project and Revision and aggregate kind. Validation also checks stored
+hashes, model compatibility, unique membership, and pixel overlap. One transaction
+creates a new immutable Bundle and retires the old Bundle; neither identity is
+rewritten. After correcting semantics in a newer Branch HEAD, the Studio can also
+export its confirmed hair, clothing, or accessory components as a fresh Bundle
+without requiring a new AI Job.
+
 ## HTTP API
 
 ```text
@@ -78,10 +101,13 @@ GET  /api/analyzed-skins?projectId=&kind=&q=
 GET  /api/analyzed-skins/:revisionId
 POST /api/revisions/:revisionId/export-bundle
 
-GET  /api/part-bundles?kind=&sourceRevisionId=
+GET  /api/part-bundles?kind=&sourceRevisionId=&projectId=&status=&q=
 GET  /api/part-bundles/:bundleId
 GET  /api/part-bundles/:bundleId/preview.png
 GET  /api/part-bundles/:bundleId/mannequin.png?armType=slim
+POST /api/part-bundles/:bundleId/retire
+POST /api/part-bundles/:bundleId/restore
+POST /api/part-bundles/:bundleId/revise
 
 POST /api/compositions/:compositionId/apply-bundle
 ```
@@ -96,6 +122,7 @@ hash checks.
   persisted result of a successful AI Job.
 - A Bundle captures one immutable source Revision. Later semantic corrections or
   re-analysis require exporting a new Bundle; existing Bundles are not rewritten.
+  Bundle revision likewise creates a new identity and retires the prior one.
 - The grouping layer does not synthesize occluded content, erase unrelated pixels
   from a target skin, or fill newly exposed Base pixels. Component repair and
   Composition restoration remain explicit separate workflows; see

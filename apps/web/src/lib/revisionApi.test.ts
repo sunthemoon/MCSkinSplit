@@ -20,6 +20,7 @@ import {
   listAiJobs,
   listAiProviders,
   listPartBundles,
+  listParts,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partMannequinUrl,
@@ -29,6 +30,11 @@ import {
   partEditWriteMaskUrl,
   partBundleMannequinUrl,
   partBundlePreviewUrl,
+  retirePart,
+  restorePart,
+  retirePartBundle,
+  restorePartBundle,
+  revisePartBundle,
   retryAiJob,
   removeCompositionLayer,
   reorderCompositionLayers,
@@ -40,6 +46,60 @@ import {
 } from "./revisionApi";
 
 describe("revisionApi", () => {
+  it("encodes reusable-library discovery and lifecycle requests", async () => {
+    const part = { id: "part / 1" };
+    const bundle = { id: "bundle / 1" };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ parts: [part] }, 200))
+      .mockResolvedValueOnce(jsonResponse({ bundles: [bundle] }, 200))
+      .mockResolvedValueOnce(jsonResponse({ part }, 200))
+      .mockResolvedValueOnce(jsonResponse({ part }, 200))
+      .mockResolvedValueOnce(jsonResponse({ bundle }, 200))
+      .mockResolvedValueOnce(jsonResponse({ bundle }, 200))
+      .mockResolvedValueOnce(jsonResponse({ bundle, retiredBundle: bundle }, 201));
+
+    await listParts({
+      category: "hair",
+      status: "all",
+      projectId: "project / 1",
+      sourceRevisionId: "revision / 2",
+      query: "brown hair",
+    }, fetcher);
+    await listPartBundles({
+      kind: "hair",
+      status: "retired",
+      projectId: "project / 1",
+      sourceRevisionId: "revision / 2",
+      query: "brown hair",
+    }, fetcher);
+    await retirePart("part / 1", "wrong eyes", fetcher);
+    await restorePart("part / 1", fetcher);
+    await retirePartBundle("bundle / 1", "superseded", fetcher);
+    await restorePartBundle("bundle / 1", fetcher);
+    await revisePartBundle("bundle / 1", {
+      name: "Brown hair v2",
+      replacements: [{ memberPartId: "part / 1", replacementPartId: "part / 2" }],
+      reason: "fixed eyes",
+    }, fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/parts?category=hair&status=all&projectId=project+%2F+1&sourceRevisionId=revision+%2F+2&q=brown+hair",
+      "/api/part-bundles?kind=hair&status=retired&projectId=project+%2F+1&sourceRevisionId=revision+%2F+2&q=brown+hair",
+      "/api/parts/part%20%2F%201/retire",
+      "/api/parts/part%20%2F%201/restore",
+      "/api/part-bundles/bundle%20%2F%201/retire",
+      "/api/part-bundles/bundle%20%2F%201/restore",
+      "/api/part-bundles/bundle%20%2F%201/revise",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({ reason: "wrong eyes" });
+    expect(JSON.parse(String(fetcher.mock.calls[6]?.[1]?.body))).toEqual({
+      name: "Brown hair v2",
+      replacements: [{ memberPartId: "part / 1", replacementPartId: "part / 2" }],
+      reason: "fixed eyes",
+    });
+  });
+
   it("preserves recommendation-capable providers separately from semantic providers", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

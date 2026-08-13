@@ -9,8 +9,9 @@ unchanged; repair preserves the base part's existing semantic classification.
 
 ## Workflow
 
-1. Select an existing saved part as the repair base. The part does not need to be
-   selected in the semantic component tree first.
+1. Select an active saved part as the repair base. Source Project/Revision and
+   semantic filters keep Parts from different skins distinguishable. The part
+   does not need to be selected in the semantic component tree first.
 2. Create a repair project. Its initial Revision copies the verified part texture
    and write mask; the base part remains unchanged.
 3. Select pixels on the 64x64 canvas or configure a surface-copy operation.
@@ -26,6 +27,10 @@ unchanged; repair preserves the base part's existing semantic classification.
 6. Commit the repair project under a new part name. Commit creates a new verified
    five-file part asset and closes the repair project; it never rewrites the base
    part or an earlier repair Revision.
+7. If the repaired Part should replace a member of a complete-category Bundle,
+   revise that Bundle explicitly. The service creates a new Bundle containing the
+   repaired member and retires the former Bundle; the base Part is not replaced
+   implicitly.
 
 When a configured local draft differs from the persisted HEAD, the save-as-new
 part action remains disabled and identifies the unapplied pixel count. Apply the
@@ -143,3 +148,6 @@ fourth stored repair file.
   [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
 - Repair histories are linear HEAD-checked drafts. They do not branch, merge, or
   mutate the full-skin Revision graph.
+- Retirement preserves existing repair history, but an active repair operation
+  or commit rechecks its base Part. If the base was retired after the draft was
+  opened, further publication is rejected until the library choice is corrected.

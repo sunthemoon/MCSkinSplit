@@ -87,8 +87,17 @@ export interface ApiPart {
   readonly subtype?: string;
   readonly armType: ArmType;
   readonly manifest: PartManifest;
+  readonly libraryStatus: ApiLibraryStatus;
+  readonly retiredAt: string | null;
+  readonly retiredReason: string | null;
+  readonly sourceProjectName: string;
+  readonly sourceBranchName: string;
+  readonly sourceRevisionSequence: number;
   readonly createdAt: string;
 }
+
+export type ApiLibraryStatus = "active" | "retired";
+export type ApiLibraryStatusFilter = ApiLibraryStatus | "all";
 
 export type ApiPartEditStatus = "draft" | "committed";
 
@@ -170,6 +179,12 @@ export interface ApiPartBundle {
   readonly sourceGroupKey: string | null;
   readonly armTypes: readonly ArmType[];
   readonly members: readonly ApiPartBundleMember[];
+  readonly libraryStatus: ApiLibraryStatus;
+  readonly retiredAt: string | null;
+  readonly retiredReason: string | null;
+  readonly sourceProjectName: string;
+  readonly sourceBranchName: string;
+  readonly sourceRevisionSequence: number;
   readonly createdAt: string;
   readonly metadata: Readonly<Record<string, unknown>>;
 }
@@ -724,18 +739,63 @@ export async function exportRevisionPart(
 }
 
 export async function listParts(
-  category?: SemanticCategory,
+  options: {
+    readonly category?: SemanticCategory;
+    readonly status?: ApiLibraryStatusFilter;
+    readonly projectId?: string;
+    readonly sourceRevisionId?: string;
+    readonly query?: string;
+  } = {},
   fetcher: Fetcher = fetch,
 ): Promise<readonly ApiPart[]> {
-  const query = category
-    ? `?category=${encodeURIComponent(category)}`
-    : "";
+  const query = new URLSearchParams();
+  if (options.category) query.set("category", options.category);
+  if (options.status) query.set("status", options.status);
+  if (options.projectId) query.set("projectId", options.projectId);
+  if (options.sourceRevisionId) {
+    query.set("sourceRevisionId", options.sourceRevisionId);
+  }
+  if (options.query) query.set("q", options.query);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const body = await requestJson<{ parts: readonly ApiPart[] }>(
-    `/api/parts${query}`,
+    `/api/parts${suffix}`,
     undefined,
     fetcher,
   );
   return body.parts;
+}
+
+export async function retirePart(
+  partId: string,
+  reason?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPart> {
+  const body = await requestJson<{ readonly part: ApiPart }>(
+    `/api/parts/${encodeURIComponent(partId)}/retire`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}),
+    },
+    fetcher,
+  );
+  return body.part;
+}
+
+export async function restorePart(
+  partId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPart> {
+  const body = await requestJson<{ readonly part: ApiPart }>(
+    `/api/parts/${encodeURIComponent(partId)}/restore`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
+    fetcher,
+  );
+  return body.part;
 }
 
 export async function listAnalyzedSkins(
@@ -794,15 +854,21 @@ export async function exportRevisionBundle(
 export async function listPartBundles(
   options: {
     readonly kind?: AggregateKind;
+    readonly status?: ApiLibraryStatusFilter;
+    readonly projectId?: string;
     readonly sourceRevisionId?: string;
+    readonly query?: string;
   } = {},
   fetcher: Fetcher = fetch,
 ): Promise<readonly ApiPartBundle[]> {
   const query = new URLSearchParams();
   if (options.kind) query.set("kind", options.kind);
+  if (options.status) query.set("status", options.status);
+  if (options.projectId) query.set("projectId", options.projectId);
   if (options.sourceRevisionId) {
     query.set("sourceRevisionId", options.sourceRevisionId);
   }
+  if (options.query) query.set("q", options.query);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const body = await requestJson<{ readonly bundles: readonly ApiPartBundle[] }>(
     `/api/part-bundles${suffix}`,
@@ -810,6 +876,65 @@ export async function listPartBundles(
     fetcher,
   );
   return body.bundles;
+}
+
+export async function retirePartBundle(
+  bundleId: string,
+  reason?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartBundle> {
+  const body = await requestJson<{ readonly bundle: ApiPartBundle }>(
+    `/api/part-bundles/${encodeURIComponent(bundleId)}/retire`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}),
+    },
+    fetcher,
+  );
+  return body.bundle;
+}
+
+export async function restorePartBundle(
+  bundleId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiPartBundle> {
+  const body = await requestJson<{ readonly bundle: ApiPartBundle }>(
+    `/api/part-bundles/${encodeURIComponent(bundleId)}/restore`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
+    fetcher,
+  );
+  return body.bundle;
+}
+
+export async function revisePartBundle(
+  bundleId: string,
+  input: {
+    readonly name?: string;
+    readonly replacements: readonly {
+      readonly memberPartId: string;
+      readonly replacementPartId: string;
+    }[];
+    readonly reason?: string;
+  },
+  fetcher: Fetcher = fetch,
+): Promise<{
+  readonly bundle: ApiPartBundle;
+  readonly retiredBundle: ApiPartBundle;
+}> {
+  return requestJson(
+    `/api/part-bundles/${encodeURIComponent(bundleId)}/revise`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
 }
 
 export async function loadPartBundle(

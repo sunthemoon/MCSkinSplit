@@ -451,6 +451,43 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("blocks an open repair draft after its base part is retired", async () => {
+    const { store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const created = await store.createPartEditProject({ basePartId: part.id });
+      const edited = await store.applyPartEditOperation(created.project.id, {
+        headRevisionId: created.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          rgba: [17, 34, 51, 255],
+        },
+      });
+      await store.retirePart(part.id, "停止从旧部件发布新版");
+
+      await expect(
+        store.applyPartEditOperation(created.project.id, {
+          headRevisionId: edited.headRevision.id,
+          operation: {
+            type: "paint_color",
+            spans: [{ surface: "head.base.front", y: 8, x0: 10, x1: 10 }],
+            rgba: [68, 85, 102, 255],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      await expect(
+        store.commitPartEditProject(created.project.id, {
+          headRevisionId: edited.headRevision.id,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect(store.getPartEditProject(created.project.id).status).toBe("draft");
+    } finally {
+      store.close();
+    }
+  });
+
   it("detects tampering in immutable part repair files", async () => {
     const { directory, store } = await createStore();
 
@@ -782,6 +819,218 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("soft-retires library assets, filters provenance, and preserves immutable reads", async () => {
+    const { store } = await createStore();
+    try {
+      const part = await exportHeadPixelPart(store);
+      expect(part).toMatchObject({
+        libraryStatus: "active",
+        retiredAt: null,
+        retiredReason: null,
+        sourceProjectName: expect.stringContaining("Repair fixture"),
+        sourceBranchName: "main",
+        sourceRevisionSequence: 2,
+      });
+      expect(store.listParts({ q: "Repair fixture", status: "all" })).toEqual([part]);
+      const retired = await store.retirePart(part.id, "识别错误");
+      expect(retired).toMatchObject({ libraryStatus: "retired", retiredReason: "识别错误" });
+      expect(retired.retiredAt).not.toBeNull();
+      expect(store.listParts()).toEqual([]);
+      expect(store.listParts({ status: "retired", projectId: part.sourceProjectId })).toEqual([retired]);
+      expect(await store.readPartTexturePng(part.id)).toEqual(await store.readPartTexturePng(retired.id));
+      await expect(store.createPartEditProject({ basePartId: part.id })).rejects.toMatchObject({
+        code: "CONFLICT",
+        statusCode: 409,
+      });
+      expect(await store.restorePart(part.id)).toMatchObject({ libraryStatus: "active", retiredAt: null });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("migrates existing assets to active lifecycle defaults and guards invalid state", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const part = await exportHeadPixelPart(store);
+      store.close();
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
+          .toEqual({ version: 9 });
+        expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
+          .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
+        expect(() => database.prepare(
+          "UPDATE part_asset SET retired_reason = 'tampered' WHERE id = ?",
+        ).run(part.id)).toThrow(/invalid part_asset lifecycle state/);
+      } finally {
+        database.close();
+      }
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        expect(reopened.getPart(part.id)).toMatchObject({ libraryStatus: "active" });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("blocks active bundle members from retirement and revises a bundle atomically", async () => {
+    const { store } = await createStore();
+    try {
+      const image = createRgbaImage(64, 64);
+      image.data.set([32, 48, 64, 255], (8 * 64 + 8) * 4);
+      image.data.set([96, 80, 64, 255], (8 * 64 + 9) * 4);
+      const imported = await store.importProject({
+        name: "Bundle revision source",
+        skinPng: encodeSkinPng(image),
+        armType: "slim",
+      });
+      const hairRevision = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "hair.bundle", displayName: "Hair", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const finalRevision = await store.applyManualOperation(hairRevision.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "face.bundle", displayName: "Face", category: "face" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+        },
+      });
+      const base = await store.exportPart(finalRevision.revision.id, "hair.bundle");
+      const wrongCategory = await store.exportPart(finalRevision.revision.id, "face.bundle");
+      const repair = await store.createPartEditProject({ basePartId: base.id });
+      const edited = await store.applyPartEditOperation(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          rgba: [44, 55, 66, 255],
+        },
+      });
+      const replacement = (await store.commitPartEditProject(repair.project.id, {
+        headRevisionId: edited.headRevision.id,
+        name: "Repaired hair",
+      })).part;
+      const bundle = await store.exportPartBundle(finalRevision.revision.id, {
+        kind: "hair",
+        componentIds: [base.sourceComponentId],
+      });
+      const member = bundle.members[0]!.part;
+      await expect(store.retirePart(member.id)).rejects.toMatchObject({
+        code: "CONFLICT",
+        details: { bundleIds: [bundle.id] },
+      });
+      const wrongSource = await exportHeadPixelPart(store, [11, 22, 33, 255]);
+      await expect(store.revisePartBundle(bundle.id, {
+        replacements: [{ memberPartId: member.id, replacementPartId: wrongSource.id }],
+      })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await store.retirePart(wrongCategory.id, "不作为替换件");
+      await expect(store.revisePartBundle(bundle.id, {
+        replacements: [{ memberPartId: member.id, replacementPartId: wrongCategory.id }],
+      })).rejects.toMatchObject({ code: "CONFLICT" });
+      await store.restorePart(wrongCategory.id);
+      await expect(store.revisePartBundle(bundle.id, {
+        replacements: [{ memberPartId: member.id, replacementPartId: wrongCategory.id }],
+      })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      expect(store.getPartBundle(bundle.id).libraryStatus).toBe("active");
+      expect(store.listPartBundles({ sourceRevisionId: finalRevision.revision.id })).toEqual([bundle]);
+      const result = await store.revisePartBundle(bundle.id, {
+        replacements: [{ memberPartId: member.id, replacementPartId: replacement.id }],
+        reason: "用修补版替换",
+      });
+      expect(result.bundle).toMatchObject({
+        libraryStatus: "active",
+        metadata: {
+          revisionOfBundleId: bundle.id,
+          replacements: [{ memberPartId: member.id, replacementPartId: replacement.id }],
+        },
+      });
+      expect(result.bundle.members.map((item) => item.partId)).toEqual([replacement.id]);
+      expect(result.retiredBundle).toMatchObject({
+        libraryStatus: "retired",
+        retiredReason: "用修补版替换",
+      });
+      expect(store.listPartBundles()).toEqual([result.bundle]);
+      expect(store.getPartBundle(bundle.id).libraryStatus).toBe("retired");
+      expect(decodeSkinPng(await store.readPartBundlePreviewPng(bundle.id))).toMatchObject({ width: 64 });
+      const target = await store.importProject({
+        name: "Retired reference target",
+        skinPng: encodeSkinPng(createRgbaImage(64, 64)),
+        armType: "slim",
+      });
+      const composition = await store.createComposition({ baseRevisionId: target.revision.id });
+      await expect(store.addCompositionBundle(composition.composition.id, { bundleId: bundle.id }))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reports incompatible proposed bundle overlap as invalid input", async () => {
+    const { store } = await createStore();
+    try {
+      const image = createRgbaImage(64, 64);
+      image.data.set([32, 48, 64, 255], (8 * 64 + 8) * 4);
+      image.data.set([96, 80, 64, 255], (8 * 64 + 9) * 4);
+      const imported = await store.importProject({
+        name: "Bundle overlap proposal",
+        skinPng: encodeSkinPng(image),
+        armType: "slim",
+      });
+      const first = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "hair.left", displayName: "Left hair", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const second = await store.applyManualOperation(first.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "hair.right", displayName: "Right hair", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+        },
+      });
+      const bundle = await store.exportPartBundle(second.revision.id, {
+        kind: "hair",
+        componentIds: ["hair.left", "hair.right"],
+      });
+      const left = bundle.members.find(
+        (member) => member.part.sourceComponentId === "hair.left",
+      )!;
+      const repair = await store.createPartEditProject({ basePartId: left.partId });
+      const edited = await store.applyPartEditOperation(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          rgba: [1, 2, 3, 255],
+        },
+      });
+      const replacement = (await store.commitPartEditProject(repair.project.id, {
+        headRevisionId: edited.headRevision.id,
+        name: "Overlapping repaired hair",
+      })).part;
+
+      await expect(store.revisePartBundle(bundle.id, {
+        replacements: [{ memberPartId: left.partId, replacementPartId: replacement.id }],
+      })).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+        statusCode: 400,
+        details: { bundleId: bundle.id, pixelId: 521, partId: expect.any(String) },
+      });
+      expect(store.getPartBundle(bundle.id).libraryStatus).toBe("active");
+      expect(store.listPartBundles()).toEqual([bundle]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("previews conflicts before applying a part to a new skin revision", async () => {
     const { store } = await createStore();
 
@@ -920,6 +1169,52 @@ describe("RevisionStore", () => {
       await expect(
         store.addCompositionPart(created.composition.id, { partId: part.id }),
       ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("blocks a composition commit after one of its layered parts is retired", async () => {
+    const { store } = await createStore();
+
+    try {
+      const source = await importRealSkin(store);
+      const segmented = await store.applyManualOperation(source.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+          },
+          spans: [
+            { surface: "head.base.front", y: 8, x0: 8, x1: 9 },
+          ],
+        },
+      });
+      const part = await store.exportPart(segmented.revision.id, "hair.main");
+      const target = await store.importProject({
+        name: "Retired layer target",
+        skinPng: await readFile(TARGET_SKIN_PATH),
+      });
+      const created = await store.createComposition({
+        baseRevisionId: target.revision.id,
+        name: "退役图层测试",
+      });
+      await store.addCompositionPart(created.composition.id, { partId: part.id });
+      await store.resolveCompositionConflict(created.composition.id, {
+        strategy: "layer_order",
+      });
+      await store.retirePart(part.id, "图层来源已退役");
+
+      await expect(
+        store.commitComposition(created.composition.id),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        statusCode: 409,
+        details: { partIds: [part.id] },
+      });
+      expect(store.getComposition(created.composition.id).status).toBe("draft");
     } finally {
       store.close();
     }
