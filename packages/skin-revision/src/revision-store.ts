@@ -83,6 +83,7 @@ import {
   type ApplyPartResult,
   type AnalyzedSkinCatalogItem,
   type AnalyzedSkinCatalogQuery,
+  type ArchiveAnalyzedSkinInput,
   type BranchFromRevisionInput,
   type ApplyPartEditOperationInput,
   type CommitCompositionInput,
@@ -313,6 +314,8 @@ interface AnalyzedCatalogRow {
   readonly model: string;
   readonly review_items_json: string;
   readonly finished_at: string;
+  readonly archived_at: string | null;
+  readonly archived_reason: string | null;
 }
 
 interface CompositionProjectRow {
@@ -1021,6 +1024,7 @@ export class RevisionStore {
   async listAnalyzedSkins(
     query: AnalyzedSkinCatalogQuery = {},
   ): Promise<AnalyzedSkinCatalogItem[]> {
+    validateAnalyzedSkinCatalogStatus(query.status);
     if (query.kind !== undefined && !isAggregateKind(query.kind)) {
       throw invalidInput(`未知已分析目录分类：${query.kind}`);
     }
@@ -1035,19 +1039,36 @@ export class RevisionStore {
           job.provider,
           job.model,
           job.review_items_json,
-          job.finished_at
+          job.finished_at,
+          archive.archived_at,
+          archive.archived_reason
         FROM ai_job AS job
         JOIN skin_project AS project ON project.id = job.project_id
-        WHERE job.status = 'succeeded'
+        LEFT JOIN analyzed_skin_catalog_archive AS archive
+          ON archive.result_revision_id = job.result_revision_id
+        WHERE job.job_kind = 'semantic_analysis'
+          AND job.status = 'succeeded'
           AND job.result_revision_id IS NOT NULL
           AND job.finished_at IS NOT NULL
-        ORDER BY job.finished_at, job.id
+        ORDER BY job.finished_at DESC, job.id DESC
       `)
       .all() as AnalyzedCatalogRow[];
     const newestByRevision = new Map<string, AnalyzedCatalogRow>();
-    for (const row of rows) newestByRevision.set(row.result_revision_id, row);
+    for (const row of rows) {
+      if (!newestByRevision.has(row.result_revision_id)) {
+        newestByRevision.set(row.result_revision_id, row);
+      }
+    }
+    const status = query.status ?? "active";
+    const selectedRows = [...newestByRevision.values()].filter((row) =>
+      status === "all"
+        ? true
+        : status === "archived"
+          ? row.archived_at !== null
+          : row.archived_at === null,
+    );
     const items = await Promise.all(
-      [...newestByRevision.values()].map((row) => this.analyzedCatalogItem(row)),
+      selectedRows.map((row) => this.analyzedCatalogItem(row)),
     );
     const normalizedQuery = query.query?.trim().toLocaleLowerCase();
     return items.filter((item) => {
@@ -1066,16 +1087,66 @@ export class RevisionStore {
   }
 
   async getAnalyzedSkin(revisionId: string): Promise<AnalyzedSkinCatalogItem> {
-    const items = await this.listAnalyzedSkins();
+    const items = await this.listAnalyzedSkins({ status: "all" });
     const item = items.find((candidate) => candidate.revision.id === revisionId);
     if (!item) throw notFound("Analyzed skin", revisionId);
     return item;
+  }
+
+  async archiveAnalyzedSkin(
+    revisionId: string,
+    input: ArchiveAnalyzedSkinInput = {},
+  ): Promise<AnalyzedSkinCatalogItem> {
+    return this.withWriteLock(async () => {
+      const archivedAt = this.now();
+      const archivedReason = input.reason === undefined
+        ? null
+        : validateAnalyzedSkinArchiveReason(input.reason);
+      const archive = this.database.transaction(() => {
+        this.assertAnalyzedSkinCatalogRevision(revisionId);
+        this.database.prepare(`
+          INSERT INTO analyzed_skin_catalog_archive (
+            result_revision_id, archived_at, archived_reason
+          ) VALUES (?, ?, ?)
+          ON CONFLICT(result_revision_id) DO NOTHING
+        `).run(revisionId, archivedAt, archivedReason);
+      });
+      archive.immediate();
+      return this.getAnalyzedSkin(revisionId);
+    });
+  }
+
+  async restoreAnalyzedSkin(revisionId: string): Promise<AnalyzedSkinCatalogItem> {
+    return this.withWriteLock(async () => {
+      const restore = this.database.transaction(() => {
+        this.assertAnalyzedSkinCatalogRevision(revisionId);
+        this.database.prepare(
+          "DELETE FROM analyzed_skin_catalog_archive WHERE result_revision_id = ?",
+        ).run(revisionId);
+      });
+      restore.immediate();
+      return this.getAnalyzedSkin(revisionId);
+    });
+  }
+
+  private assertAnalyzedSkinCatalogRevision(revisionId: string): void {
+    const row = this.database.prepare(`
+      SELECT job.id
+      FROM ai_job AS job
+      WHERE job.job_kind = 'semantic_analysis'
+        AND job.status = 'succeeded'
+        AND job.result_revision_id = ?
+        AND job.finished_at IS NOT NULL
+      LIMIT 1
+    `).get(revisionId) as { readonly id: string } | undefined;
+    if (!row) throw notFound("Analyzed skin", revisionId);
   }
 
   private async analyzedCatalogItem(
     row: AnalyzedCatalogRow,
   ): Promise<AnalyzedSkinCatalogItem> {
     const revision = this.getRevision(row.result_revision_id);
+    const catalogLifecycle = assertAnalyzedSkinCatalogLifecycle(row);
     const segmentation = await this.readRevisionSegmentation(revision.id);
     const bundles = this.listPartBundles(undefined, revision.id);
     const groups = aggregateCatalogGroups(segmentation, bundles);
@@ -1100,6 +1171,9 @@ export class RevisionStore {
       reviewItemCount: parseJsonArray(row.review_items_json, `AI Job ${row.job_id} review items`).length,
       groups,
       skinUrl: `/api/revisions/${encodeURIComponent(revision.id)}/skin.png`,
+      catalogStatus: catalogLifecycle.status,
+      archivedAt: catalogLifecycle.archivedAt,
+      archivedReason: catalogLifecycle.archivedReason,
     };
   }
 
@@ -5789,6 +5863,56 @@ function validateLibraryStatus(value: unknown): void {
   if (value !== undefined && value !== "active" && value !== "retired" && value !== "all") {
     throw invalidInput(`未知资产状态：${String(value)}`);
   }
+}
+
+function validateAnalyzedSkinCatalogStatus(value: unknown): void {
+  if (
+    value !== undefined &&
+    value !== "active" &&
+    value !== "archived" &&
+    value !== "all"
+  ) {
+    throw invalidInput(`未知已分析目录状态：${String(value)}`);
+  }
+}
+
+function validateAnalyzedSkinArchiveReason(value: string): string {
+  if (value.length > 300) {
+    throw invalidInput("归档原因必须为 1-300 个可见字符");
+  }
+  return validateText("归档原因", value, 300);
+}
+
+function assertAnalyzedSkinCatalogLifecycle(
+  row: AnalyzedCatalogRow,
+): {
+  readonly status: "active" | "archived";
+  readonly archivedAt: string | null;
+  readonly archivedReason: string | null;
+} {
+  if (row.archived_at === null) {
+    if (row.archived_reason !== null) {
+      throw snapshotCorrupt(row.result_revision_id, "分析目录状态与归档信息不一致");
+    }
+    return { status: "active", archivedAt: null, archivedReason: null };
+  }
+  if (Number.isNaN(Date.parse(row.archived_at))) {
+    throw snapshotCorrupt(row.result_revision_id, "分析目录归档时间无效");
+  }
+  if (
+    row.archived_reason !== null &&
+    (row.archived_reason.trim() !== row.archived_reason ||
+      row.archived_reason.length === 0 ||
+      row.archived_reason.length > 300 ||
+      /[\u0000-\u001f\u007f]/u.test(row.archived_reason))
+  ) {
+    throw snapshotCorrupt(row.result_revision_id, "分析目录归档原因无效");
+  }
+  return {
+    status: "archived",
+    archivedAt: row.archived_at,
+    archivedReason: row.archived_reason,
+  };
 }
 
 function assertLibraryStatus(

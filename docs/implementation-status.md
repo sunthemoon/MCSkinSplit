@@ -20,6 +20,7 @@ Last updated: 2026-08-14
 | M11 source-aware library lifecycle and correction | Complete | Whole-component unassign, provenance filters, soft retirement, immutable Bundle revision, and corrected-HEAD re-export |
 | M12 responsive workflow navigation | Complete | Seven stable section targets, sticky desktop/mobile navigation, scroll-aware active state, native hash links, and reduced-motion behavior |
 | M13 single-pass semantic JSON transport | Complete | Default one-call JSON capture, strict host validation, honest recovered diagnostics, and real browser AI completion |
+| M14 analyzed-result catalog archive | Complete | Result-Revision-scoped archive/restore, default active visibility, non-cascading immutable history, and browser persistence |
 
 ## M0 baseline
 
@@ -855,3 +856,40 @@ Last updated: 2026-08-14
   pixels, produced `13` components, and reported zero unknown pixels, review
   items, warnings, or validation errors. The successful Run retained all five
   expected audit assets.
+
+## M14 deliverables
+
+- The analyzed-skin catalog lifecycle is defined per successful result Revision.
+  Active results appear by default; archived and all-status views provide
+  reversible management without weakening direct historical reads.
+- Archiving stores a timestamp and an optional reason. Restoring changes the same
+  catalog identity back to active rather than creating another Revision or Job.
+- AI Jobs and Runs, immutable Revision rows and snapshots, exported Parts, Bundles,
+  Bundle membership, and provenance remain unchanged. Catalog lifecycle changes do
+  not cascade into the separate Part/Bundle retirement lifecycle.
+- Different result Revisions from one Project remain independent entries. They are
+  not automatically merged by Project identity, source skin, or analysis order.
+
+## M14 verification evidence
+
+- `pnpm verify` passed on Windows: deterministic fixtures, all package
+  typechecks, 36 test files / 264 tests, and all production builds completed.
+  The existing Vite warning for chunks larger than 500 kB remains unchanged.
+- Focused results included skin-revision 33/33, API 13/13, and Web 96/96.
+- A real Chrome run used the two persisted results for Project
+  `750fa4166940b473`. Archiving `main #2` changed the catalog counts from
+  active 9 / archived 0 to active 8 / archived 1, preserved the card's complete
+  groups, and kept the exact historical Revision loadable from the archived
+  view.
+- Reloading the Studio kept `main #2` hidden from the default view and retained
+  its reason in the archived view. Restoring it returned the counts to active 9 /
+  archived 0; the final local catalog state matches the pre-test state.
+- The desktop browser viewport reported `scrollWidth === clientWidth`, so the
+  new controls introduced no document-level horizontal overflow.
+
+## M14 boundaries
+
+- Archive is reversible catalog visibility management, not physical deletion.
+- Archiving one result Revision never changes another result from the same Project.
+- Parts and Bundles exported from an archived result retain their own immutable
+  identities and independent active/retired state.

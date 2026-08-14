@@ -179,9 +179,14 @@ interface PartBundlesQuery {
 }
 
 interface AnalyzedSkinsQuery {
+  readonly status?: "active" | "archived" | "all";
   readonly projectId?: string;
   readonly kind?: AggregateKind;
   readonly q?: string;
+}
+
+interface ArchiveAnalyzedSkinBody {
+  readonly reason?: string;
 }
 
 interface PartMannequinQuery {
@@ -635,6 +640,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     { schema: { querystring: analyzedSkinsQuerySchema } },
     async (request) => ({
       analyzedSkins: await store.listAnalyzedSkins({
+        ...(request.query.status ? { status: request.query.status } : {}),
         ...(request.query.projectId
           ? { projectId: request.query.projectId }
           : {}),
@@ -648,6 +654,25 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     "/api/analyzed-skins/:revisionId",
     async (request) => ({
       analyzedSkin: await store.getAnalyzedSkin(request.params.revisionId),
+    }),
+  );
+
+  app.post<{ Params: RevisionParams; Body: ArchiveAnalyzedSkinBody }>(
+    "/api/analyzed-skins/:revisionId/archive",
+    { schema: { body: archiveAnalyzedSkinSchema } },
+    async (request) => ({
+      analyzedSkin: await store.archiveAnalyzedSkin(
+        request.params.revisionId,
+        request.body ?? {},
+      ),
+    }),
+  );
+
+  app.post<{ Params: RevisionParams; Body: Record<string, never> }>(
+    "/api/analyzed-skins/:revisionId/restore",
+    { schema: { body: emptyObjectSchema } },
+    async (request) => ({
+      analyzedSkin: await store.restoreAnalyzedSkin(request.params.revisionId),
     }),
   );
 
@@ -1301,9 +1326,21 @@ const analyzedSkinsQuerySchema = {
   type: "object",
   additionalProperties: false,
   properties: {
+    status: {
+      type: "string",
+      enum: ["active", "archived", "all"],
+    },
     projectId: { type: "string", minLength: 1, maxLength: 100 },
     kind: aggregateKindSchema,
     q: { type: "string", minLength: 1, maxLength: 120 },
+  },
+} as const;
+
+const archiveAnalyzedSkinSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reason: { type: "string", minLength: 1, maxLength: 300 },
   },
 } as const;
 

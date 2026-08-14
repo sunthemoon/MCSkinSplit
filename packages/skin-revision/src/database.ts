@@ -62,6 +62,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 10,
+    name: "analyzed skin catalog archive",
+    sql: readFileSync(
+      new URL("./migrations/010_analyzed_skin_catalog_archive.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

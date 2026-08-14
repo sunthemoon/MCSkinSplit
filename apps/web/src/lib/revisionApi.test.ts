@@ -4,6 +4,7 @@ import {
   applyCompositionBundle,
   applyPartEditOperation,
   applySemanticOperation,
+  archiveAnalyzedSkin,
   commitComposition,
   clearCompositionRestorationPlan,
   commitRevisionPart,
@@ -33,6 +34,7 @@ import {
   retirePart,
   restorePart,
   retirePartBundle,
+  restoreAnalyzedSkin,
   restorePartBundle,
   revisePartBundle,
   retryAiJob,
@@ -519,6 +521,45 @@ describe("revisionApi", () => {
     expect(partBundleMannequinUrl("bundle / 1", "slim")).toBe(
       "/api/part-bundles/bundle%20%2F%201/mannequin.png?armType=slim",
     );
+  });
+
+  it("serializes analyzed-catalog status filters and reversible archive requests", async () => {
+    const analyzedSkin = {
+      revision: { id: "revision / 2" },
+      catalogStatus: "archived",
+      archivedAt: "2026-08-14T09:30:00.000Z",
+      archivedReason: "重复分析",
+    };
+    const restoredSkin = {
+      ...analyzedSkin,
+      catalogStatus: "active",
+      archivedAt: null,
+      archivedReason: null,
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ analyzedSkins: [analyzedSkin] }, 200))
+      .mockResolvedValueOnce(jsonResponse({ analyzedSkin }, 200))
+      .mockResolvedValueOnce(jsonResponse({ analyzedSkin: restoredSkin }, 200));
+
+    await listAnalyzedSkins({
+      projectId: "project / 1",
+      kind: "hair",
+      status: "archived",
+      query: "red skin",
+    }, fetcher);
+    await archiveAnalyzedSkin("revision / 2", "  重复分析  ", fetcher);
+    await restoreAnalyzedSkin("revision / 2", fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/analyzed-skins?projectId=project+%2F+1&kind=hair&status=archived&q=red+skin",
+      "/api/analyzed-skins/revision%20%2F%202/archive",
+      "/api/analyzed-skins/revision%20%2F%202/restore",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      reason: "重复分析",
+    });
+    expect(fetcher.mock.calls[2]?.[1]?.body).toBe("{}");
   });
 
   it("starts, lists, and retries AI jobs with explicit provider options", async () => {

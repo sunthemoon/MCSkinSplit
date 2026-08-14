@@ -388,6 +388,13 @@ export interface AnalyzedSkinGroup {
   readonly exportedBundleId: string | null;
 }
 
+export type AnalyzedSkinCatalogStatus = "active" | "archived";
+export type AnalyzedSkinCatalogStatusFilter = AnalyzedSkinCatalogStatus | "all";
+
+export interface ArchiveAnalyzedSkinInput {
+  readonly reason?: string;
+}
+
 export interface AnalyzedSkinCatalogItem {
   readonly project: Pick<SkinProject, "id" | "name">;
   readonly revision: Pick<
@@ -406,9 +413,13 @@ export interface AnalyzedSkinCatalogItem {
   readonly reviewItemCount: number;
   readonly groups: readonly AnalyzedSkinGroup[];
   readonly skinUrl: string;
+  readonly catalogStatus: AnalyzedSkinCatalogStatus;
+  readonly archivedAt: string | null;
+  readonly archivedReason: string | null;
 }
 
 export interface AnalyzedSkinCatalogQuery {
+  readonly status?: AnalyzedSkinCatalogStatusFilter;
   readonly projectId?: string;
   readonly kind?: AggregateKind;
   readonly query?: string;

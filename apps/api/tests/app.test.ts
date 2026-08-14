@@ -1180,6 +1180,172 @@ describe("revision API", () => {
     });
   });
 
+  it("archives duplicate analyzed results while preserving jobs, revisions, and bundles", async () => {
+    const provider = new ApiAiProvider("archive-provider");
+    const { app } = await createApi([provider]);
+    const project = await createProject(app, "Archive catalog fixture");
+    const imported = await importSkin(app, project.projectId);
+    const analysisPayload = {
+      mode: "full",
+      provider: "archive-provider",
+      model: "archive-model",
+      reasoningEffort: "medium",
+      taxonomyLevel: "coarse",
+      focus: ["hair"],
+      createRevisionOnSuccess: true,
+    } as const;
+    const firstStarted = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/ai-analysis`,
+      payload: analysisPayload,
+    });
+    expect(firstStarted.statusCode).toBe(202);
+    const firstJobId = firstStarted.json<{ job: { id: string } }>().job.id;
+    const firstJob = await waitForAiJob(app, firstJobId);
+    expect(firstJob.job.status).toBe("succeeded");
+    const firstRevisionId = firstJob.job.resultRevisionId!;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2));
+
+    const secondStarted = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${firstRevisionId}/ai-analysis`,
+      payload: analysisPayload,
+    });
+    expect(secondStarted.statusCode).toBe(202);
+    const secondJobId = secondStarted.json<{ job: { id: string } }>().job.id;
+    const secondJob = await waitForAiJob(app, secondJobId);
+    expect(secondJob.job.status).toBe("succeeded");
+    const secondRevisionId = secondJob.job.resultRevisionId!;
+
+    const beforeArchive = await app.inject({
+      method: "GET",
+      url: "/api/analyzed-skins",
+    });
+    expect(beforeArchive.statusCode).toBe(200);
+    expect(
+      beforeArchive.json<{
+        analyzedSkins: readonly { revision: { id: string } }[];
+      }>().analyzedSkins.map((item) => item.revision.id),
+    ).toEqual([secondRevisionId, firstRevisionId]);
+
+    const exported = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${firstRevisionId}/export-bundle`,
+      payload: {
+        name: "Archived source hair",
+        kind: "hair",
+        componentIds: ["hair.main"],
+      },
+    });
+    expect(exported.statusCode).toBe(201);
+    const bundleId = exported.json<{ bundle: { id: string } }>().bundle.id;
+
+    const archived = await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/archive`,
+      payload: { reason: "重复分析结果" },
+    });
+    expect(archived.statusCode).toBe(200);
+    const archivedItem = archived.json<{
+      analyzedSkin: {
+        catalogStatus: string;
+        archivedAt: string | null;
+        archivedReason: string | null;
+      };
+    }>().analyzedSkin;
+    expect(archivedItem).toMatchObject({
+      catalogStatus: "archived",
+      archivedReason: "重复分析结果",
+    });
+    expect(archivedItem.archivedAt).not.toBeNull();
+
+    expect((await app.inject({ method: "GET", url: "/api/analyzed-skins" })).json())
+      .toMatchObject({ analyzedSkins: [{ revision: { id: secondRevisionId } }] });
+    const archivedList = await app.inject({
+      method: "GET",
+      url: "/api/analyzed-skins?status=archived",
+    });
+    expect(archivedList.json()).toMatchObject({
+      analyzedSkins: [{ revision: { id: firstRevisionId }, catalogStatus: "archived" }],
+    });
+    const allList = await app.inject({
+      method: "GET",
+      url: "/api/analyzed-skins?status=all",
+    });
+    expect(
+      allList.json<{
+        analyzedSkins: readonly { revision: { id: string } }[];
+      }>().analyzedSkins.map((item) => item.revision.id),
+    ).toEqual([secondRevisionId, firstRevisionId]);
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/analyzed-skins/${firstRevisionId}`,
+    })).json()).toMatchObject({
+      analyzedSkin: { revision: { id: firstRevisionId }, catalogStatus: "archived" },
+    });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs/${firstJobId}`,
+    })).json()).toMatchObject({ job: { id: firstJobId, status: "succeeded" } });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/revisions/${firstRevisionId}`,
+    })).json()).toMatchObject({ revision: { id: firstRevisionId, operationType: "ai_segment" } });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/part-bundles/${bundleId}`,
+    })).json()).toMatchObject({
+      bundle: { id: bundleId, sourceRevisionId: firstRevisionId, libraryStatus: "active" },
+    });
+
+    const archivedAgain = await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/archive`,
+      payload: { reason: "不覆盖原因" },
+    });
+    expect(archivedAgain.json()).toMatchObject({ analyzedSkin: archivedItem });
+
+    const restored = await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/restore`,
+      payload: {},
+    });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json()).toMatchObject({
+      analyzedSkin: {
+        revision: { id: firstRevisionId },
+        catalogStatus: "active",
+        archivedAt: null,
+        archivedReason: null,
+      },
+    });
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/restore`,
+      payload: {},
+    })).statusCode).toBe(200);
+
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${imported.revisionId}/archive`,
+      payload: {},
+    })).statusCode).toBe(404);
+    expect((await app.inject({
+      method: "GET",
+      url: "/api/analyzed-skins?status=deleted",
+    })).statusCode).toBe(400);
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/archive`,
+      payload: { reason: "valid", extra: true },
+    })).statusCode).toBe(400);
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/analyzed-skins/${firstRevisionId}/archive`,
+      payload: { reason: "x".repeat(301) },
+    })).statusCode).toBe(400);
+  });
+
   it("returns stable client errors for bad PNG data and duplicate imports", async () => {
     const { app } = await createApi();
     const project = await createProject(app, "Error handling");

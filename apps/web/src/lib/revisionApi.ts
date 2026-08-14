@@ -200,6 +200,11 @@ export interface ApiAnalyzedSkinGroup {
   readonly exportedBundleId: string | null;
 }
 
+export type ApiAnalyzedSkinCatalogStatus = "active" | "archived";
+export type ApiAnalyzedSkinCatalogStatusFilter =
+  | ApiAnalyzedSkinCatalogStatus
+  | "all";
+
 export interface ApiAnalyzedSkin {
   readonly project: Pick<ApiProject, "id" | "name">;
   readonly revision: Pick<
@@ -216,6 +221,9 @@ export interface ApiAnalyzedSkin {
   readonly componentCount: number;
   readonly unknownPixelCount: number;
   readonly reviewItemCount: number;
+  readonly catalogStatus: ApiAnalyzedSkinCatalogStatus;
+  readonly archivedAt: string | null;
+  readonly archivedReason: string | null;
   readonly groups: readonly ApiAnalyzedSkinGroup[];
   readonly skinUrl: string;
 }
@@ -802,6 +810,7 @@ export async function listAnalyzedSkins(
   options: {
     readonly projectId?: string;
     readonly kind?: AggregateKind;
+    readonly status?: ApiAnalyzedSkinCatalogStatusFilter;
     readonly query?: string;
   } = {},
   fetcher: Fetcher = fetch,
@@ -809,6 +818,7 @@ export async function listAnalyzedSkins(
   const query = new URLSearchParams();
   if (options.projectId) query.set("projectId", options.projectId);
   if (options.kind) query.set("kind", options.kind);
+  if (options.status) query.set("status", options.status);
   if (options.query) query.set("q", options.query);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const body = await requestJson<{
@@ -824,6 +834,39 @@ export async function getAnalyzedSkin(
   const body = await requestJson<{ readonly analyzedSkin: ApiAnalyzedSkin }>(
     `/api/analyzed-skins/${encodeURIComponent(revisionId)}`,
     undefined,
+    fetcher,
+  );
+  return body.analyzedSkin;
+}
+
+export async function archiveAnalyzedSkin(
+  revisionId: string,
+  reason?: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAnalyzedSkin> {
+  const body = await requestJson<{ readonly analyzedSkin: ApiAnalyzedSkin }>(
+    `/api/analyzed-skins/${encodeURIComponent(revisionId)}/archive`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(reason?.trim() ? { reason: reason.trim() } : {}),
+    },
+    fetcher,
+  );
+  return body.analyzedSkin;
+}
+
+export async function restoreAnalyzedSkin(
+  revisionId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAnalyzedSkin> {
+  const body = await requestJson<{ readonly analyzedSkin: ApiAnalyzedSkin }>(
+    `/api/analyzed-skins/${encodeURIComponent(revisionId)}/restore`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
     fetcher,
   );
   return body.analyzedSkin;

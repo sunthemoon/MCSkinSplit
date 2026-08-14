@@ -12,6 +12,7 @@
   "include": [
     "src/**/*.test.ts",
     "src/components/CompositionRestorationPanel.tsx",
+    "src/components/AnalyzedSkinCatalog.tsx",
     "src/components/LibraryLifecycleControls.tsx",
     "src/components/LibraryToolbar.tsx",
     "src/components/RestorationRecommendationPanel.tsx",

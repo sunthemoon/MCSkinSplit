@@ -2504,6 +2504,41 @@ feat(web): add responsive workflow navigation
 
 ---
 
+## M14：分析结果目录可逆归档
+
+目标：在不删除任何不可变证据或库资产的前提下，让用户隐藏过时、
+错误或重复的已分析目录项，并可随时恢复。
+
+实现：
+
+1. 目录生命周期以成功 AI Job 产生的 `resultRevisionId` 为唯一身份，
+   不以 Job、Project 或源 PNG 作为归档边界。
+2. 结果默认为 `active`；归档记录时间和可选原因，默认列表隐藏
+   `archived`，管理视图可按 active、archived 或 all 筛选并恢复。
+3. 同一结果 Revision 被多个成功 Job 引用时仍只显示一项，最新成功
+   Job 仅提供展示元数据。同一 Project 的不同结果 Revision 始终保持
+   独立，不根据源皮肤、结果哈希或生成顺序自动合并。
+4. 归档和恢复只改变目录可发现性，不删除、重写或级联修改 AI
+   Job/Run、Revision 行与快照、语义 mask、Part、Bundle、成员关系或来源记录。
+5. Part 与 Bundle 继续使用 M11 独立的 active/retired 生命周期；归档
+   分析结果不会停用已导出资产或破坏历史引用。
+
+验收：
+
+- 归档一个结果 Revision 后，它从默认目录消失，但可在已归档视图
+  中读取、加载和恢复；刷新页面后状态保持。
+- 归档与恢复前后，Job、Run、Revision 历史、快照哈希以及 Part/Bundle
+  引用不变，既有 Bundle 预览与历史读取仍可用。
+- 归档同一 Project 的一个结果不影响其他结果 Revision，也不会让指向
+  同一结果的较旧 Job 作为新目录项重新出现。
+- 无效状态、非分析结果 Revision 和非法请求体被拒绝，失败不留下部分
+  归档状态。
+
+详细合同见
+[`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2526,7 +2561,8 @@ feat(web): add responsive workflow navigation
 | S12 | M11 组件库治理与误识别修正 | S5、S8、S9 |
 | S13 | M12 长页面工作流定位 | S12 |
 | S14 | M13 语义 JSON 单次传输与诚实诊断 | S13 |
-| S15 | 综合测试与审核 | 全部 |
+| S15 | M14 分析结果目录可逆归档 | S8、S12、S14 |
+| S16 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

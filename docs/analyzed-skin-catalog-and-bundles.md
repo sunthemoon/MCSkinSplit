@@ -30,6 +30,28 @@ claim to reconstruct pixels hidden in the source artwork or correct a mistaken A
 classification. Review items remain visible, and the semantic editor remains the
 correction path.
 
+## Result-Revision catalog lifecycle
+
+M14 adds a reversible visibility lifecycle to catalog results. The lifecycle is
+keyed by the immutable result Revision, not by an individual AI Job. A result is
+`active` by default. Archiving records a timestamp and an optional reason, hides
+the result from the default catalog, and keeps it available through the archived
+or all-status management views. Restoring it makes the same result Revision active
+again.
+
+Multiple successful Jobs that point to one result Revision still produce one
+catalog entry, with the latest successful Job supplying display metadata. Different
+result Revisions remain distinct even when they belong to the same Project, share
+the same source skin, or were produced by consecutive analyses. The catalog never
+automatically merges or retires one of those results.
+
+Catalog archiving changes discovery only. It does not delete or rewrite the AI
+Job, Run, result Revision, snapshot files, semantic masks, Parts, Bundles, Bundle
+members, or provenance. Existing Parts and Bundles keep their independent
+`active`/`retired` lifecycle and remain historically readable. This separation
+allows an obsolete analysis card to be hidden without invalidating material that
+was already exported from that Revision.
+
 ## Bundle export and storage
 
 Exporting a catalog group creates an immutable Bundle and one ordinary immutable
@@ -97,8 +119,10 @@ without requiring a new AI Job.
 ## HTTP API
 
 ```text
-GET  /api/analyzed-skins?projectId=&kind=&q=
+GET  /api/analyzed-skins?status=active|archived|all&projectId=&kind=&q=
 GET  /api/analyzed-skins/:revisionId
+POST /api/analyzed-skins/:revisionId/archive
+POST /api/analyzed-skins/:revisionId/restore
 POST /api/revisions/:revisionId/export-bundle
 
 GET  /api/part-bundles?kind=&sourceRevisionId=&projectId=&status=&q=
@@ -120,6 +144,9 @@ hash checks.
 
 - Manual-only Revisions do not enter the analyzed-skin catalog unless they are the
   persisted result of a successful AI Job.
+- Catalog archive and restore operate on one exact result Revision. They do not
+  cascade to another result from the same Project and do not physically delete
+  Job, Revision, Part, or Bundle records.
 - A Bundle captures one immutable source Revision. Later semantic corrections or
   re-analysis require exporting a new Bundle; existing Bundles are not rewritten.
   Bundle revision likewise creates a new identity and retires the prior one.

@@ -336,6 +336,26 @@ h1 span {
   background: rgba(24, 33, 38, 0.035);
 }
 
+.analyzed-catalog-tool-groups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 14px;
+}
+
+.catalog-filter-group {
+  display: grid;
+  gap: 5px;
+}
+
+.catalog-filter-group > span {
+  color: rgba(24, 33, 38, 0.52);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
 .catalog-filter {
   display: flex;
   flex-wrap: wrap;
@@ -432,6 +452,17 @@ h1 span {
   box-shadow: inset 0 0 0 2px var(--cyan);
 }
 
+.analyzed-skin-card[data-catalog-status="archived"] {
+  border-color: rgba(24, 33, 38, 0.48);
+  background:
+    linear-gradient(135deg, rgba(24, 33, 38, 0.055), transparent 52%),
+    #f2ecdf;
+}
+
+.analyzed-skin-card[aria-busy="true"] {
+  box-shadow: inset 0 0 0 2px var(--orange);
+}
+
 .analyzed-skin-select {
   position: relative;
   min-width: 0;
@@ -512,6 +543,21 @@ h1 span {
 
 .analyzed-skin-title time {
   flex: 0 0 auto;
+}
+
+.analyzed-skin-archive-state {
+  margin: 0;
+  padding: 5px 7px;
+  border-left: 3px solid var(--ink);
+  background: rgba(24, 33, 38, 0.08);
+  color: rgba(24, 33, 38, 0.72);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.5rem;
+  line-height: 1.45;
+}
+
+.analyzed-skin-archive-state strong {
+  color: var(--ink);
 }
 
 .analyzed-skin-facts {
@@ -601,6 +647,83 @@ h1 span {
 .aggregate-group-chip button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
+}
+
+.analyzed-catalog-lifecycle {
+  display: grid;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(24, 33, 38, 0.42);
+}
+
+.analyzed-catalog-lifecycle button {
+  min-height: 30px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.52rem;
+  font-weight: 800;
+}
+
+.analyzed-catalog-lifecycle button:hover:not(:disabled) {
+  border-color: var(--orange);
+  background: var(--orange);
+  color: white;
+}
+
+.analyzed-catalog-lifecycle button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.analyzed-catalog-archive-confirm {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border-left: 3px solid var(--orange);
+  background: rgba(227, 108, 61, 0.09);
+}
+
+.analyzed-catalog-archive-confirm p {
+  margin: 0;
+  color: rgba(24, 33, 38, 0.7);
+  font-size: 0.56rem;
+  line-height: 1.5;
+}
+
+.analyzed-catalog-archive-confirm label {
+  display: grid;
+  gap: 4px;
+}
+
+.analyzed-catalog-archive-confirm label > span {
+  color: rgba(24, 33, 38, 0.62);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.49rem;
+  font-weight: 800;
+}
+
+.analyzed-catalog-archive-confirm input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 0.58rem;
+}
+
+.analyzed-catalog-archive-confirm > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
 }
 
 .catalog-error {
@@ -4791,6 +4914,11 @@ h1 span {
   .analyzed-catalog-heading,
   .analyzed-catalog-tools {
     display: grid;
+  }
+
+  .analyzed-catalog-tool-groups {
+    display: grid;
+    width: 100%;
   }
 
   .analyzed-catalog-heading > p {

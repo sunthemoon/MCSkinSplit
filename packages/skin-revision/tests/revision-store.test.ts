@@ -856,7 +856,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 9 });
+          .toEqual({ version: 10 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -871,6 +871,124 @@ describe("RevisionStore", () => {
       } finally {
         reopened.close();
       }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("archives analyzed catalog entries without mutating immutable evidence", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_catalog_fixture",
+        aiRunId: "airun_catalog_fixture",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "Catalog fixture",
+        reviewItems: [],
+      });
+      const database = new Database(store.databasePath);
+      try {
+        const createdAt = "2026-08-11T01:00:00.000Z";
+        database.prepare(`
+          INSERT INTO ai_job (
+            id, job_kind, project_id, input_revision_id, result_revision_id,
+            retry_of_job_id, status, provider, model, skill_name, skill_version,
+            prompt_version, options_json, review_items_json, proposal_summary,
+            cancel_requested, created_at, started_at, finished_at
+          ) VALUES (?, 'semantic_analysis', ?, ?, ?, NULL, 'succeeded', ?, ?, ?, ?, ?, ?, '[]', ?, 0, ?, ?, ?)
+        `).run(
+          "aijob_catalog_fixture",
+          imported.project.id,
+          imported.revision.id,
+          analyzed.revision.id,
+          "catalog-provider",
+          "catalog-model",
+          "mc-skin-segmenter",
+          "1.2.0",
+          "catalog-test-v1",
+          JSON.stringify({
+            mode: "full",
+            provider: "catalog-provider",
+            model: "catalog-model",
+            reasoningEffort: "medium",
+            taxonomyLevel: "coarse",
+            focus: ["hair"],
+            createRevisionOnSuccess: true,
+          }),
+          "Catalog fixture",
+          createdAt,
+          createdAt,
+          createdAt,
+        );
+        expect(() => database.prepare(`
+          INSERT INTO analyzed_skin_catalog_archive (
+            result_revision_id, archived_at, archived_reason
+          ) VALUES (?, ?, NULL)
+        `).run(imported.revision.id, createdAt)).toThrow(
+          /invalid analyzed skin catalog archive target/u,
+        );
+      } finally {
+        database.close();
+      }
+
+      expect((await store.listAnalyzedSkins()).map((item) => item.revision.id))
+        .toEqual([analyzed.revision.id]);
+      const revisionBefore = store.getRevision(analyzed.revision.id);
+      await expect(store.archiveAnalyzedSkin(analyzed.revision.id, {
+        reason: `${" ".repeat(300)}x`,
+      })).rejects.toMatchObject({ code: "INVALID_INPUT", statusCode: 400 });
+      const archived = await store.archiveAnalyzedSkin(analyzed.revision.id, {
+        reason: "重复分析结果",
+      });
+      expect(archived).toMatchObject({
+        catalogStatus: "archived",
+        archivedReason: "重复分析结果",
+      });
+      expect(archived.archivedAt).not.toBeNull();
+      expect(await store.listAnalyzedSkins()).toEqual([]);
+      expect(await store.listAnalyzedSkins({ status: "archived" })).toEqual([archived]);
+      expect(await store.getAnalyzedSkin(analyzed.revision.id)).toEqual(archived);
+
+      const corruptDatabase = new Database(store.databasePath);
+      try {
+        corruptDatabase.prepare(`
+          UPDATE analyzed_skin_catalog_archive
+          SET archived_at = 'not-a-timestamp'
+          WHERE result_revision_id = ?
+        `).run(analyzed.revision.id);
+        await expect(
+          store.listAnalyzedSkins({ status: "all" }),
+        ).rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+        corruptDatabase.prepare(`
+          UPDATE analyzed_skin_catalog_archive
+          SET archived_at = ?
+          WHERE result_revision_id = ?
+        `).run(archived.archivedAt, analyzed.revision.id);
+      } finally {
+        corruptDatabase.close();
+      }
+
+      const archivedAgain = await store.archiveAnalyzedSkin(analyzed.revision.id, {
+        reason: "不应覆盖原因",
+      });
+      expect(archivedAgain).toEqual(archived);
+      expect(store.getRevision(analyzed.revision.id)).toEqual(revisionBefore);
+
+      const restored = await store.restoreAnalyzedSkin(analyzed.revision.id);
+      expect(restored).toMatchObject({
+        catalogStatus: "active",
+        archivedAt: null,
+        archivedReason: null,
+      });
+      expect(await store.restoreAnalyzedSkin(analyzed.revision.id)).toEqual(restored);
+      expect(await store.listAnalyzedSkins({ status: "all" })).toEqual([restored]);
+      expect(store.getRevision(analyzed.revision.id)).toEqual(revisionBefore);
+      await expect(
+        store.archiveAnalyzedSkin(imported.revision.id),
+      ).rejects.toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
     } finally {
       store.close();
     }

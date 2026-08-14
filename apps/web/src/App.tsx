@@ -44,6 +44,7 @@ import {
 import {
   addCompositionPart,
   applyCompositionBundle,
+  archiveAnalyzedSkin,
   branchRevision,
   applySemanticOperation,
   cancelAiJob,
@@ -76,6 +77,7 @@ import {
   previewRevisionPart,
   restorePart,
   restorePartBundle,
+  restoreAnalyzedSkin,
   retirePart,
   retirePartBundle,
   revisePartBundle,
@@ -299,6 +301,8 @@ export function App() {
   const [busyCatalogGroupKey, setBusyCatalogGroupKey] = useState<string | null>(
     null,
   );
+  const [busyCatalogRevisionIds, setBusyCatalogRevisionIds] =
+    useState<ReadonlySet<string>>(() => new Set());
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [partPreview, setPartPreview] = useState<ApiPartPreview | null>(null);
   const [compositionPartId, setCompositionPartId] = useState<string | null>(null);
@@ -360,6 +364,8 @@ export function App() {
   const aiEventLogRef = useRef<HTMLOListElement>(null);
   const partPreviewRequestRef = useRef(0);
   const libraryLifecycleBusyRef = useRef(false);
+  const catalogLifecycleBusyRef = useRef(new Set<string>());
+  const catalogRefreshRequestRef = useRef(0);
 
   const releaseObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -368,15 +374,21 @@ export function App() {
     }
   }, []);
 
-  const refreshReusableCatalog = useCallback(async () => {
-    const [parts, bundles, catalog] = await Promise.all([
+  const refreshAnalyzedCatalog = useCallback(async () => {
+    const requestId = ++catalogRefreshRequestRef.current;
+    const catalog = await listAnalyzedSkins({ status: "all" });
+    if (requestId === catalogRefreshRequestRef.current) {
+      setAnalyzedSkins(catalog);
+    }
+  }, []);
+
+  const refreshReusableLibrary = useCallback(async () => {
+    const [parts, bundles] = await Promise.all([
       listParts({ status: "all" }),
       listPartBundles({ status: "all" }),
-      listAnalyzedSkins(),
     ]);
     setPartLibrary(parts);
     setPartBundles(bundles);
-    setAnalyzedSkins(catalog);
     const firstActivePart = parts.find((part) => part.libraryStatus === "active");
     const firstActiveBundle = bundles.find((bundle) => bundle.libraryStatus === "active");
     setSelectedPartId((current) => current ?? firstActivePart?.id ?? null);
@@ -387,6 +399,10 @@ export function App() {
         : (firstActiveBundle?.id ?? null),
     );
   }, []);
+
+  const refreshReusableCatalog = useCallback(async () => {
+    await Promise.all([refreshReusableLibrary(), refreshAnalyzedCatalog()]);
+  }, [refreshAnalyzedCatalog, refreshReusableLibrary]);
 
   const activateFixture = useCallback(
     async (fixture: SkinFixture) => {
@@ -1588,6 +1604,45 @@ export function App() {
     }
   };
 
+  const changeAnalyzedSkinCatalogStatus = async (
+    item: ApiAnalyzedSkin,
+    action: "archive" | "restore",
+    reason?: string,
+  ): Promise<boolean> => {
+    const revisionId = item.revision.id;
+    if (catalogLifecycleBusyRef.current.has(revisionId)) return false;
+    catalogLifecycleBusyRef.current.add(revisionId);
+    catalogRefreshRequestRef.current += 1;
+    setBusyCatalogRevisionIds(new Set(catalogLifecycleBusyRef.current));
+    setCatalogError(null);
+    try {
+      const updated = action === "archive"
+        ? await archiveAnalyzedSkin(revisionId, reason)
+        : await restoreAnalyzedSkin(revisionId);
+      catalogRefreshRequestRef.current += 1;
+      setAnalyzedSkins((current) =>
+        current.map((candidate) =>
+          candidate.revision.id === revisionId ? updated : candidate,
+        ),
+      );
+      setNotice(
+        action === "archive"
+          ? `已归档分析结果 ${item.project.name} · ${item.revision.branchName} #${item.revision.sequence}`
+          : `已恢复分析结果 ${item.project.name} · ${item.revision.branchName} #${item.revision.sequence}`,
+      );
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const actionLabel = action === "archive" ? "归档" : "恢复";
+      setCatalogError(`分析结果${actionLabel}失败：${message}`);
+      setNotice(`分析目录${actionLabel}失败：${message}`);
+      return false;
+    } finally {
+      catalogLifecycleBusyRef.current.delete(revisionId);
+      setBusyCatalogRevisionIds(new Set(catalogLifecycleBusyRef.current));
+    }
+  };
+
   const exportAnalyzedGroup = async (
     item: ApiAnalyzedSkin,
     group: ApiAnalyzedSkinGroup,
@@ -2318,11 +2373,16 @@ export function App() {
       <AnalyzedSkinCatalog
         items={analyzedSkins}
         busyGroupKey={busyCatalogGroupKey}
+        busyRevisionIds={busyCatalogRevisionIds}
         loading={catalogLoading}
         error={catalogError}
         selectedRevisionId={selectedRevisionId}
         onActivate={(item) => void activateAnalyzedSkin(item)}
         onExportGroup={(item, group) => void exportAnalyzedGroup(item, group)}
+        onArchive={(item, reason) =>
+          changeAnalyzedSkinCatalogStatus(item, "archive", reason)}
+        onRestore={(item) =>
+          changeAnalyzedSkinCatalogStatus(item, "restore")}
       />
 
       <section className="current-head-bundle-export" aria-label="当前 HEAD 完整大类重新入库">
