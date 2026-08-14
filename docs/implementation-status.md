@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
 ## Milestones
 
@@ -21,6 +21,7 @@ Last updated: 2026-08-14
 | M12 responsive workflow navigation | Complete | Seven stable section targets, sticky desktop/mobile navigation, scroll-aware active state, native hash links, and reduced-motion behavior |
 | M13 single-pass semantic JSON transport | Complete | Default one-call JSON capture, strict host validation, honest recovered diagnostics, and real browser AI completion |
 | M14 analyzed-result catalog archive | Complete | Result-Revision-scoped archive/restore, default active visibility, non-cascading immutable history, and browser persistence |
+| M15 player-first clean analysis and classification repair | Complete | Default clean baseline, six-stage persistent flow, deterministic cross-body review, immutable repaired catalog variant, and real-browser confirmation |
 
 ## M0 baseline
 
@@ -347,12 +348,14 @@ Last updated: 2026-08-14
   an otherwise valid provider Run, while provider launch errors still produce a
   normal audited Job failure.
 
-## AI semantic provider hardening
+## AI semantic provider hardening (historical M13-era contract)
 
-- Semantic analysis now pins `mc-skin-segmenter` Skill `1.2.0` and prompt
-  `semantic-proposal-v3-tool-free`. The provider inlines the immutable public Job,
-  compact candidate summary, palette, previous-component summary, and rules while
-  attaching the prepared skin views.
+- At that milestone, semantic analysis pinned `mc-skin-segmenter` Skill `1.2.0`
+  and prompt `semantic-proposal-v3-tool-free`. The provider inlined the immutable
+  public Job, compact candidate summary, palette, previous-component summary, and
+  rules while attaching the prepared skin views. M15 supersedes this prompt
+  contract with `semantic-proposal-v4-tool-free`; the v3 details below remain
+  historical evidence.
 - Semantic Codex runs use a read-only sandbox with shell, web, browser, computer,
   image generation, apps/plugins/MCP, delegation, and related tools disabled. The
   model returns one final JSON response; it cannot read or write the Run workspace.
@@ -363,9 +366,10 @@ Last updated: 2026-08-14
 - The Studio pairs tool start/result events where correlation permits, labels tool
   failures and provider-stage errors as recoverable/non-terminal, collapses
   duplicate provider errors, and reserves terminal styling for the Job error and
-  terminal lifecycle event. The five-stage progress model is unchanged.
+  terminal lifecycle event. That milestone retained the five-stage progress
+  model; M15 replaces it with the documented six-stage player flow.
 
-## AI semantic provider hardening verification evidence
+## AI semantic provider hardening verification evidence (historical v3)
 
 - A real Chrome flow started `aijob_7c7431b119c146f9be34813036fa2f23`
   from the Studio against `9058f3af3ffb104c.png` using `max` reasoning. The one
@@ -839,6 +843,9 @@ Last updated: 2026-08-14
 
 ## M13 verification evidence
 
+- The Chrome evidence in this section used the historical
+  `semantic-proposal-v3-tool-free` prompt. It verifies M13 behavior only and is not
+  evidence for the current M15 `semantic-proposal-v4-tool-free` contract.
 - `pnpm verify` passes deterministic fixture checks, every workspace TypeScript
   project, all `257` Vitest cases, and every production build. Package totals are
   core `71`, compositor `8`, analysis pack `4`, provider `24`, Revision `32`,
@@ -893,3 +900,90 @@ Last updated: 2026-08-14
 - Archiving one result Revision never changes another result from the same Project.
 - Parts and Bundles exported from an archived result retain their own immutable
   identities and independent active/retired state.
+
+## M15 deliverables
+
+- New semantic-analysis requests default to `semanticBaseline: "empty"`. The
+  provider does not receive prior component labels in that mode. Advanced
+  settings can select `"current"`, which supplies a compact existing-component
+  summary as a soft prior while retaining complete host validation. Baseline
+  identity is stored in the Job/analysis pack and participates in the input hash.
+- Current prompt `semantic-proposal-v4-tool-free` explicitly tells the model that
+  long hair may continue from the head across torso front, back, left, and right
+  surfaces. Earlier v3 Chrome runs remain historical M13 evidence and do not count
+  as M15 prompt verification.
+- The Studio exposes one primary player action and a six-stage progress model:
+  prepare, identify, validate, assess cross-body classification, confirm an
+  optional classification repair, and prepare the analyzed catalog. Provider,
+  model, reasoning, baseline, retry, Runs, and technical logs remain available in
+  advanced disclosures.
+- Added a deterministic post-segmentation assessment for conservative cross-body
+  long-hair classification candidates. Current algorithm
+  `cross-body-hair-reclassification-v2` can join nearby matching fragments on one
+  torso surface before testing their combined vertical drape. It references exact
+  existing candidate spans and semantic ownership, performs no model call, and
+  cannot create coordinates, colors, transparency, or generated pixels. Version
+  v1 remains readable for historical Job evidence, but every pending v1 suggestion
+  is read-only until a fresh analysis creates v2 evidence.
+- Follow-up assessment/state is persisted against the successful semantic Job and
+  result Revision with immutable evidence identity. Public Job detail exposes
+  bounded suggestion summaries and notices; persistent events record assessment,
+  review readiness or skip, user action, and catalog availability.
+- Migration 012 upgrades databases that already applied an early follow-up schema.
+  It transactionally rebuilds and revalidates the follow-up table, preserves valid
+  history, allows assessment persistence while a Job is validating, and restores
+  current v2 and applied-Revision integrity constraints. Invalid legacy rows abort
+  the migration without advancing the recorded schema version.
+- Applying one fresh suggestion reloads the immutable result, regenerates and
+  compares evidence, creates a dedicated Branch, and submits the exact spans
+  through the normal semantic Revision service. Dismissing retains the original
+  result without a Revision mutation.
+- The analyzed-skin catalog remains rooted at the successful `ai_segment`
+  Revision. An applied Revision is integrity-verified and nested as
+  `分类修复版`, with aggregate groups derived from that Revision. Catalog archive
+  and Part/Bundle lifecycle remain independent.
+- Added strict follow-up apply/dismiss API routes and nullable follow-up state to
+  AI Job detail. Start and retry schemas accept the explicit clean/current
+  baseline option.
+
+## M15 verification status
+
+- Final repository `pnpm verify`: **passed** on 2026-08-15. The run covered
+  deterministic fixtures, all workspace typechecks, 300 tests, and every package
+  build. The existing Vite warning for chunks larger than 500 kB remains.
+- Local service E2E passed after upgrading the working database from schema v11 to
+  v12. Job `aijob_84d7e082243f4bde96867cb0582bc6b7` completed in one model Run,
+  created Revision `rev_5ac5825f34854502b2c3ec627ee1eabf`, persisted a deterministic
+  `no_repair` follow-up, emitted the assessment/review-skip/catalog stages, and
+  appeared in the analyzed catalog. Its verified hair component spans head and
+  torso surfaces and contains 687 existing pixels; no source RGBA was generated or
+  changed.
+- Real Chrome verification passed on 2026-08-15. Loading the fresh `main #6`
+  result showed all six stages complete, the verified 687-pixel head-and-torso hair
+  component, and the honest `no_repair` boundary. Reloading and selecting the same
+  catalog item restored its Job detail and six-stage result.
+- A separate persisted review on `main #4` exposed one 267-pixel cross-body hair
+  suggestion. Choosing the player-facing repair action created immutable branch
+  `semantic-repair-5b04e7476bf95e09a9ae982333a07123` and its manual Revision `#2`.
+  The visible component counts changed from hair `414` to `681` pixels and upper
+  outfit `474` to `207` pixels without changing the PNG. The nested
+  `分类修复版` remained available after reload, and both its Atlas and Slim/Alex 3D
+  preview reached ready state.
+- Responsive inspection at `1200×900` and `700×900` found no document-level
+  horizontal overflow. At 700 px the sticky workflow index retained its own
+  horizontal scrolling. Native fragment navigation focused the destination,
+  preserved browser Back/Forward history, and restored `#workspace-ai` correctly.
+  Browser logs contained only external Chrome-extension message-channel and
+  telemetry timeouts; no application stack or failed local workflow was observed.
+
+## M15 boundaries
+
+- Classification follow-up reassigns existing opaque pixels only. It does not
+  synthesize clothing hidden behind long hair, reconstruct covered hair, fill
+  hidden body pixels, or alter source RGBA.
+- `no_repair` means the conservative deterministic rule found no safe suggestion.
+  It does not prove that the skin has no occlusion or that its semantic groups are
+  complete.
+- Hidden-content completion remains a later provenance-aware capability. Any such
+  feature must distinguish original, inferred, generated, and authored pixels and
+  require preview plus explicit user confirmation.

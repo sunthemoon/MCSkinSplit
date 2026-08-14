@@ -81,6 +81,7 @@ const detail: ApiAiJobDetail = {
     error: null,
   },
   runs: [],
+  semanticFollowup: null,
   events: [{
     id: 1,
     jobId: "job_1",

@@ -226,6 +226,25 @@ export interface ApiAnalyzedSkin {
   readonly archivedReason: string | null;
   readonly groups: readonly ApiAnalyzedSkinGroup[];
   readonly skinUrl: string;
+  readonly semanticFollowup: ApiAnalyzedSkinSemanticFollowup | null;
+}
+
+export interface ApiAnalyzedSkinSemanticFollowup {
+  readonly jobId: string;
+  readonly status: ApiSemanticFollowupStatus;
+  readonly evidenceHash: string;
+  readonly suggestionCount: number;
+  readonly suggestedPixelCount: number;
+  readonly notices: readonly ApiSemanticFollowupNotice[];
+  readonly appliedVariant: {
+    readonly revision: Pick<
+      ApiRevision,
+      "id" | "branchId" | "branchName" | "sequence" | "createdAt"
+    >;
+    readonly groups: readonly ApiAnalyzedSkinGroup[];
+    readonly skinUrl: string;
+    readonly label: string;
+  } | null;
 }
 
 export interface ApiPartPreview {
@@ -419,6 +438,7 @@ export interface ApiAiAnalysisOptions {
   readonly taxonomyLevel: "coarse";
   readonly focus: readonly SemanticCategory[];
   readonly createRevisionOnSuccess: boolean;
+  readonly semanticBaseline: "empty" | "current";
 }
 
 export type ApiAiReasoningEffort = ApiAiAnalysisOptions["reasoningEffort"];
@@ -532,6 +552,39 @@ export interface ApiAiJobDetail {
   readonly job: ApiAiJob;
   readonly runs: readonly ApiAiRun[];
   readonly events: readonly ApiAiJobEvent[];
+  readonly semanticFollowup: ApiSemanticFollowup | null;
+}
+
+export type ApiSemanticFollowupStatus =
+  | "no_repair"
+  | "awaiting_review"
+  | "applied"
+  | "dismissed"
+  | "assessment_failed";
+
+export interface ApiSemanticFollowupSuggestion {
+  readonly id: string;
+  readonly label: string;
+  readonly pixelCount: number;
+  readonly confidence: number;
+  readonly reason: string;
+}
+
+export interface ApiSemanticFollowupNotice {
+  readonly kind: string;
+  readonly message: string;
+}
+
+export interface ApiSemanticFollowup {
+  readonly status: ApiSemanticFollowupStatus;
+  readonly algorithmVersion: string;
+  readonly applicable: boolean;
+  readonly evidenceHash: string;
+  readonly suggestions: readonly ApiSemanticFollowupSuggestion[];
+  readonly notices: readonly ApiSemanticFollowupNotice[];
+  readonly appliedRevisionId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
 
 export interface ApiAiJobListFilters {
@@ -1457,6 +1510,7 @@ export async function retryAiJob(
     readonly model?: string;
     readonly reasoningEffort?: ApiAiAnalysisOptions["reasoningEffort"];
     readonly createRevisionOnSuccess?: boolean;
+    readonly semanticBaseline?: ApiAiAnalysisOptions["semanticBaseline"];
   },
   fetcher: Fetcher = fetch,
 ): Promise<ApiAiJob> {
@@ -1470,6 +1524,37 @@ export async function retryAiJob(
     fetcher,
   );
   return body.job;
+}
+
+export async function applySemanticFollowup(
+  jobId: string,
+  suggestionId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJobDetail> {
+  return requestJson(
+    `/api/ai-jobs/${encodeURIComponent(jobId)}/semantic-followup/apply`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ suggestionId }),
+    },
+    fetcher,
+  );
+}
+
+export async function dismissSemanticFollowup(
+  jobId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJobDetail> {
+  return requestJson(
+    `/api/ai-jobs/${encodeURIComponent(jobId)}/semantic-followup/dismiss`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    },
+    fetcher,
+  );
 }
 
 async function requestJson<T>(

@@ -9,7 +9,8 @@ import type {
 
 export const CANDIDATE_REGION_ALGORITHM_VERSION = "bounded-color80-surface-cc-v2";
 export const TAXONOMY_VERSION = "coarse-v1";
-export const PROMPT_VERSION = "semantic-proposal-v3-tool-free";
+export const PROMPT_VERSION = "semantic-proposal-v4-tool-free";
+export type SemanticAnalysisBaseline = "empty" | "current";
 export const ANALYSIS_REASONING_EFFORTS = [
   "low",
   "medium",
@@ -75,6 +76,7 @@ export interface AnalysisJobDocument {
   readonly provider: string;
   readonly model: string;
   readonly reasoningEffort: AnalysisReasoningEffort;
+  readonly semanticBaseline: SemanticAnalysisBaseline;
   readonly mode: "full";
   readonly taxonomyLevel: "coarse";
   readonly focus: readonly SemanticCategory[];
@@ -115,6 +117,7 @@ export interface BuildAnalysisPackInput {
   readonly provider: string;
   readonly model: string;
   readonly reasoningEffort: AnalysisReasoningEffort;
+  readonly semanticBaseline: SemanticAnalysisBaseline;
   readonly focus: readonly SemanticCategory[];
   readonly createRevisionOnSuccess: boolean;
   readonly skillVersion: string;

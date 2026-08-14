@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isSemanticCategory } from "@mc-skin-split/skin-core";
+import {
+  SEMANTIC_FOLLOWUP_ALGORITHM_VERSIONS,
+  type SemanticFollowupAlgorithmVersion,
+  type SemanticFollowupAssessment,
+} from "@mc-skin-split/skin-analysis-pack";
 import Database from "better-sqlite3";
 import type {
   AiAnalysisOptions,
@@ -22,6 +27,8 @@ import type {
   CreateSemanticAnalysisAiJobInput,
   RestorationRecommendationAiJob,
   SemanticAnalysisAiJob,
+  SemanticFollowupStatus,
+  StoredSemanticFollowup,
 } from "./types";
 import { ANALYSIS_REASONING_EFFORTS } from "./types";
 
@@ -85,6 +92,17 @@ interface AiJobEventRow {
   readonly message: string;
   readonly data_json: string;
   readonly created_at: string;
+}
+
+interface SemanticFollowupRow {
+  readonly job_id: string;
+  readonly result_revision_id: string;
+  readonly status: string;
+  readonly assessment_json: string;
+  readonly evidence_hash: string;
+  readonly applied_revision_id: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
 }
 
 export class AiJobStoreError extends Error {
@@ -453,6 +471,100 @@ export class AiJobStore {
     ).map(mapEvent);
   }
 
+  createSemanticFollowup(input: {
+    readonly jobId: string;
+    readonly resultRevisionId: string;
+    readonly assessment: SemanticFollowupAssessment;
+  }): StoredSemanticFollowup {
+    const job = this.getJob(input.jobId);
+    if (job.kind !== "semantic_analysis") {
+      throw new AiJobStoreError(
+        "INVALID_AI_JOB",
+        "只有语义分析 Job 可以记录后续修复检查",
+        400,
+      );
+    }
+    const assessment = validateSemanticFollowupAssessment(
+      input.assessment,
+      invalid,
+    );
+    const resultRevisionId = visibleText(
+      "resultRevisionId",
+      input.resultRevisionId,
+      120,
+    );
+    const status: SemanticFollowupStatus =
+      assessment.suggestions.length > 0 ? "awaiting_review" : "no_repair";
+    const now = this.now();
+    try {
+      this.database
+        .prepare(`
+          INSERT INTO semantic_analysis_followup (
+            job_id, result_revision_id, status, assessment_json,
+            evidence_hash, applied_revision_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+        `)
+        .run(
+          job.id,
+          resultRevisionId,
+          status,
+          JSON.stringify(assessment),
+          assessment.evidenceHash,
+          now,
+          now,
+        );
+    } catch (error) {
+      throw databaseError(error);
+    }
+    return this.getSemanticFollowup(job.id)!;
+  }
+
+  getSemanticFollowup(jobId: string): StoredSemanticFollowup | null {
+    this.getJob(jobId);
+    const row = this.database
+      .prepare("SELECT * FROM semantic_analysis_followup WHERE job_id = ?")
+      .get(jobId) as SemanticFollowupRow | undefined;
+    return row ? mapSemanticFollowup(row) : null;
+  }
+
+  transitionSemanticFollowup(
+    jobId: string,
+    status: "dismissed" | "assessment_failed",
+  ): { readonly followup: StoredSemanticFollowup; readonly changed: boolean } {
+    const current = this.getSemanticFollowup(jobId);
+    if (!current) throw notFound("语义后续检查", jobId);
+    if (current.status === status) return { followup: current, changed: false };
+    if (current.status !== "awaiting_review") {
+      throw conflict("语义后续检查已经完成", {
+        jobId,
+        status: current.status,
+      });
+    }
+    try {
+      const transition = this.database
+        .prepare(`
+          UPDATE semantic_analysis_followup
+          SET status = ?, applied_revision_id = ?, updated_at = ?
+          WHERE job_id = ? AND status = 'awaiting_review'
+        `)
+        .run(status, null, this.now(), jobId);
+      if (transition.changes !== 1) {
+        const latest = this.getSemanticFollowup(jobId);
+        if (latest?.status === status) {
+          return { followup: latest, changed: false };
+        }
+        throw conflict("语义后续检查已经完成", {
+          jobId,
+          status: latest?.status ?? "missing",
+        });
+      }
+    } catch (error) {
+      if (error instanceof AiJobStoreError) throw error;
+      throw databaseError(error);
+    }
+    return { followup: this.getSemanticFollowup(jobId)!, changed: true };
+  }
+
   appendEvent(
     jobId: string,
     eventType: string,
@@ -688,6 +800,236 @@ function mapEvent(row: AiJobEventRow): AiJobEvent {
   };
 }
 
+function mapSemanticFollowup(row: SemanticFollowupRow): StoredSemanticFollowup {
+  const assessment = validateSemanticFollowupAssessment(
+    parseJsonUnknown(row.assessment_json, "assessment_json"),
+    (message) => corrupt(message),
+  );
+  if (assessment.evidenceHash !== row.evidence_hash) {
+    throw corrupt("语义后续检查 evidence hash 不一致");
+  }
+  if (!isSemanticFollowupStatus(row.status)) {
+    throw corrupt(`未知语义后续检查状态：${row.status}`);
+  }
+  if ((row.status === "applied") !== (row.applied_revision_id !== null)) {
+    throw corrupt("语义后续检查状态与结果 Revision 不一致");
+  }
+  if (row.status === "no_repair" && assessment.suggestions.length !== 0) {
+    throw corrupt("无需修复的语义后续检查不能包含建议");
+  }
+  if (
+    ["awaiting_review", "applied", "dismissed"].includes(row.status) &&
+    assessment.suggestions.length === 0
+  ) {
+    throw corrupt("语义后续检查状态缺少修复建议");
+  }
+  if (
+    !Number.isFinite(Date.parse(row.created_at)) ||
+    !Number.isFinite(Date.parse(row.updated_at))
+  ) {
+    throw corrupt("语义后续检查时间无效");
+  }
+  return {
+    jobId: row.job_id,
+    resultRevisionId: row.result_revision_id,
+    status: row.status,
+    assessment,
+    evidenceHash: row.evidence_hash,
+    appliedRevisionId: row.applied_revision_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function validateSemanticFollowupAssessment(
+  value: unknown,
+  failure: (message: string) => AiJobStoreError,
+): SemanticFollowupAssessment {
+  if (!isRecord(value)) throw failure("语义后续检查必须是对象");
+  assertExactKeys(
+    value,
+    [
+      "schemaVersion",
+      "algorithmVersion",
+      "evidenceHash",
+      "suggestions",
+      "notices",
+    ],
+    "semantic followup assessment",
+    failure,
+  );
+  if (
+    value.schemaVersion !== "1.0" ||
+    typeof value.algorithmVersion !== "string" ||
+    !SEMANTIC_FOLLOWUP_ALGORITHM_VERSIONS.includes(
+      value.algorithmVersion as (typeof SEMANTIC_FOLLOWUP_ALGORITHM_VERSIONS)[number],
+    ) ||
+    typeof value.evidenceHash !== "string" ||
+    !isHash(value.evidenceHash) ||
+    !Array.isArray(value.suggestions) ||
+    !Array.isArray(value.notices)
+  ) {
+    throw failure("语义后续检查结构无效");
+  }
+  const suggestions = value.suggestions.map((suggestion, index) => {
+    if (!isRecord(suggestion)) {
+      throw failure(`语义修复建议 ${index + 1} 必须是对象`);
+    }
+    assertExactKeys(
+      suggestion,
+      [
+        "kind",
+        "id",
+        "label",
+        "targetComponentId",
+        "sourceComponentIds",
+        "candidateRegionIds",
+        "spans",
+        "pixelCount",
+        "confidence",
+        "reason",
+      ],
+      `semantic followup suggestion ${index + 1}`,
+      failure,
+    );
+    if (
+      suggestion.kind !== "cross_body_hair_reclassification" ||
+      typeof suggestion.id !== "string" ||
+      !/^followup_[0-9a-f]{24}$/u.test(suggestion.id) ||
+      !isComponentId(suggestion.targetComponentId) ||
+      !Array.isArray(suggestion.sourceComponentIds) ||
+      suggestion.sourceComponentIds.length < 1 ||
+      !suggestion.sourceComponentIds.every(isComponentId) ||
+      new Set(suggestion.sourceComponentIds).size !==
+        suggestion.sourceComponentIds.length ||
+      !Array.isArray(suggestion.candidateRegionIds) ||
+      suggestion.candidateRegionIds.length < 1 ||
+      !suggestion.candidateRegionIds.every(
+        (candidateId) =>
+          typeof candidateId === "string" &&
+          /^region_[a-zA-Z0-9_]+_[0-9]{3}$/u.test(candidateId),
+      ) ||
+      new Set(suggestion.candidateRegionIds).size !==
+        suggestion.candidateRegionIds.length ||
+      !Array.isArray(suggestion.spans) ||
+      suggestion.spans.length < 1 ||
+      !suggestion.spans.every(isSemanticSpan) ||
+      !Number.isInteger(suggestion.pixelCount) ||
+      (suggestion.pixelCount as number) < 1 ||
+      typeof suggestion.confidence !== "number" ||
+      !Number.isFinite(suggestion.confidence) ||
+      suggestion.confidence < 0 ||
+      suggestion.confidence > 1
+    ) {
+      throw failure(`语义修复建议 ${index + 1} 无效`);
+    }
+    const uniquePixelCount = semanticSpanUniquePixelCount(suggestion.spans);
+    if (
+      uniquePixelCount === null ||
+      uniquePixelCount !== suggestion.pixelCount
+    ) {
+      throw failure(`语义修复建议 ${index + 1} 的 spans 重叠或 pixelCount 不一致`);
+    }
+    return {
+      kind: "cross_body_hair_reclassification" as const,
+      id: suggestion.id,
+      label: validateTextValue(suggestion.label, "建议名称", 120, failure),
+      targetComponentId: suggestion.targetComponentId,
+      sourceComponentIds: suggestion.sourceComponentIds as string[],
+      candidateRegionIds: suggestion.candidateRegionIds as string[],
+      spans: suggestion.spans as SemanticFollowupAssessment["suggestions"][number]["spans"],
+      pixelCount: suggestion.pixelCount as number,
+      confidence: suggestion.confidence,
+      reason: validateTextValue(suggestion.reason, "建议原因", 500, failure),
+    };
+  });
+  if (
+    value.algorithmVersion === "cross-body-hair-reclassification-v2" &&
+    suggestions.length > 1
+  ) {
+    throw failure("v2 语义后续检查最多只能包含一条修复建议");
+  }
+  if (new Set(suggestions.map((suggestion) => suggestion.id)).size !== suggestions.length) {
+    throw failure("语义修复建议 ID 重复");
+  }
+  const suggestionIds = new Set(suggestions.map((suggestion) => suggestion.id));
+  const notices = value.notices.map((notice, index) => {
+    if (!isRecord(notice)) throw failure(`语义修复提示 ${index + 1} 必须是对象`);
+    assertExactKeys(
+      notice,
+      ["kind", "suggestionIds", "message"],
+      `semantic followup notice ${index + 1}`,
+      failure,
+    );
+    if (
+      notice.kind !== "possible_hidden_clothing" ||
+      !Array.isArray(notice.suggestionIds) ||
+      notice.suggestionIds.length < 1 ||
+      !notice.suggestionIds.every(
+        (suggestionId) => typeof suggestionId === "string" && suggestionIds.has(suggestionId),
+      ) ||
+      new Set(notice.suggestionIds).size !== notice.suggestionIds.length
+    ) {
+      throw failure(`语义修复提示 ${index + 1} 无效`);
+    }
+    return {
+      kind: "possible_hidden_clothing" as const,
+      suggestionIds: notice.suggestionIds,
+      message: validateTextValue(notice.message, "提示内容", 300, failure),
+    };
+  });
+  return {
+    schemaVersion: "1.0",
+    algorithmVersion: value.algorithmVersion as SemanticFollowupAlgorithmVersion,
+    evidenceHash: value.evidenceHash,
+    suggestions,
+    notices,
+  };
+}
+
+function isSemanticSpan(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    Object.keys(value).length === 4 &&
+    typeof value.surface === "string" &&
+    /^(?:head|torso|leftArm|rightArm|leftLeg|rightLeg)\.(?:base|outer)\.(?:front|back|left|right|top|bottom)$/u.test(
+      value.surface,
+    ) &&
+    Number.isInteger(value.y) &&
+    Number.isInteger(value.x0) &&
+    Number.isInteger(value.x1) &&
+    (value.y as number) >= 0 &&
+    (value.y as number) < 64 &&
+    (value.x0 as number) >= 0 &&
+    (value.x0 as number) < 64 &&
+    (value.x1 as number) >= (value.x0 as number) &&
+    (value.x1 as number) < 64
+  );
+}
+
+function semanticSpanUniquePixelCount(spans: readonly unknown[]): number | null {
+  const pixelIds = new Set<number>();
+  for (const span of spans) {
+    if (!isRecord(span) || !isSemanticSpan(span)) return null;
+    for (let x = span.x0 as number; x <= (span.x1 as number); x += 1) {
+      const pixelId = (span.y as number) * 64 + x;
+      if (pixelIds.has(pixelId)) return null;
+      pixelIds.add(pixelId);
+    }
+  }
+  return pixelIds.size;
+}
+
+function isSemanticFollowupStatus(value: string): value is SemanticFollowupStatus {
+  return [
+    "no_repair",
+    "awaiting_review",
+    "applied",
+    "dismissed",
+    "assessment_failed",
+  ].includes(value);
+}
+
 function isAiJobStatus(value: string): value is AiJobStatus {
   return ["queued", "preparing", "running", "validating", "succeeded", "failed", "cancelled"].includes(value);
 }
@@ -780,6 +1122,7 @@ function validateJobOptions(
       ],
       "semantic_analysis options",
       failure,
+      ["semanticBaseline"],
     );
     if (
       value.mode !== "full" ||
@@ -789,11 +1132,15 @@ function validateJobOptions(
       !value.focus.every(isSemanticCategory) ||
       new Set(value.focus).size !== value.focus.length ||
       typeof value.createRevisionOnSuccess !== "boolean"
+      || (value.semanticBaseline !== undefined &&
+        value.semanticBaseline !== "empty" &&
+        value.semanticBaseline !== "current")
     ) {
       throw failure("semantic_analysis options 无效");
     }
     return {
       mode: "full",
+      semanticBaseline: value.semanticBaseline === "empty" ? "empty" : "current",
       provider: validateTextValue(value.provider, "provider", 80, failure),
       model: validateTextValue(value.model, "model", 120, failure),
       reasoningEffort: value.reasoningEffort,

@@ -55,7 +55,9 @@ describe("analyzed skin catalog", () => {
       error: null,
       selectedRevisionId: item.revision.id,
       onActivate: vi.fn(),
+      onActivateRevision: vi.fn(),
       onExportGroup: vi.fn(),
+      onExportVariantGroup: vi.fn(),
       onArchive: vi.fn(async () => true),
       onRestore: vi.fn(async () => true),
     }));
@@ -82,7 +84,9 @@ describe("analyzed skin catalog", () => {
       selectedRevisionId: null,
       initialStatusFilter: "archived",
       onActivate: vi.fn(),
+      onActivateRevision: vi.fn(),
       onExportGroup: vi.fn(),
+      onExportVariantGroup: vi.fn(),
       onArchive: vi.fn(async () => true),
       onRestore: vi.fn(async () => true),
     }));
@@ -100,6 +104,151 @@ describe("analyzed skin catalog", () => {
     expect(analyzedSkinArchiveDescription(analyzedSkin())).toBe(
       "归档后默认目录会隐藏“Red skin · main #2”。Revision、AI 运行记录以及已入库组件/完整大类不会删除。",
     );
+  });
+
+  it("nests an applied repair version under the original result", () => {
+    const item = analyzedSkin({
+      semanticFollowup: {
+        jobId: "job_1",
+        status: "applied",
+        evidenceHash: `sha256:${"a".repeat(64)}`,
+        suggestionCount: 1,
+        suggestedPixelCount: 12,
+        notices: [],
+        appliedVariant: {
+          revision: {
+            id: "revision_repaired",
+            branchId: "branch_main",
+            branchName: "main",
+            sequence: 3,
+            createdAt: "2026-08-14T09:05:00.000Z",
+          },
+          groups: [],
+          skinUrl: "/api/revisions/revision_repaired/skin.png",
+          label: "分类修复版",
+        },
+      },
+    });
+    const html = renderToStaticMarkup(createElement(AnalyzedSkinCatalog, {
+      items: [item],
+      busyGroupKey: null,
+      busyRevisionIds: new Set<string>(),
+      loading: false,
+      error: null,
+      selectedRevisionId: "revision_repaired",
+      onActivate: vi.fn(),
+      onActivateRevision: vi.fn(),
+      onExportGroup: vi.fn(),
+      onExportVariantGroup: vi.fn(),
+      onArchive: vi.fn(async () => true),
+      onRestore: vi.fn(async () => true),
+    }));
+
+    expect(html).toContain("已生成分类修复版");
+    expect(html).toContain("分类调整后的版本");
+    expect(html).toContain('data-active="true"');
+    expect(html).not.toContain(`sha256:${"a".repeat(64)}`);
+  });
+
+  it("filters and searches original and applied-variant groups together", () => {
+    const item = analyzedSkin({
+      semanticFollowup: {
+        jobId: "job_1",
+        status: "applied",
+        evidenceHash: `sha256:${"b".repeat(64)}`,
+        suggestionCount: 1,
+        suggestedPixelCount: 12,
+        notices: [],
+        appliedVariant: {
+          revision: {
+            id: "revision_repaired",
+            branchId: "branch_main",
+            branchName: "main",
+            sequence: 3,
+            createdAt: "2026-08-14T09:05:00.000Z",
+          },
+          groups: [
+            {
+              ...analyzedSkin().groups[0]!,
+              key: "aggregate.clothing",
+              kind: "clothing",
+              displayName: "修复衣服",
+              componentIds: ["clothing.repaired"],
+            },
+            {
+              ...analyzedSkin().groups[0]!,
+              key: "aggregate.accessory",
+              kind: "accessory",
+              displayName: "修复饰品",
+              componentIds: ["accessory.repaired"],
+            },
+          ],
+          skinUrl: "/api/revisions/revision_repaired/skin.png",
+          label: "分类修复版",
+        },
+      },
+    });
+
+    const results = filterAnalyzedSkinCatalog([item], {
+      kind: "clothing",
+      status: "active",
+      query: "修复衣服",
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0]?.groups).toEqual([]);
+    expect(results[0]?.semanticFollowup?.appliedVariant?.groups).toEqual([
+      expect.objectContaining({ kind: "clothing", displayName: "修复衣服" }),
+    ]);
+    expect(item.semanticFollowup?.appliedVariant?.groups).toHaveLength(2);
+
+    const html = renderToStaticMarkup(createElement(AnalyzedSkinCatalog, {
+      items: results,
+      busyGroupKey: null,
+      busyRevisionIds: new Set<string>(),
+      loading: false,
+      error: null,
+      selectedRevisionId: null,
+      onActivate: vi.fn(),
+      onActivateRevision: vi.fn(),
+      onExportGroup: vi.fn(),
+      onExportVariantGroup: vi.fn(),
+      onArchive: vi.fn(async () => true),
+      onRestore: vi.fn(async () => true),
+    }));
+    expect(html).toContain("修复衣服入库");
+    expect(html).not.toContain("修复饰品入库");
+  });
+
+  it("does not label a no-suggestion result as fully repaired", () => {
+    const item = analyzedSkin({
+      semanticFollowup: {
+        jobId: "job_1",
+        status: "no_repair",
+        evidenceHash: `sha256:${"c".repeat(64)}`,
+        suggestionCount: 0,
+        suggestedPixelCount: 0,
+        notices: [],
+        appliedVariant: null,
+      },
+    });
+    const html = renderToStaticMarkup(createElement(AnalyzedSkinCatalog, {
+      items: [item],
+      busyGroupKey: null,
+      busyRevisionIds: new Set<string>(),
+      loading: false,
+      error: null,
+      selectedRevisionId: null,
+      onActivate: vi.fn(),
+      onActivateRevision: vi.fn(),
+      onExportGroup: vi.fn(),
+      onExportVariantGroup: vi.fn(),
+      onArchive: vi.fn(async () => true),
+      onRestore: vi.fn(async () => true),
+    }));
+
+    expect(html).toContain("未发现跨部位分类建议");
+    expect(html).toContain("隐藏内容仍可能需补全");
+    expect(html).not.toContain("无需修补");
   });
 });
 
@@ -126,6 +275,7 @@ function analyzedSkin(overrides: Partial<ApiAnalyzedSkin> = {}): ApiAnalyzedSkin
     catalogStatus: "active",
     archivedAt: null,
     archivedReason: null,
+    semanticFollowup: null,
     groups: [{
       key: "aggregate.hair",
       sourceGroupKey: null,

@@ -85,6 +85,7 @@ describe("analysis pack", () => {
       provider: "codex-exec",
       model: "codex-config-default",
       reasoningEffort: "medium" as const,
+      semanticBaseline: "current" as const,
       focus: ["hair", "face", "upper_clothing", "shoe"] as const,
       createRevisionOnSuccess: true,
       skillVersion: "1.0.0",
@@ -103,6 +104,7 @@ describe("analysis pack", () => {
     });
 
     expect(first.inputHash).toBe(second.inputHash);
+    expect(first.job.semanticBaseline).toBe("current");
     expect(first.candidateRegions.visiblePixelCount).toBeGreaterThan(1_000);
     expect(first.imagePaths).toHaveLength(5);
     expect(
@@ -140,6 +142,54 @@ describe("analysis pack", () => {
     await expect(verifyAnalysisPackIntegrity(first)).rejects.toThrow(
       "Analysis input file changed during provider run: input/candidate-regions.json",
     );
+  });
+
+  it("includes the semantic baseline in the canonical job and input hash", async () => {
+    const skinPng = new Uint8Array(
+      await readFile(resolve(fixtureDirectory, "ab87de696cfca859.png")),
+    );
+    const image = decodeSkinPng(skinPng);
+    const semantic = createInitialSemanticState({
+      revisionId: "rev_baseline",
+      sourceHash: `sha256:${"4".repeat(64)}`,
+      armType: "slim",
+      image,
+    });
+    const schema = JSON.parse(
+      await readFile(resolve(skillDirectory, "assets/analysis-proposal.schema.json"), "utf8"),
+    ) as unknown;
+    const common = {
+      skillDirectory,
+      proposalSchema: schema,
+      projectId: "project_baseline",
+      sourceRevisionId: "rev_baseline",
+      sourceResultHash: `sha256:${"5".repeat(64)}`,
+      skinPng,
+      armType: "slim" as const,
+      previousSegmentation: semantic.document,
+      provider: "codex-exec",
+      model: "codex-config-default",
+      reasoningEffort: "medium" as const,
+      focus: ["hair", "upper_clothing"] as const,
+      createRevisionOnSuccess: true,
+      skillVersion: "1.0.0",
+      jobId: "job_baseline",
+      runId: "run_baseline",
+    };
+    const current = await buildAnalysisPack({
+      ...common,
+      workspaceDirectory: await temporaryDirectory(),
+      semanticBaseline: "current",
+    });
+    const empty = await buildAnalysisPack({
+      ...common,
+      workspaceDirectory: await temporaryDirectory(),
+      semanticBaseline: "empty",
+    });
+
+    expect(current.job.semanticBaseline).toBe("current");
+    expect(empty.job.semanticBaseline).toBe("empty");
+    expect(current.inputHash).not.toBe(empty.inputHash);
   });
 });
 

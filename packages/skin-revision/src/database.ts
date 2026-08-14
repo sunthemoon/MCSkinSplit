@@ -70,6 +70,22 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 11,
+    name: "semantic analysis followup",
+    sql: readFileSync(
+      new URL("./migrations/011_semantic_followup.sql", import.meta.url),
+      "utf8",
+    ),
+  },
+  {
+    version: 12,
+    name: "semantic analysis followup hardening",
+    sql: readFileSync(
+      new URL("./migrations/012_semantic_followup_hardening.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

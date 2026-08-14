@@ -260,6 +260,70 @@ describe("CodexExecProvider", () => {
     expect(commandInput?.stdin).not.toContain("pixel-map.json");
   });
 
+  it("omits prior component summaries for a clean baseline and marks current as soft", async () => {
+    const currentRoot = await mkdtemp(resolve(tmpdir(), "mcskinsplit-baseline-current-"));
+    const emptyRoot = await mkdtemp(resolve(tmpdir(), "mcskinsplit-baseline-empty-"));
+    temporaryDirectories.push(currentRoot, emptyRoot);
+    await Promise.all([currentRoot, emptyRoot].flatMap((root) => [
+      mkdir(resolve(root, "output"), { recursive: true }),
+      mkdir(resolve(root, "schema"), { recursive: true }),
+    ]));
+    const prompts: string[] = [];
+    const provider = new CodexExecProvider({
+      command: "codex-test",
+      execute: async (input) => {
+        prompts.push(input.stdin ?? "");
+        const outputIndex = input.args.indexOf("--output-last-message");
+        await writeFile(input.args[outputIndex + 1]!, JSON.stringify({ schemaVersion: "1.0" }));
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    const withPrior = (root: string, baseline: "empty" | "current"): AnalysisPack => {
+      const pack = minimalPack(root, baseline);
+      return {
+        ...pack,
+        previousSegmentation: {
+          ...pack.previousSegmentation,
+          components: [{
+            instanceId: "legacy_hair",
+            displayName: "Legacy hair label",
+            category: "hair",
+            confidence: 0.5,
+            reviewState: "needs_review",
+            maskFile: "components/legacy_hair.mask.png",
+            spans: [],
+            palette: { dominant: "#ffffffff", colors: ["#ffffffff"] },
+            relations: { attachedTo: null, pairedWith: [], sameOutfitGroup: null },
+            provenance: { actorType: "ai", containsGeneratedPixels: false },
+          }],
+        },
+      };
+    };
+
+    await provider.analyze({
+      jobId: "job_current",
+      runId: "run_current",
+      attempt: 1,
+      model: CODEX_CONFIG_DEFAULT_MODEL,
+      pack: withPrior(currentRoot, "current"),
+    });
+    await provider.analyze({
+      jobId: "job_empty",
+      runId: "run_empty",
+      attempt: 1,
+      model: CODEX_CONFIG_DEFAULT_MODEL,
+      pack: withPrior(emptyRoot, "empty"),
+    });
+
+    expect(prompts[0]).toContain("soft prior only");
+    expect(prompts[0]).toContain("<previous_components>");
+    expect(prompts[0]).toContain("legacy_hair");
+    expect(prompts[1]).toContain("clean semantic baseline");
+    expect(prompts[1]).not.toContain("<previous_components>");
+    expect(prompts[1]).not.toContain("legacy_hair");
+    expect(prompts[1]).toContain("long hair can continue from the head onto torso");
+  });
+
   it("honors explicit ignore-user-config for semantic tool-free analysis", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "mcskinsplit-semantic-ignore-config-"));
     temporaryDirectories.push(root);
@@ -830,7 +894,10 @@ const TOOL_FREE_FEATURES = [
 ] as const;
 const TOOL_FREE_DISABLE_ARGS = TOOL_FREE_FEATURES.flatMap((feature) => ["--disable", feature]);
 
-function minimalPack(root: string): AnalysisPack {
+function minimalPack(
+  root: string,
+  semanticBaseline: "empty" | "current" = "current",
+): AnalysisPack {
   return {
     workspaceDirectory: root,
     job: {
@@ -845,6 +912,7 @@ function minimalPack(root: string): AnalysisPack {
       provider: "codex-exec",
       model: CODEX_CONFIG_DEFAULT_MODEL,
       reasoningEffort: "medium",
+      semanticBaseline,
       mode: "full",
       taxonomyLevel: "coarse",
       focus: [],
@@ -853,7 +921,7 @@ function minimalPack(root: string): AnalysisPack {
       taxonomyVersion: "coarse-v1",
       skillName: "mc-skin-segmenter",
       skillVersion: "1.0.0",
-      promptVersion: "semantic-proposal-v3-tool-free",
+      promptVersion: "semantic-proposal-v4-tool-free",
       paths: {
         source: "input/source.png",
         atlas: "input/atlas-16x.png",

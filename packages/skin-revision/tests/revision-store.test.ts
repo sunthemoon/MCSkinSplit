@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +38,10 @@ const TARGET_SKIN_PATH = fileURLToPath(
 );
 const REAL_SKIN_DIRECTORY = fileURLToPath(
   new URL("../../../tests/fixtures/skins/", import.meta.url),
+);
+const EARLY_V11_SEMANTIC_FOLLOWUP_SQL = readFileSync(
+  new URL("./fixtures/early-011-semantic-followup.sql", import.meta.url),
+  "utf8",
 );
 
 const temporaryDirectories: string[] = [];
@@ -856,7 +861,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 10 });
+          .toEqual({ version: 12 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -870,6 +875,462 @@ describe("RevisionStore", () => {
         expect(reopened.getPart(part.id)).toMatchObject({ libraryStatus: "active" });
       } finally {
         reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("upgrades an early v11 followup schema without losing rows and permits validating inserts", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const preservedImport = await importRealSkin(store);
+      const preservedResult = await store.commitAiSegmentation(
+        preservedImport.revision.id,
+        {
+          state: await store.readRevisionSemanticState(preservedImport.revision.id),
+          aiJobId: "aijob_v11_preserved",
+          aiRunId: "airun_v11_preserved",
+          provider: "catalog-provider",
+          model: "catalog-model",
+          proposalSummary: "v11 preserved fixture",
+          reviewItems: [],
+        },
+      );
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_v11_preserved",
+        projectId: preservedImport.project.id,
+        inputRevisionId: preservedImport.revision.id,
+        resultRevisionId: preservedResult.revision.id,
+      });
+      const preservedAssessment = semanticFollowupAssessment("7", {
+        suggestions: [],
+        notices: [],
+      });
+      const beforeDowngrade = new Database(store.databasePath);
+      try {
+        insertSemanticFollowupFixture(beforeDowngrade, {
+          jobId: "aijob_v11_preserved",
+          resultRevisionId: preservedResult.revision.id,
+          status: "no_repair",
+          assessment: preservedAssessment,
+        });
+      } finally {
+        beforeDowngrade.close();
+      }
+
+      const validatingImport = await importRealSkin(store);
+      const validatingResult = await store.commitAiSegmentation(
+        validatingImport.revision.id,
+        {
+          state: await store.readRevisionSemanticState(validatingImport.revision.id),
+          aiJobId: "aijob_v11_validating",
+          aiRunId: "airun_v11_validating",
+          provider: "catalog-provider",
+          model: "catalog-model",
+          proposalSummary: "v11 validating fixture",
+          reviewItems: [],
+        },
+      );
+      insertValidatingSemanticJob(store, {
+        jobId: "aijob_v11_validating",
+        projectId: validatingImport.project.id,
+        inputRevisionId: validatingImport.revision.id,
+        resultRevisionId: validatingResult.revision.id,
+      });
+      store.close();
+
+      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        downgradeSemanticFollowupToEarlyV11(legacy);
+        expect(legacy.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 11 });
+        const legacyInsertSql = legacy.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
+        ).get() as { readonly sql: string };
+        expect(legacyInsertSql.sql).not.toContain("validating");
+      } finally {
+        legacy.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const upgraded = new Database(reopened.databasePath);
+        try {
+          expect(upgraded.prepare(
+            "SELECT MAX(version) AS version FROM schema_migration",
+          ).get()).toEqual({ version: 12 });
+          expect(upgraded.prepare(`
+            SELECT job_id, result_revision_id, status, assessment_json,
+                   evidence_hash, applied_revision_id
+            FROM semantic_analysis_followup
+            WHERE job_id = ?
+          `).get("aijob_v11_preserved")).toEqual({
+            job_id: "aijob_v11_preserved",
+            result_revision_id: preservedResult.revision.id,
+            status: "no_repair",
+            assessment_json: JSON.stringify(preservedAssessment),
+            evidence_hash: preservedAssessment.evidenceHash,
+            applied_revision_id: null,
+          });
+          const tableSql = upgraded.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'semantic_analysis_followup'",
+          ).get() as { readonly sql: string };
+          expect(tableSql.sql).toContain("$.algorithmVersion");
+          expect(tableSql.sql).toContain("cross-body-hair-reclassification-v2");
+          const insertSql = upgraded.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
+          ).get() as { readonly sql: string };
+          expect(insertSql.sql).toContain("'validating', 'succeeded'");
+          expect(upgraded.prepare(`
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN (
+                'semantic_analysis_followup_v11',
+                'semantic_analysis_followup_v12'
+              )
+            ORDER BY name
+          `).all()).toEqual([]);
+          expect(upgraded.prepare(`
+            SELECT name, tbl_name
+            FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'idx_semantic_analysis_followup_status'
+          `).get()).toEqual({
+            name: "idx_semantic_analysis_followup_status",
+            tbl_name: "semantic_analysis_followup",
+          });
+          const statusIndexColumns = upgraded.prepare(
+            "PRAGMA index_info('idx_semantic_analysis_followup_status')",
+          ).all() as readonly { readonly name: string }[];
+          expect(statusIndexColumns.map(({ name }) => name)).toEqual([
+            "status",
+            "updated_at",
+            "job_id",
+          ]);
+          expect(upgraded.prepare(`
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name GLOB 'semantic_analysis_followup_*'
+            ORDER BY name
+          `).all()).toEqual([
+            { name: "semantic_analysis_followup_applied_revision_insert_guard" },
+            { name: "semantic_analysis_followup_applied_revision_update_guard" },
+            { name: "semantic_analysis_followup_identity_immutable" },
+            { name: "semantic_analysis_followup_insert_guard" },
+            { name: "semantic_analysis_followup_job_success_guard" },
+            { name: "semantic_analysis_followup_status_transition_guard" },
+            { name: "semantic_analysis_followup_update_guard" },
+          ]);
+
+          const validatingAssessment = semanticFollowupAssessment("8", {
+            suggestions: [],
+            notices: [],
+          });
+          insertSemanticFollowupFixture(upgraded, {
+            jobId: "aijob_v11_validating",
+            resultRevisionId: validatingResult.revision.id,
+            status: "no_repair",
+            assessment: validatingAssessment,
+          });
+          expect(upgraded.prepare(`
+            SELECT status FROM semantic_analysis_followup WHERE job_id = ?
+          `).get("aijob_v11_validating")).toEqual({ status: "no_repair" });
+          upgraded.prepare(`
+            UPDATE ai_job
+            SET status = 'succeeded', result_revision_id = ?, finished_at = ?
+            WHERE id = ?
+          `).run(
+            validatingResult.revision.id,
+            TEST_CREATED_AT,
+            "aijob_v11_validating",
+          );
+        } finally {
+          upgraded.close();
+        }
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves a valid early-v11 applied followup through strong provenance validation", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_v11_valid_applied",
+        aiRunId: "airun_v11_valid_applied",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "v11 valid applied fixture",
+        reviewItems: [],
+      });
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_v11_valid_applied",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        resultRevisionId: analyzed.revision.id,
+      });
+      const suggestionId = `followup_${"6".repeat(24)}`;
+      const assessment = semanticFollowupAssessment("6", {
+        suggestions: [{
+          id: suggestionId,
+          kind: "cross_surface_reclassification",
+          label: "长发跨部位修正",
+          targetComponentId: "hair.main",
+          sourceComponentIds: ["outfit.mistaken"],
+          candidateRegionIds: ["region_torso_base_001"],
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          pixelCount: 1,
+          confidence: 0.91,
+          reason: "跨部位外观连续",
+        }],
+        notices: [],
+      });
+      const beforeApply = new Database(store.databasePath);
+      try {
+        insertSemanticFollowupFixture(beforeApply, {
+          jobId: "aijob_v11_valid_applied",
+          resultRevisionId: analyzed.revision.id,
+          status: "awaiting_review",
+          assessment,
+        });
+      } finally {
+        beforeApply.close();
+      }
+      const repairBranch = await store.branchFromRevision(analyzed.revision.id, {
+        name: "semantic-repair-v11-valid",
+        actorId: "semantic-followup",
+      });
+      const applied = await store.applyManualOperation(repairBranch.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.main",
+            displayName: "长发",
+            category: "hair",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+        actorId: "semantic-followup",
+        semanticFollowup: {
+          jobId: "aijob_v11_valid_applied",
+          resultRevisionId: analyzed.revision.id,
+          suggestionId,
+          evidenceHash: assessment.evidenceHash,
+        },
+      });
+      store.close();
+
+      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        downgradeSemanticFollowupToEarlyV11(legacy);
+        expect(legacy.prepare(`
+          SELECT status, assessment_json, applied_revision_id
+          FROM semantic_analysis_followup
+          WHERE job_id = ?
+        `).get("aijob_v11_valid_applied")).toEqual({
+          status: "applied",
+          assessment_json: JSON.stringify(assessment),
+          applied_revision_id: applied.revision.id,
+        });
+      } finally {
+        legacy.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const upgraded = new Database(reopened.databasePath);
+        try {
+          expect(upgraded.prepare(
+            "SELECT MAX(version) AS version FROM schema_migration",
+          ).get()).toEqual({ version: 12 });
+          expect(upgraded.prepare(`
+            SELECT result_revision_id, status, assessment_json,
+                   evidence_hash, applied_revision_id
+            FROM semantic_analysis_followup
+            WHERE job_id = ?
+          `).get("aijob_v11_valid_applied")).toEqual({
+            result_revision_id: analyzed.revision.id,
+            status: "applied",
+            assessment_json: JSON.stringify(assessment),
+            evidence_hash: assessment.evidenceHash,
+            applied_revision_id: applied.revision.id,
+          });
+        } finally {
+          upgraded.close();
+        }
+        expect(
+          (await reopened.getAnalyzedSkin(analyzed.revision.id))
+            .semanticFollowup?.appliedVariant?.revision.id,
+        ).toBe(applied.revision.id);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rolls back v12 atomically when an early v11 row violates final checks", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_v11_invalid",
+        aiRunId: "airun_v11_invalid",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "v11 invalid fixture",
+        reviewItems: [],
+      });
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_v11_invalid",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        resultRevisionId: analyzed.revision.id,
+      });
+      store.close();
+
+      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
+      const invalidEvidenceHash = `sha256:${"9".repeat(64)}`;
+      try {
+        downgradeSemanticFollowupToEarlyV11(legacy);
+        insertSemanticFollowupFixture(legacy, {
+          jobId: "aijob_v11_invalid",
+          resultRevisionId: analyzed.revision.id,
+          status: "no_repair",
+          assessment: {
+            schemaVersion: "1.0",
+            evidenceHash: invalidEvidenceHash,
+            suggestions: [],
+            notices: [],
+          },
+        });
+      } finally {
+        legacy.close();
+      }
+
+      expect(() => new RevisionStore({ dataDirectory: directory })).toThrow();
+
+      const afterFailure = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        expect(afterFailure.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 11 });
+        expect(afterFailure.prepare(
+          "SELECT COUNT(*) AS count FROM semantic_analysis_followup WHERE job_id = ?",
+        ).get("aijob_v11_invalid")).toEqual({ count: 1 });
+        expect(afterFailure.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'semantic_analysis_followup_v11'",
+        ).get()).toBeUndefined();
+        const tableSql = afterFailure.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'semantic_analysis_followup'",
+        ).get() as { readonly sql: string };
+        expect(tableSql.sql).not.toContain("$.algorithmVersion");
+        const insertSql = afterFailure.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
+        ).get() as { readonly sql: string };
+        expect(insertSql.sql).not.toContain("validating");
+      } finally {
+        afterFailure.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects weak early-v11 applied provenance without partially upgrading", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_v11_weak_applied",
+        aiRunId: "airun_v11_weak_applied",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "v11 weak applied fixture",
+        reviewItems: [],
+      });
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_v11_weak_applied",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        resultRevisionId: analyzed.revision.id,
+      });
+      const unrelated = await store.applyManualOperation(analyzed.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.unrelated",
+            displayName: "Unrelated hair",
+            category: "hair",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      store.close();
+
+      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
+      const assessment = semanticFollowupAssessment("e", {
+        suggestions: [{
+          id: `followup_${"e".repeat(24)}`,
+          kind: "cross_surface_reclassification",
+          label: "长发跨部位修正",
+          targetComponentId: "hair.main",
+          sourceComponentIds: ["outfit.mistaken"],
+          candidateRegionIds: ["region_torso_base_001"],
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          pixelCount: 1,
+          confidence: 0.91,
+          reason: "跨部位外观连续",
+        }],
+        notices: [],
+      });
+      try {
+        downgradeSemanticFollowupToEarlyV11(legacy);
+        insertSemanticFollowupFixture(legacy, {
+          jobId: "aijob_v11_weak_applied",
+          resultRevisionId: analyzed.revision.id,
+          status: "applied",
+          assessment,
+          appliedRevisionId: unrelated.revision.id,
+        });
+      } finally {
+        legacy.close();
+      }
+
+      expect(() => new RevisionStore({ dataDirectory: directory })).toThrow(
+        /invalid semantic analysis applied revision/u,
+      );
+
+      const afterFailure = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        expect(afterFailure.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 11 });
+        expect(afterFailure.prepare(`
+          SELECT status, applied_revision_id
+          FROM semantic_analysis_followup
+          WHERE job_id = ?
+        `).get("aijob_v11_weak_applied")).toEqual({
+          status: "applied",
+          applied_revision_id: unrelated.revision.id,
+        });
+        expect(afterFailure.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'semantic_analysis_followup_v11'",
+        ).get()).toBeUndefined();
+      } finally {
+        afterFailure.close();
       }
     } finally {
       store.close();
@@ -991,6 +1452,462 @@ describe("RevisionStore", () => {
       ).rejects.toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
     } finally {
       store.close();
+    }
+  });
+
+  it("persists semantic followup summaries and integrity-loads an applied catalog variant", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_followup_applied",
+        aiRunId: "airun_followup_applied",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "Followup fixture",
+        reviewItems: [],
+      });
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_followup_applied",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        resultRevisionId: analyzed.revision.id,
+      });
+      const assessment = semanticFollowupAssessment("a", {
+        suggestions: [{
+          id: `followup_${"a".repeat(24)}`,
+          kind: "cross_surface_reclassification",
+          label: "长发跨部位修正",
+          targetComponentId: "hair.main",
+          sourceComponentIds: ["outfit.mistaken"],
+          candidateRegionIds: ["region_torso_base_001"],
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          pixelCount: 1,
+          confidence: 0.91,
+          reason: "跨部位外观连续",
+        }],
+        notices: [{ kind: "inferred", message: "需用户确认分类修正" }],
+      });
+      const database = new Database(store.databasePath);
+      try {
+        database.prepare(`
+          INSERT INTO ai_job (
+            id, job_kind, project_id, input_revision_id, result_revision_id,
+            retry_of_job_id, status, provider, model, skill_name, skill_version,
+            prompt_version, options_json, review_items_json, proposal_summary,
+            cancel_requested, created_at, started_at, finished_at
+          ) VALUES (?, 'semantic_analysis', ?, ?, ?, NULL, 'succeeded', ?, ?, ?, ?, ?, ?, '[]', ?, 0, ?, ?, ?)
+        `).run(
+          "aijob_followup_wrong_owner",
+          imported.project.id,
+          imported.revision.id,
+          analyzed.revision.id,
+          "catalog-provider",
+          "catalog-model",
+          "mc-skin-segmenter",
+          "1.2.0",
+          "catalog-test-v1",
+          JSON.stringify({
+            mode: "full",
+            provider: "catalog-provider",
+            model: "catalog-model",
+            reasoningEffort: "medium",
+            taxonomyLevel: "coarse",
+            focus: ["hair"],
+            createRevisionOnSuccess: true,
+          }),
+          "Wrong followup owner fixture",
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+        );
+        expect(() => database.prepare(`
+          INSERT INTO semantic_analysis_followup (
+            job_id, result_revision_id, status, assessment_json,
+            evidence_hash, applied_revision_id, created_at, updated_at
+          ) VALUES (?, ?, 'awaiting_review', ?, ?, NULL, ?, ?)
+        `).run(
+          "aijob_followup_wrong_owner",
+          analyzed.revision.id,
+          JSON.stringify(assessment),
+          assessment.evidenceHash,
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+        )).toThrow(/invalid semantic analysis followup target/u);
+        database.prepare("DELETE FROM ai_job WHERE id = ?").run(
+          "aijob_followup_wrong_owner",
+        );
+        const invalidV2Assessment = {
+          ...assessment,
+          algorithmVersion: "cross-body-hair-reclassification-v2",
+          suggestions: [
+            assessment.suggestions[0],
+            {
+              ...assessment.suggestions[0],
+              id: `followup_${"b".repeat(24)}`,
+            },
+          ],
+        };
+        expect(() => database.prepare(`
+          INSERT INTO semantic_analysis_followup (
+            job_id, result_revision_id, status, assessment_json,
+            evidence_hash, applied_revision_id, created_at, updated_at
+          ) VALUES (?, ?, 'awaiting_review', ?, ?, NULL, ?, ?)
+        `).run(
+          "aijob_followup_applied",
+          analyzed.revision.id,
+          JSON.stringify(invalidV2Assessment),
+          assessment.evidenceHash,
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+        )).toThrow();
+        database.prepare(`
+          INSERT INTO semantic_analysis_followup (
+            job_id, result_revision_id, status, assessment_json,
+            evidence_hash, applied_revision_id, created_at, updated_at
+          ) VALUES (?, ?, 'awaiting_review', ?, ?, NULL, ?, ?)
+        `).run(
+          "aijob_followup_applied",
+          analyzed.revision.id,
+          JSON.stringify(assessment),
+          assessment.evidenceHash,
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+        );
+      } finally {
+        database.close();
+      }
+
+      expect((await store.getAnalyzedSkin(analyzed.revision.id)).semanticFollowup)
+        .toEqual({
+          jobId: "aijob_followup_applied",
+          status: "awaiting_review",
+          evidenceHash: assessment.evidenceHash,
+          suggestionCount: 1,
+          suggestedPixelCount: 1,
+          notices: [{ kind: "inferred", message: "需用户确认分类修正" }],
+          appliedVariant: null,
+        });
+
+      const repairBranch = await store.branchFromRevision(analyzed.revision.id, {
+        name: "semantic-repair-test",
+        actorId: "semantic-followup",
+      });
+      const revisionCountBeforeRejectedApply = store.listRevisions(
+        imported.project.id,
+      ).length;
+      await expect(
+        store.applyManualOperation(repairBranch.revision.id, {
+          operation: {
+            type: "assign_pixels",
+            target: { instanceId: "hair.main", displayName: "长发", category: "hair" },
+            spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          },
+          actorId: "semantic-followup",
+          semanticFollowup: {
+            jobId: "aijob_followup_applied",
+            resultRevisionId: analyzed.revision.id,
+            suggestionId: `followup_${"a".repeat(24)}`,
+            evidenceHash: assessment.evidenceHash,
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect(store.listRevisions(imported.project.id)).toHaveLength(
+        revisionCountBeforeRejectedApply,
+      );
+      expect(store.getBranch(repairBranch.branch.id).headRevisionId).toBe(
+        repairBranch.revision.id,
+      );
+
+      await expect(
+        store.applyManualOperation(repairBranch.revision.id, {
+          operation: {
+            type: "assign_pixels",
+            target: { instanceId: "hair.main", displayName: "长发", category: "hair" },
+            spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          },
+          actorId: "semantic-followup",
+          semanticFollowup: {
+            jobId: "aijob_followup_applied",
+            resultRevisionId: analyzed.revision.id,
+            suggestionId: `followup_${"a".repeat(24)}`,
+            evidenceHash: `sha256:${"f".repeat(64)}`,
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect(store.listRevisions(imported.project.id)).toHaveLength(
+        revisionCountBeforeRejectedApply,
+      );
+      expect(store.getBranch(repairBranch.branch.id).headRevisionId).toBe(
+        repairBranch.revision.id,
+      );
+
+      const applied = await store.applyManualOperation(repairBranch.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: "hair.main", displayName: "长发", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+        actorId: "semantic-followup",
+        semanticFollowup: {
+          jobId: "aijob_followup_applied",
+          resultRevisionId: analyzed.revision.id,
+          suggestionId: `followup_${"a".repeat(24)}`,
+          evidenceHash: assessment.evidenceHash,
+        },
+      });
+      const updateDatabase = new Database(store.databasePath);
+      try {
+        expect(() => updateDatabase.prepare(`
+          UPDATE semantic_analysis_followup
+          SET applied_revision_id = NULL, updated_at = ?
+          WHERE job_id = ?
+        `).run(TEST_CREATED_AT, "aijob_followup_applied")).toThrow();
+        expect(() => updateDatabase.prepare(`
+          UPDATE semantic_analysis_followup
+          SET status = 'awaiting_review', applied_revision_id = NULL, updated_at = ?
+          WHERE job_id = ?
+        `).run(TEST_CREATED_AT, "aijob_followup_applied"))
+          .toThrow(/invalid semantic analysis followup status transition/u);
+        expect(() => updateDatabase.prepare(`
+          UPDATE semantic_analysis_followup
+          SET evidence_hash = ?
+          WHERE job_id = ?
+        `).run(`sha256:${"b".repeat(64)}`, "aijob_followup_applied"))
+          .toThrow(/semantic analysis followup evidence is immutable/u);
+      } finally {
+        updateDatabase.close();
+      }
+
+      const catalogItem = await store.getAnalyzedSkin(analyzed.revision.id);
+      expect(catalogItem.semanticFollowup).toMatchObject({
+        status: "applied",
+        appliedVariant: {
+          label: "分类修复版",
+          revision: {
+            id: applied.revision.id,
+            branchId: applied.revision.branchId,
+            branchName: "semantic-repair-test",
+            sequence: applied.revision.sequence,
+          },
+          skinUrl: `/api/revisions/${applied.revision.id}/skin.png`,
+        },
+      });
+      expect(catalogItem.semanticFollowup?.appliedVariant?.groups).toEqual([
+        expect.objectContaining({
+          key: "aggregate.hair",
+          kind: "hair",
+          componentIds: ["hair.main"],
+          componentCount: 1,
+          pixelCount: 1,
+        }),
+      ]);
+
+      const unrelatedBranch = await store.branchFromRevision(analyzed.revision.id, {
+        name: "unrelated-followup-test",
+      });
+      const unrelated = await store.applyManualOperation(
+        unrelatedBranch.revision.id,
+        {
+          operation: {
+            type: "assign_pixels",
+            target: { instanceId: "hair.other", displayName: "其他头发", category: "hair" },
+            spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+          },
+        },
+      );
+      const guardDatabase = new Database(store.databasePath);
+      try {
+        guardDatabase.prepare(`
+          UPDATE skin_revision
+          SET actor_id = 'semantic-followup'
+          WHERE id IN (?, ?)
+        `).run(unrelatedBranch.revision.id, unrelated.revision.id);
+        guardDatabase.prepare(`
+          UPDATE skin_revision
+          SET metadata_json = ?
+          WHERE id = ?
+        `).run(
+          JSON.stringify({
+            operation: {
+              type: "assign_pixels",
+              target: {
+                instanceId: "hair.main",
+                displayName: "长发",
+                category: "hair",
+              },
+              spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+            },
+            semanticFollowup: {
+              jobId: "aijob_followup_applied",
+              resultRevisionId: analyzed.revision.id,
+              suggestionId: `followup_${"a".repeat(24)}`,
+              evidenceHash: assessment.evidenceHash,
+            },
+          }),
+          unrelated.revision.id,
+        );
+        expect(() => guardDatabase.prepare(`
+          UPDATE semantic_analysis_followup
+          SET applied_revision_id = ?, updated_at = ?
+          WHERE job_id = ?
+        `).run(
+          unrelated.revision.id,
+          TEST_CREATED_AT,
+          "aijob_followup_applied",
+        )).toThrow(/invalid semantic analysis applied revision/u);
+      } finally {
+        guardDatabase.close();
+      }
+      expect(
+        (await store.getAnalyzedSkin(analyzed.revision.id))
+          .semanticFollowup?.appliedVariant?.revision.id,
+      ).toBe(applied.revision.id);
+
+      const archived = await store.archiveAnalyzedSkin(analyzed.revision.id, {
+        reason: "保留修复证据",
+      });
+      expect(archived).toMatchObject({
+        catalogStatus: "archived",
+        semanticFollowup: {
+          status: "applied",
+          appliedVariant: { revision: { id: applied.revision.id } },
+        },
+      });
+      expect(await store.listAnalyzedSkins()).toEqual([]);
+      expect((await store.listAnalyzedSkins({ status: "archived" }))[0]?.semanticFollowup)
+        .toEqual(archived.semanticFollowup);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("exposes no-repair followup without inventing a catalog variant", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const analyzed = await store.commitAiSegmentation(imported.revision.id, {
+        state: await store.readRevisionSemanticState(imported.revision.id),
+        aiJobId: "aijob_followup_none",
+        aiRunId: "airun_followup_none",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        proposalSummary: "No repair fixture",
+        reviewItems: [],
+      });
+      insertSucceededSemanticJob(store, {
+        jobId: "aijob_followup_none",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        resultRevisionId: analyzed.revision.id,
+      });
+      const assessment = semanticFollowupAssessment("c", {
+        suggestions: [],
+        notices: [{ kind: "complete", message: "未发现需要分类修正的像素" }],
+      });
+      const database = new Database(store.databasePath);
+      try {
+        database.prepare(`
+          INSERT INTO semantic_analysis_followup (
+            job_id, result_revision_id, status, assessment_json,
+            evidence_hash, applied_revision_id, created_at, updated_at
+          ) VALUES (?, ?, 'no_repair', ?, ?, NULL, ?, ?)
+        `).run(
+          "aijob_followup_none",
+          analyzed.revision.id,
+          JSON.stringify(assessment),
+          assessment.evidenceHash,
+          TEST_CREATED_AT,
+          TEST_CREATED_AT,
+        );
+      } finally {
+        database.close();
+      }
+
+      expect((await store.getAnalyzedSkin(analyzed.revision.id)).semanticFollowup)
+        .toEqual({
+          jobId: "aijob_followup_none",
+          status: "no_repair",
+          evidenceHash: assessment.evidenceHash,
+          suggestionCount: 0,
+          suggestedPixelCount: 0,
+          notices: [{ kind: "complete", message: "未发现需要分类修正的像素" }],
+          appliedVariant: null,
+        });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects corrupted semantic followup evidence after reopening", async () => {
+    const created = await createStore();
+    const imported = await importRealSkin(created.store);
+    const analyzed = await created.store.commitAiSegmentation(imported.revision.id, {
+      state: await created.store.readRevisionSemanticState(imported.revision.id),
+      aiJobId: "aijob_followup_corrupt",
+      aiRunId: "airun_followup_corrupt",
+      provider: "catalog-provider",
+      model: "catalog-model",
+      proposalSummary: "Corruption fixture",
+      reviewItems: [],
+    });
+    insertSucceededSemanticJob(created.store, {
+      jobId: "aijob_followup_corrupt",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      resultRevisionId: analyzed.revision.id,
+    });
+    const assessment = semanticFollowupAssessment("d", {
+      suggestions: [],
+      notices: [],
+    });
+    const database = new Database(created.store.databasePath);
+    database.prepare(`
+      INSERT INTO semantic_analysis_followup (
+        job_id, result_revision_id, status, assessment_json,
+        evidence_hash, applied_revision_id, created_at, updated_at
+      ) VALUES (?, ?, 'no_repair', ?, ?, NULL, ?, ?)
+    `).run(
+      "aijob_followup_corrupt",
+      analyzed.revision.id,
+      JSON.stringify(assessment),
+      assessment.evidenceHash,
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+    );
+    database.close();
+    created.store.close();
+
+    const reopened = new RevisionStore({ dataDirectory: created.directory });
+    await expect(reopened.getAnalyzedSkin(analyzed.revision.id)).resolves.toMatchObject({
+      semanticFollowup: { status: "no_repair" },
+    });
+    reopened.close();
+
+    const corruptDatabase = new Database(join(created.directory, "mcskinsplit.sqlite"));
+    corruptDatabase.exec(`
+      DROP TRIGGER semantic_analysis_followup_identity_immutable;
+      PRAGMA ignore_check_constraints = ON;
+    `);
+    corruptDatabase.prepare(`
+      UPDATE semantic_analysis_followup
+      SET assessment_json = ?
+      WHERE job_id = ?
+    `).run(JSON.stringify({
+      schemaVersion: "1.0",
+      evidenceHash: assessment.evidenceHash,
+      suggestions: [],
+      notices: [],
+    }), "aijob_followup_corrupt");
+    corruptDatabase.close();
+
+    const corrupted = new RevisionStore({ dataDirectory: created.directory });
+    try {
+      await expect(corrupted.getAnalyzedSkin(analyzed.revision.id))
+        .rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      corrupted.close();
     }
   });
 
@@ -1973,6 +2890,248 @@ describe("RevisionStore", () => {
     }
   });
 });
+
+const TEST_CREATED_AT = "2026-08-11T01:00:00.000Z";
+
+interface SemanticFollowupSuggestionFixture {
+  readonly id: string;
+  readonly kind: string;
+  readonly label: string;
+  readonly targetComponentId: string;
+  readonly sourceComponentIds: readonly string[];
+  readonly candidateRegionIds: readonly string[];
+  readonly spans: readonly {
+    readonly surface: string;
+    readonly y: number;
+    readonly x0: number;
+    readonly x1: number;
+  }[];
+  readonly pixelCount: number;
+  readonly confidence: number;
+  readonly reason: string;
+}
+
+function semanticFollowupAssessment(
+  hashCharacter: string,
+  input: {
+    readonly suggestions: readonly SemanticFollowupSuggestionFixture[];
+    readonly notices: readonly { readonly kind: string; readonly message: string }[];
+  },
+) {
+  return {
+    schemaVersion: "1.0",
+    algorithmVersion: "semantic-followup-test-v1",
+    evidenceHash: `sha256:${hashCharacter.repeat(64)}`,
+    suggestions: input.suggestions,
+    notices: input.notices,
+  } as const;
+}
+
+function insertSemanticFollowupFixture<
+  TAssessment extends { readonly evidenceHash: string },
+>(
+  database: Database.Database,
+  input: {
+    readonly jobId: string;
+    readonly resultRevisionId: string;
+    readonly status:
+      | "no_repair"
+      | "awaiting_review"
+      | "applied"
+      | "dismissed"
+      | "assessment_failed";
+    readonly assessment: TAssessment;
+    readonly appliedRevisionId?: string | null;
+  },
+): void {
+  database.prepare(`
+    INSERT INTO semantic_analysis_followup (
+      job_id, result_revision_id, status, assessment_json,
+      evidence_hash, applied_revision_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.jobId,
+    input.resultRevisionId,
+    input.status,
+    JSON.stringify(input.assessment),
+    input.assessment.evidenceHash,
+    input.appliedRevisionId ?? null,
+    TEST_CREATED_AT,
+    TEST_CREATED_AT,
+  );
+}
+
+function insertValidatingSemanticJob(
+  store: RevisionStore,
+  input: {
+    readonly jobId: string;
+    readonly projectId: string;
+    readonly inputRevisionId: string;
+    readonly resultRevisionId: string;
+  },
+): void {
+  const database = new Database(store.databasePath);
+  try {
+    const runId = store.getRevision(input.resultRevisionId).aiRunId;
+    if (!runId) throw new Error("semantic result fixture requires aiRunId");
+    database.prepare(`
+      INSERT INTO ai_job (
+        id, job_kind, project_id, input_revision_id, result_revision_id,
+        retry_of_job_id, status, provider, model, skill_name, skill_version,
+        prompt_version, options_json, review_items_json, proposal_summary,
+        cancel_requested, created_at, started_at, finished_at
+      ) VALUES (?, 'semantic_analysis', ?, ?, NULL, NULL, 'validating', ?, ?, ?, ?, ?, ?, '[]', ?, 0, ?, ?, NULL)
+    `).run(
+      input.jobId,
+      input.projectId,
+      input.inputRevisionId,
+      "catalog-provider",
+      "catalog-model",
+      "mc-skin-segmenter",
+      "1.2.0",
+      "catalog-test-v1",
+      JSON.stringify({
+        mode: "full",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: true,
+      }),
+      "Followup validating fixture",
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+    );
+    database.prepare(`
+      INSERT INTO ai_run (
+        id, job_id, provider, model, thread_id, attempt, status,
+        workspace_path, usage_json, started_at, finished_at, error_json
+      ) VALUES (?, ?, ?, ?, NULL, 1, 'running', ?, NULL, ?, NULL, NULL)
+    `).run(
+      runId,
+      input.jobId,
+      "catalog-provider",
+      "catalog-model",
+      `data/ai-runs/${runId}`,
+      TEST_CREATED_AT,
+    );
+  } finally {
+    database.close();
+  }
+}
+
+function downgradeSemanticFollowupToEarlyV11(
+  database: Database.Database,
+): void {
+  const downgrade = database.transaction(() => {
+    database.exec(`
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_insert_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_update_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_insert_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_job_success_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_update_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_status_transition_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_applied_revision_insert_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_applied_revision_update_guard;
+      DROP TRIGGER IF EXISTS semantic_analysis_followup_identity_immutable;
+      DROP INDEX IF EXISTS idx_semantic_analysis_followup_status;
+
+      ALTER TABLE semantic_analysis_followup
+        RENAME TO semantic_analysis_followup_v12;
+    `);
+    database.exec(EARLY_V11_SEMANTIC_FOLLOWUP_SQL);
+    database.exec(`
+      INSERT INTO semantic_analysis_followup (
+        job_id,
+        result_revision_id,
+        status,
+        assessment_json,
+        evidence_hash,
+        applied_revision_id,
+        created_at,
+        updated_at
+      )
+      SELECT
+        job_id,
+        result_revision_id,
+        status,
+        assessment_json,
+        evidence_hash,
+        applied_revision_id,
+        created_at,
+        updated_at
+      FROM semantic_analysis_followup_v12;
+
+      DROP TABLE semantic_analysis_followup_v12;
+      DELETE FROM schema_migration WHERE version = 12;
+    `);
+  });
+  downgrade.immediate();
+}
+
+function insertSucceededSemanticJob(
+  store: RevisionStore,
+  input: {
+    readonly jobId: string;
+    readonly projectId: string;
+    readonly inputRevisionId: string;
+    readonly resultRevisionId: string;
+  },
+): void {
+  const database = new Database(store.databasePath);
+  try {
+    const runId = store.getRevision(input.resultRevisionId).aiRunId;
+    if (!runId) throw new Error("semantic result fixture requires aiRunId");
+    database.prepare(`
+      INSERT INTO ai_job (
+        id, job_kind, project_id, input_revision_id, result_revision_id,
+        retry_of_job_id, status, provider, model, skill_name, skill_version,
+        prompt_version, options_json, review_items_json, proposal_summary,
+        cancel_requested, created_at, started_at, finished_at
+      ) VALUES (?, 'semantic_analysis', ?, ?, ?, NULL, 'succeeded', ?, ?, ?, ?, ?, ?, '[]', ?, 0, ?, ?, ?)
+    `).run(
+      input.jobId,
+      input.projectId,
+      input.inputRevisionId,
+      input.resultRevisionId,
+      "catalog-provider",
+      "catalog-model",
+      "mc-skin-segmenter",
+      "1.2.0",
+      "catalog-test-v1",
+      JSON.stringify({
+        mode: "full",
+        provider: "catalog-provider",
+        model: "catalog-model",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: true,
+      }),
+      "Followup fixture",
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+    );
+    database.prepare(`
+      INSERT INTO ai_run (
+        id, job_id, provider, model, thread_id, attempt, status,
+        workspace_path, usage_json, started_at, finished_at, error_json
+      ) VALUES (?, ?, ?, ?, NULL, 1, 'succeeded', ?, NULL, ?, ?, NULL)
+    `).run(
+      runId,
+      input.jobId,
+      "catalog-provider",
+      "catalog-model",
+      `data/ai-runs/${runId}`,
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+    );
+  } finally {
+    database.close();
+  }
+}
 
 interface RealSkinManifest {
   readonly skins: readonly { readonly id: string; readonly file: string }[];

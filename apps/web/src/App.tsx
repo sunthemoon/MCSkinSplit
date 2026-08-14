@@ -30,6 +30,7 @@ import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PartBundleShelf } from "./components/PartBundleShelf";
 import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
+import { SemanticFollowupReview } from "./components/SemanticFollowupReview";
 import { WorkflowSectionNav } from "./components/WorkflowSectionNav";
 import {
   SkinPreview,
@@ -42,7 +43,12 @@ import {
   decodeMinecraftSkinFile,
 } from "./lib/skinFile";
 import {
+  shouldDeferGenericAiHydration,
+  type PendingCatalogAiHydration,
+} from "./lib/catalogAiHydration";
+import {
   addCompositionPart,
+  applySemanticFollowup,
   applyCompositionBundle,
   archiveAnalyzedSkin,
   branchRevision,
@@ -54,6 +60,7 @@ import {
   compositionPreviewUrl,
   createComposition,
   createProject,
+  dismissSemanticFollowup,
   exportRevisionPart,
   exportRevisionBundle,
   generateCompositionRestorationCandidates,
@@ -352,11 +359,17 @@ export function App() {
   const [aiModel, setAiModel] = useState("codex-config-default");
   const [aiReasoningEffort, setAiReasoningEffort] =
     useState<ApiAiAnalysisOptions["reasoningEffort"]>("medium");
+  const [aiSemanticBaseline, setAiSemanticBaseline] =
+    useState<ApiAiAnalysisOptions["semanticBaseline"]>("empty");
   const [aiJobDetail, setAiJobDetail] = useState<ApiAiJobDetail | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
+  const analyzedActivationRequestRef = useRef(0);
+  const pendingCatalogAiHydrationRef =
+    useRef<PendingCatalogAiHydration | null>(null);
+  const aiJobDetailRequestRef = useRef(0);
   const aiJobDetailRef = useRef<ApiAiJobDetail | null>(null);
   const restorationRecommendationJobDetailRef = useRef<ApiAiJobDetail | null>(null);
   const restorationRecommendationContextRef = useRef(0);
@@ -406,6 +419,9 @@ export function App() {
 
   const activateFixture = useCallback(
     async (fixture: SkinFixture) => {
+      pendingCatalogAiHydrationRef.current = null;
+      analyzedActivationRequestRef.current += 1;
+      aiJobDetailRequestRef.current += 1;
       const requestId = ++requestIdRef.current;
       setIsLoadingSkin(true);
       setNotice(`正在解码 ${fixture.label}`);
@@ -453,7 +469,20 @@ export function App() {
   );
 
   const activateRevision = useCallback(
-    async (revision: ApiRevision) => {
+    async (
+      revision: ApiRevision,
+      options: {
+        preserveAiDetailRequest?: boolean;
+        preserveAnalyzedActivation?: boolean;
+      } = {},
+    ) => {
+      if (!options.preserveAnalyzedActivation) {
+        pendingCatalogAiHydrationRef.current = null;
+        analyzedActivationRequestRef.current += 1;
+      }
+      if (!options.preserveAiDetailRequest) {
+        aiJobDetailRequestRef.current += 1;
+      }
       const requestId = ++requestIdRef.current;
       setIsLoadingSkin(true);
       setHistoryBusy(true);
@@ -467,7 +496,7 @@ export function App() {
         ]);
         const decoded = decodeMinecraftSkinBytes(skinBytes);
         if (requestId !== requestIdRef.current) {
-          return;
+          return false;
         }
 
         const copiedBytes = new Uint8Array(skinBytes.byteLength);
@@ -508,12 +537,14 @@ export function App() {
         setNotice(
           `已载入 ${revision.branchName} #${revision.sequence} · ${armLabels[segmentation.source.armType]} · Hash 校验通过`,
         );
+        return true;
       } catch (error) {
         if (requestId === requestIdRef.current) {
           const message = error instanceof Error ? error.message : String(error);
           setHistoryError(message);
           setNotice(`Revision 载入失败：${message}`);
         }
+        return false;
       } finally {
         if (requestId === requestIdRef.current) {
           setIsLoadingSkin(false);
@@ -525,13 +556,24 @@ export function App() {
   );
 
   const refreshHistory = useCallback(
-    async (projectId: string, preferredRevisionId?: string | null) => {
+    async (
+      projectId: string,
+      preferredRevisionId?: string | null,
+      shouldApply: () => boolean = () => true,
+      preserveAiDetailRequest = false,
+    ): Promise<boolean> => {
+      pendingCatalogAiHydrationRef.current = null;
+      const activationRequestId = ++analyzedActivationRequestRef.current;
+      const canApply = () =>
+        activationRequestId === analyzedActivationRequestRef.current &&
+        shouldApply();
       const [project, branches, revisions, projects] = await Promise.all([
         getProject(projectId),
         listBranches(projectId),
         listRevisions(projectId),
         listProjects(),
       ]);
+      if (!canApply()) return false;
       setHistoryProject(project);
       setHistoryBranches(branches);
       setHistoryRevisions(revisions);
@@ -541,11 +583,18 @@ export function App() {
       const revisionId = preferredRevisionId ?? project.headRevisionId;
       const selected = revisions.find((revision) => revision.id === revisionId);
       if (selected) {
-        await activateRevision(selected);
+        if (!canApply()) return false;
+        const activated = await activateRevision(selected, {
+          preserveAiDetailRequest,
+          preserveAnalyzedActivation: true,
+        });
+        if (!activated) return false;
+        if (!canApply()) return false;
       } else {
         setSelectedRevisionId(null);
         setBranchFilter(project.defaultBranchId);
       }
+      return true;
     },
     [activateRevision],
   );
@@ -582,11 +631,16 @@ export function App() {
   );
 
   const synchronizeAiJob = useCallback(
-    async (jobId: string, followSuccessfulRevision: boolean) => {
+    async (
+      jobId: string,
+      followSuccessfulRevision: boolean,
+      requestId: number,
+    ): Promise<ApiAiJobDetail | null> => {
       const detail = await loadAiJobDetail(jobId);
       if (detail.job.kind !== "semantic_analysis") {
         throw new Error("API 返回的 Job 不是语义识别任务");
       }
+      if (requestId !== aiJobDetailRequestRef.current) return null;
       aiJobDetailRef.current = detail;
       setAiJobDetail(detail);
 
@@ -600,8 +654,17 @@ export function App() {
       }
 
       if (job.status === "succeeded" && job.resultRevisionId) {
-        await refreshHistory(job.projectId, job.resultRevisionId);
+        const historyApplied = await refreshHistory(
+          job.projectId,
+          job.resultRevisionId,
+          () => requestId === aiJobDetailRequestRef.current,
+          true,
+        );
+        if (!historyApplied || requestId !== aiJobDetailRequestRef.current) {
+          return null;
+        }
         await refreshReusableCatalog();
+        if (requestId !== aiJobDetailRequestRef.current) return null;
         setNotice(
           `AI 识别完成 · 已创建 Revision · ${job.reviewItems.length} 项待审核`,
         );
@@ -685,19 +748,31 @@ export function App() {
 
   useEffect(() => {
     if (!selectedRevisionId) {
+      aiJobDetailRequestRef.current += 1;
       aiJobDetailRef.current = null;
       setAiJobDetail(null);
       return;
     }
-    const current = aiJobDetailRef.current?.job;
+    const currentDetail = aiJobDetailRef.current;
+    const current = currentDetail?.job;
     if (
       current?.inputRevisionId === selectedRevisionId ||
-      current?.resultRevisionId === selectedRevisionId
+      current?.resultRevisionId === selectedRevisionId ||
+      currentDetail?.semanticFollowup?.appliedRevisionId === selectedRevisionId
+    ) {
+      return;
+    }
+    if (
+      shouldDeferGenericAiHydration(
+        selectedRevisionId,
+        pendingCatalogAiHydrationRef.current,
+      )
     ) {
       return;
     }
 
     let cancelled = false;
+    const requestId = ++aiJobDetailRequestRef.current;
     void listAiJobs({
       revisionId: selectedRevisionId,
       kind: "semantic_analysis",
@@ -705,20 +780,20 @@ export function App() {
       .then(async (jobs) => {
         const latest = jobs.at(-1);
         if (!latest) {
-          if (!cancelled) {
+          if (!cancelled && requestId === aiJobDetailRequestRef.current) {
             aiJobDetailRef.current = null;
             setAiJobDetail(null);
           }
           return;
         }
         const detail = await loadAiJobDetail(latest.id);
-        if (!cancelled) {
+        if (!cancelled && requestId === aiJobDetailRequestRef.current) {
           aiJobDetailRef.current = detail;
           setAiJobDetail(detail);
         }
       })
       .catch((error: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && requestId === aiJobDetailRequestRef.current) {
           setAiError(
             `AI Job 读取失败：${error instanceof Error ? error.message : String(error)}`,
           );
@@ -826,14 +901,15 @@ export function App() {
 
     let stopped = false;
     let polling = false;
+    const requestId = aiJobDetailRequestRef.current;
     const poll = () => {
       if (polling) {
         return;
       }
       polling = true;
-      void synchronizeAiJob(job.id, true)
+      void synchronizeAiJob(job.id, true, requestId)
         .catch((error: unknown) => {
-          if (!stopped) {
+          if (!stopped && requestId === aiJobDetailRequestRef.current) {
             setAiError(
               `AI Job 轮询失败：${error instanceof Error ? error.message : String(error)}`,
             );
@@ -938,6 +1014,9 @@ export function App() {
 
   const selectFile = useCallback(
     async (file: File) => {
+      pendingCatalogAiHydrationRef.current = null;
+      analyzedActivationRequestRef.current += 1;
+      aiJobDetailRequestRef.current += 1;
       const requestId = ++requestIdRef.current;
       setIsLoadingSkin(true);
       setNotice(`正在解码 ${file.name}`);
@@ -1116,7 +1195,12 @@ export function App() {
     (revision) => revision.id === aiJob?.inputRevisionId,
   );
   const canStartAi = Boolean(
-    selectedRevision?.isBranchHead && aiProvider && aiModel.trim() && !aiJobRunning,
+    selectedRevision &&
+      aiProvider &&
+      aiModel.trim() &&
+      !aiJobRunning &&
+      !historyBusy &&
+      !isLoadingSkin,
   );
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1235,10 +1319,22 @@ export function App() {
     if (!selectedRevision || !canStartAi) {
       return;
     }
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
     setAiBusy(true);
     setAiError(null);
     try {
-      const job = await startAiAnalysis(selectedRevision.id, {
+      let analysisRevision = selectedRevision;
+      let branchedProjectId: string | null = null;
+      if (!analysisRevision.isBranchHead) {
+        const branch = await branchRevision(
+          analysisRevision.id,
+          `reanalyze-${analysisRevision.sequence}-${Date.now().toString(36)}`,
+        );
+        if (aiDetailRequestId !== aiJobDetailRequestRef.current) return;
+        analysisRevision = branch.revision;
+        branchedProjectId = branch.project.id;
+      }
+      const job = await startAiAnalysis(analysisRevision.id, {
         mode: "full",
         provider: aiProvider,
         model: aiModel.trim(),
@@ -1246,19 +1342,150 @@ export function App() {
         taxonomyLevel: "coarse",
         focus: aiFocus,
         createRevisionOnSuccess: true,
+        semanticBaseline: aiSemanticBaseline,
       });
+      if (aiDetailRequestId !== aiJobDetailRequestRef.current) return;
       handledAiJobsRef.current.delete(job.id);
-      await synchronizeAiJob(job.id, true);
-      setNotice(
-        `AI Job 已创建 · ${aiProvider} / ${aiModel.trim()} · 源 Revision 保持只读`,
+      const synchronized = await synchronizeAiJob(
+        job.id,
+        true,
+        aiDetailRequestId,
       );
+      if (!synchronized) return;
+      if (branchedProjectId && !synchronized.job.resultRevisionId) {
+        const historyApplied = await refreshHistory(
+          branchedProjectId,
+          analysisRevision.id,
+          () => aiDetailRequestId === aiJobDetailRequestRef.current,
+          true,
+        );
+        if (!historyApplied) return;
+      }
+      if (
+        aiDetailRequestId === aiJobDetailRequestRef.current &&
+        !terminalAiStatuses.has(synchronized.job.status)
+      ) {
+        setNotice("智能分析已开始；原皮肤版本保持不变");
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setAiError(message);
-      setNotice(`AI 分析启动失败：${message}`);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(message);
+        setNotice(`AI 分析启动失败：${message}`);
+      }
     } finally {
       setAiBusy(false);
     }
+  };
+
+  const applySelectedSemanticFollowup = async (suggestionId: string) => {
+    if (!aiJob || aiJobRunning) return;
+    setAiBusy(true);
+    setAiError(null);
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
+    let detail: ApiAiJobDetail;
+    try {
+      detail = await applySemanticFollowup(aiJob.id, suggestionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(message);
+        setNotice(`分类修复版生成失败：${message}`);
+      }
+      setAiBusy(false);
+      return;
+    }
+
+    if (aiDetailRequestId !== aiJobDetailRequestRef.current) {
+      setAiBusy(false);
+      return;
+    }
+    aiJobDetailRef.current = detail;
+    setAiJobDetail(detail);
+    const refreshErrors: string[] = [];
+    try {
+      await refreshReusableCatalog();
+    } catch (error) {
+      refreshErrors.push(
+        `分析目录刷新失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const repairedRevisionId =
+      detail.semanticFollowup?.appliedRevisionId ?? detail.job.resultRevisionId;
+    if (
+      repairedRevisionId &&
+      aiDetailRequestId === aiJobDetailRequestRef.current
+    ) {
+      try {
+        const historyApplied = await refreshHistory(
+          detail.job.projectId,
+          repairedRevisionId,
+          () => aiDetailRequestId === aiJobDetailRequestRef.current,
+          true,
+        );
+        if (
+          !historyApplied &&
+          aiDetailRequestId === aiJobDetailRequestRef.current
+        ) {
+          refreshErrors.push("Revision 未能重新载入");
+        }
+      } catch (error) {
+        refreshErrors.push(
+          `Revision 刷新失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+      if (refreshErrors.length > 0) {
+        const message = refreshErrors.join("；");
+        setAiError(`分类修复版已生成，但${message}`);
+        setNotice("分类修复版已生成；页面数据刷新未完成，可稍后重新载入");
+      } else {
+        setNotice("推荐分类修复版已生成；原识别仍保留在分析目录中");
+      }
+    }
+    setAiBusy(false);
+  };
+
+  const dismissSelectedSemanticFollowup = async () => {
+    if (!aiJob || aiJobRunning) return;
+    setAiBusy(true);
+    setAiError(null);
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
+    let detail: ApiAiJobDetail;
+    try {
+      detail = await dismissSemanticFollowup(aiJob.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(message);
+        setNotice(`保留原识别失败：${message}`);
+      }
+      setAiBusy(false);
+      return;
+    }
+
+    if (aiDetailRequestId !== aiJobDetailRequestRef.current) {
+      setAiBusy(false);
+      return;
+    }
+    aiJobDetailRef.current = detail;
+    setAiJobDetail(detail);
+    try {
+      await refreshReusableCatalog();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(`已保留原识别，但分析目录刷新失败：${message}`);
+        setNotice("已保留原识别；分析目录刷新未完成");
+      }
+      setAiBusy(false);
+      return;
+    }
+    if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+      setNotice("已保留原识别；分类修复建议未写入皮肤");
+    }
+    setAiBusy(false);
   };
 
   const cancelActiveAiJob = async () => {
@@ -1267,13 +1494,16 @@ export function App() {
     }
     setAiBusy(true);
     setAiError(null);
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
     try {
       await cancelAiJob(aiJob.id);
-      await synchronizeAiJob(aiJob.id, true);
+      await synchronizeAiJob(aiJob.id, true, aiDetailRequestId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setAiError(message);
-      setNotice(`AI Job 取消失败：${message}`);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(message);
+        setNotice(`AI Job 取消失败：${message}`);
+      }
     } finally {
       setAiBusy(false);
     }
@@ -1285,6 +1515,7 @@ export function App() {
     }
     setAiBusy(true);
     setAiError(null);
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
     try {
       const createRevisionOnSuccess = Boolean(aiSourceRevision?.isBranchHead);
       const retry = await retryAiJob(aiJob.id, {
@@ -1292,9 +1523,15 @@ export function App() {
         model: aiModel.trim(),
         reasoningEffort: aiReasoningEffort,
         createRevisionOnSuccess,
+        semanticBaseline: aiSemanticBaseline,
       });
       handledAiJobsRef.current.delete(retry.id);
-      await synchronizeAiJob(retry.id, true);
+      const synchronized = await synchronizeAiJob(
+        retry.id,
+        true,
+        aiDetailRequestId,
+      );
+      if (!synchronized) return;
       setNotice(
         createRevisionOnSuccess
           ? "AI 重试已创建；验证成功后生成新 Revision"
@@ -1302,8 +1539,10 @@ export function App() {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setAiError(message);
-      setNotice(`AI Job 重试失败：${message}`);
+      if (aiDetailRequestId === aiJobDetailRequestRef.current) {
+        setAiError(message);
+        setNotice(`AI Job 重试失败：${message}`);
+      }
     } finally {
       setAiBusy(false);
     }
@@ -1573,34 +1812,101 @@ export function App() {
     }
   };
 
-  const activateAnalyzedSkin = async (item: ApiAnalyzedSkin) => {
+  const activateAnalyzedSkin = async (
+    item: ApiAnalyzedSkin,
+    revisionId = item.revision.id,
+  ) => {
+    const activationRequestId = ++analyzedActivationRequestRef.current;
+    const aiDetailRequestId = ++aiJobDetailRequestRef.current;
+    const pendingHydration: PendingCatalogAiHydration = {
+      activationRequestId,
+      aiDetailRequestId,
+      revisionId,
+    };
+    pendingCatalogAiHydrationRef.current = pendingHydration;
+    let aiDetailHydrationAttached = false;
+    aiJobDetailRef.current = null;
+    setAiJobDetail(null);
     setHistoryBusy(true);
     setHistoryError(null);
+    setAiError(null);
     try {
-      const [project, branches, revisions, projects] = await Promise.all([
-        getProject(item.project.id),
-        listBranches(item.project.id),
-        listRevisions(item.project.id),
-        listProjects(),
-      ]);
+      const aiDetailPromise = loadAiJobDetail(
+        item.semanticFollowup?.jobId ?? item.aiJob.id,
+      ).then(
+        (detail) => ({ detail, error: null }),
+        (error: unknown) => ({ detail: null, error }),
+      );
+      const [project, branches, revisions, projects] =
+        await Promise.all([
+          getProject(item.project.id),
+          listBranches(item.project.id),
+          listRevisions(item.project.id),
+          listProjects(),
+        ]);
+      if (activationRequestId !== analyzedActivationRequestRef.current) return;
       setHistoryProject(project);
       setHistoryBranches(branches);
       setHistoryRevisions(revisions);
       setHistoryProjects(projects);
       window.localStorage.setItem(HISTORY_PROJECT_KEY, project.id);
       const revision = revisions.find(
-        (candidate) => candidate.id === item.revision.id,
+        (candidate) => candidate.id === revisionId,
       );
       if (!revision) {
         throw new Error("目录中的 Revision 已不存在");
       }
-      await activateRevision(revision);
+      const activated = await activateRevision(revision, {
+        preserveAiDetailRequest: true,
+        preserveAnalyzedActivation: true,
+      });
+      if (
+        !activated ||
+        activationRequestId !== analyzedActivationRequestRef.current
+      ) return;
+      aiDetailHydrationAttached = true;
+      void aiDetailPromise.then((aiDetailResult) => {
+        try {
+          if (
+            activationRequestId !== analyzedActivationRequestRef.current ||
+            aiDetailRequestId !== aiJobDetailRequestRef.current
+          ) return;
+          if (aiDetailResult.detail) {
+            aiJobDetailRef.current = aiDetailResult.detail;
+            setAiJobDetail(aiDetailResult.detail);
+            return;
+          }
+          aiJobDetailRef.current = null;
+          setAiJobDetail(null);
+          setAiError(
+            `Revision 可正常载入，但 AI 运行记录读取失败：${
+              aiDetailResult.error instanceof Error
+                ? aiDetailResult.error.message
+                : String(aiDetailResult.error)
+            }`,
+          );
+        } finally {
+          if (pendingCatalogAiHydrationRef.current === pendingHydration) {
+            pendingCatalogAiHydrationRef.current = null;
+          }
+        }
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setHistoryError(message);
-      setNotice(`已分析皮肤载入失败：${message}`);
+      if (activationRequestId === analyzedActivationRequestRef.current) {
+        const message = error instanceof Error ? error.message : String(error);
+        setHistoryError(message);
+        setNotice(`已分析皮肤载入失败：${message}`);
+      }
     } finally {
-      setHistoryBusy(false);
+      if (
+        !aiDetailHydrationAttached &&
+        pendingCatalogAiHydrationRef.current === pendingHydration
+      ) {
+        pendingCatalogAiHydrationRef.current = null;
+      }
+      if (activationRequestId === analyzedActivationRequestRef.current) {
+        setHistoryBusy(false);
+      }
     }
   };
 
@@ -1646,13 +1952,14 @@ export function App() {
   const exportAnalyzedGroup = async (
     item: ApiAnalyzedSkin,
     group: ApiAnalyzedSkinGroup,
+    revisionId = item.revision.id,
   ) => {
-    const busyKey = `${item.revision.id}:${group.key}`;
+    const busyKey = `${revisionId}:${group.key}`;
     setBusyCatalogGroupKey(busyKey);
     setCatalogError(null);
     setNotice(`正在将 ${group.displayName} 的 ${group.componentCount} 个组件整组入库`);
     try {
-      const bundle = await exportRevisionBundle(item.revision.id, {
+      const bundle = await exportRevisionBundle(revisionId, {
         name: group.displayName,
         kind: group.kind,
         componentIds: group.componentIds,
@@ -2378,7 +2685,9 @@ export function App() {
         error={catalogError}
         selectedRevisionId={selectedRevisionId}
         onActivate={(item) => void activateAnalyzedSkin(item)}
+        onActivateRevision={(item, revisionId) => void activateAnalyzedSkin(item, revisionId)}
         onExportGroup={(item, group) => void exportAnalyzedGroup(item, group)}
+        onExportVariantGroup={(item, revisionId, group) => void exportAnalyzedGroup(item, group, revisionId)}
         onArchive={(item, reason) =>
           changeAnalyzedSkinCatalogStatus(item, "archive", reason)}
         onRestore={(item) =>
@@ -2445,48 +2754,13 @@ export function App() {
               void beginAiAnalysis();
             }}
           >
-            <label>
-              <span>PROVIDER</span>
-              <select
-                value={aiProvider}
-                disabled={aiBusy || aiJobRunning || aiProviders.length === 0}
-                onChange={(event) => setAiProvider(event.target.value)}
-              >
-                {aiProviders.length === 0 && <option value="">不可用</option>}
-                {aiProviders.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {provider === "codex-exec" ? "本地 Codex CLI" : provider}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>MODEL</span>
-              <input
-                value={aiModel}
-                maxLength={120}
-                disabled={aiBusy || aiJobRunning}
-                onChange={(event) => setAiModel(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>REASONING</span>
-              <select
-                value={aiReasoningEffort}
-                disabled={aiBusy || aiJobRunning}
-                onChange={(event) =>
-                  setAiReasoningEffort(
-                    event.target.value as ApiAiAnalysisOptions["reasoningEffort"],
-                  )
-                }
-              >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="xhigh">XHigh</option>
-                <option value="max">Max</option>
-              </select>
-            </label>
+            <div className="ai-player-intro">
+              <span>ONE CLICK</span>
+              <strong>识别部件，并检查跨部位错分</strong>
+              <p>
+                默认从干净语义开始，不沿用旧分类。发现安全的分类调整时再让用户确认；被遮挡的隐藏衣服或头发仍可能需要后续补全。
+              </p>
+            </div>
             <dl className="ai-input-facts">
               <div>
                 <dt>INPUT</dt>
@@ -2501,16 +2775,16 @@ export function App() {
                 <dd>{selectedRevision ? armLabels[resolvedArmType] : "—"}</dd>
               </div>
               <div>
-                <dt>TAXONOMY</dt>
-                <dd>{aiFocus.length} 类粗粒度识别</dd>
+                <dt>ANALYSIS</dt>
+                <dd>{aiSemanticBaseline === "empty" ? "干净重新识别" : "参考现有分类"}</dd>
               </div>
             </dl>
             <p className="ai-privacy-note">
-              本地 Codex CLI 在单次任务目录运行；图片可能由当前 Codex 配置的远端模型处理。
+              皮肤图片可能由当前 Codex 配置的远端模型处理；正式像素仍由本地确定性代码校验。
             </p>
             <div className="ai-controls">
               <button type="submit" disabled={!canStartAi || aiBusy}>
-                识别所选 HEAD Revision
+                {aiBusy ? "正在启动…" : "智能分析皮肤"}
               </button>
               {aiJobRunning ? (
                 <button
@@ -2521,19 +2795,65 @@ export function App() {
                 >
                   取消任务
                 </button>
-              ) : (
-                <button
-                  className="ai-secondary-button"
-                  type="button"
-                  disabled={!aiJob || aiBusy || !aiProvider || !aiModel.trim()}
-                  onClick={() => void retrySelectedAiJob()}
-                >
-                  {aiSourceRevision?.isBranchHead
-                    ? "以当前配置重试"
-                    : "重跑历史输入（仅提案）"}
-                </button>
-              )}
+              ) : <span />}
             </div>
+            <details className="ai-advanced-config">
+              <summary>高级设置与重试</summary>
+              <div>
+                <label>
+                  <span>识别方式</span>
+                  <select
+                    value={aiSemanticBaseline}
+                    disabled={aiBusy || aiJobRunning}
+                    onChange={(event) => setAiSemanticBaseline(event.target.value as ApiAiAnalysisOptions["semanticBaseline"])}
+                  >
+                    <option value="empty">干净重新识别（推荐）</option>
+                    <option value="current">参考现有分类</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Provider</span>
+                  <select
+                    value={aiProvider}
+                    disabled={aiBusy || aiJobRunning || aiProviders.length === 0}
+                    onChange={(event) => setAiProvider(event.target.value)}
+                  >
+                    {aiProviders.length === 0 && <option value="">不可用</option>}
+                    {aiProviders.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {provider === "codex-exec" ? "本地 Codex CLI" : provider}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input value={aiModel} maxLength={120} disabled={aiBusy || aiJobRunning} onChange={(event) => setAiModel(event.target.value)} />
+                </label>
+                <label>
+                  <span>Reasoning</span>
+                  <select
+                    value={aiReasoningEffort}
+                    disabled={aiBusy || aiJobRunning}
+                    onChange={(event) => setAiReasoningEffort(event.target.value as ApiAiAnalysisOptions["reasoningEffort"])}
+                  >
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">XHigh</option>
+                    <option value="max">Max</option>
+                  </select>
+                </label>
+              </div>
+              <button
+                className="ai-secondary-button ai-advanced-retry"
+                type="button"
+                disabled={!aiJob || aiBusy || aiJobRunning || !aiProvider || !aiModel.trim()}
+                onClick={() => void retrySelectedAiJob()}
+              >
+                使用高级设置重试
+              </button>
+            </details>
           </form>
 
           <article className="ai-job-card">
@@ -2541,16 +2861,18 @@ export function App() {
               <>
                 <div className="ai-job-status">
                   <span>{aiStatusLabels[aiJob.status]}</span>
-                  <strong>{String(aiJobDetail?.runs.length ?? 0).padStart(2, "0")} RUNS</strong>
+                  <strong>
+                    {aiJobRunning ? "页面关闭后仍会继续" : "运行记录已保存"}
+                  </strong>
                 </div>
-                <div className="ai-job-meta">
-                  <code>{shortIdentifier(aiJob.id)}</code>
-                  <span>{aiJob.provider} / {aiJob.model}</span>
-                  <span>reasoning / {aiJob.options.reasoningEffort}</span>
-                  <span>{aiJob.skillName} {aiJob.skillVersion}</span>
-                </div>
-
                 <SemanticAiJobProgress detail={aiJobDetail} />
+
+                <SemanticFollowupReview
+                  followup={aiJobDetail?.semanticFollowup ?? null}
+                  busy={aiBusy}
+                  onApply={(suggestionId) => void applySelectedSemanticFollowup(suggestionId)}
+                  onDismiss={() => void dismissSelectedSemanticFollowup()}
+                />
 
                 {aiJob.proposalSummary && (
                   <p className="ai-proposal-summary">{aiJob.proposalSummary}</p>
@@ -2580,30 +2902,34 @@ export function App() {
                   </div>
                 )}
 
-                <div className="ai-run-strip">
-                  {aiJobDetail?.runs.map((run) => (
-                    <span key={run.id} data-status={run.status}>
-                      RUN {run.attempt} · {run.status.toUpperCase()} · {run.assets.length} FILES
-                    </span>
-                  ))}
-                </div>
-
-                <SemanticAiEventLog
-                  events={aiJobDetail?.events ?? []}
-                  running={aiJobRunning}
-                  logRef={aiEventLogRef}
-                />
+                <details className="ai-technical-details">
+                  <summary>高级信息 · 运行记录与技术日志</summary>
+                  <div className="ai-job-meta">
+                    <code>{shortIdentifier(aiJob.id)}</code>
+                    <span>{aiJob.provider} / {aiJob.model}</span>
+                    <span>reasoning / {aiJob.options.reasoningEffort}</span>
+                    <span>{aiJob.skillName} {aiJob.skillVersion}</span>
+                  </div>
+                  <div className="ai-run-strip">
+                    {aiJobDetail?.runs.map((run) => (
+                      <span key={run.id} data-status={run.status}>
+                        RUN {run.attempt} · {run.status.toUpperCase()} · {run.assets.length} FILES
+                      </span>
+                    ))}
+                  </div>
+                  <SemanticAiEventLog events={aiJobDetail?.events ?? []} running={aiJobRunning} logRef={aiEventLogRef} />
+                </details>
               </>
             ) : (
               <>
                 <SemanticAiJobProgress detail={null} />
                 <div className="ai-empty-state">
                   <strong>NO ANALYSIS JOB</strong>
-                  <p>选择 Branch HEAD 后启动识别。上方大纲会显示每个确定性阶段，实时日志提供步骤明细。</p>
+                  <p>选择任意 Revision 后即可启动识别；历史版本会自动创建新分支。运行明细保留在高级信息中。</p>
                 </div>
               </>
             )}
-            {aiError && <p className="ai-console-error">{aiError}</p>}
+            {aiError && <p className="ai-console-error" role="alert">{aiError}</p>}
           </article>
         </div>
       </section>

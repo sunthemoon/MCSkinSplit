@@ -182,6 +182,12 @@ export interface ManualRevisionOperationInput {
   readonly branchId?: string;
   readonly actorId?: string;
   readonly summary?: string;
+  readonly semanticFollowup?: {
+    readonly jobId: string;
+    readonly resultRevisionId: string;
+    readonly suggestionId: string;
+    readonly evidenceHash: string;
+  };
 }
 
 export interface AiSegmentationRevisionInput {
@@ -395,6 +401,38 @@ export interface ArchiveAnalyzedSkinInput {
   readonly reason?: string;
 }
 
+export type SemanticAnalysisFollowupStatus =
+  | "no_repair"
+  | "awaiting_review"
+  | "applied"
+  | "dismissed"
+  | "assessment_failed";
+
+export interface SemanticAnalysisFollowupNotice {
+  readonly kind: string;
+  readonly message: string;
+}
+
+export interface AnalyzedSkinAppliedVariant {
+  readonly label: "分类修复版";
+  readonly revision: Pick<
+    SkinRevision,
+    "id" | "branchId" | "branchName" | "sequence" | "createdAt"
+  >;
+  readonly groups: readonly AnalyzedSkinGroup[];
+  readonly skinUrl: string;
+}
+
+export interface SemanticAnalysisFollowupSummary {
+  readonly jobId: string;
+  readonly status: SemanticAnalysisFollowupStatus;
+  readonly evidenceHash: string;
+  readonly suggestionCount: number;
+  readonly suggestedPixelCount: number;
+  readonly notices: readonly SemanticAnalysisFollowupNotice[];
+  readonly appliedVariant: AnalyzedSkinAppliedVariant | null;
+}
+
 export interface AnalyzedSkinCatalogItem {
   readonly project: Pick<SkinProject, "id" | "name">;
   readonly revision: Pick<
@@ -413,6 +451,7 @@ export interface AnalyzedSkinCatalogItem {
   readonly reviewItemCount: number;
   readonly groups: readonly AnalyzedSkinGroup[];
   readonly skinUrl: string;
+  readonly semanticFollowup: SemanticAnalysisFollowupSummary | null;
   readonly catalogStatus: AnalyzedSkinCatalogStatus;
   readonly archivedAt: string | null;
   readonly archivedReason: string | null;

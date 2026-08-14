@@ -4,6 +4,7 @@ import {
   applyCompositionBundle,
   applyPartEditOperation,
   applySemanticOperation,
+  applySemanticFollowup,
   archiveAnalyzedSkin,
   commitComposition,
   clearCompositionRestorationPlan,
@@ -11,6 +12,7 @@ import {
   compositionPreviewUrl,
   commitPartEdit,
   createComposition,
+  dismissSemanticFollowup,
   createPartEdit,
   exportRevisionPart,
   exportRevisionBundle,
@@ -585,6 +587,7 @@ describe("revisionApi", () => {
         taxonomyLevel: "coarse",
         focus: ["hair", "shoe"],
         createRevisionOnSuccess: true,
+        semanticBaseline: "empty",
       },
       fetcher,
     );
@@ -596,6 +599,7 @@ describe("revisionApi", () => {
         model: "gpt-5.6",
         reasoningEffort: "high",
         createRevisionOnSuccess: false,
+        semanticBaseline: "current",
       },
       fetcher,
     );
@@ -607,6 +611,7 @@ describe("revisionApi", () => {
       provider: "codex-exec",
       focus: ["hair", "shoe"],
       createRevisionOnSuccess: true,
+      semanticBaseline: "empty",
     });
     expect(fetcher.mock.calls[1]?.[0]).toBe(
       "/api/ai-jobs?revisionId=rev%20%2F%201",
@@ -619,7 +624,27 @@ describe("revisionApi", () => {
       model: "gpt-5.6",
       reasoningEffort: "high",
       createRevisionOnSuccess: false,
+      semanticBaseline: "current",
     });
+  });
+
+  it("applies or dismisses only persisted semantic followup suggestion ids", async () => {
+    const detail = { job: { id: "job / 1" }, runs: [], events: [], semanticFollowup: null };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(detail, 200))
+      .mockResolvedValueOnce(jsonResponse(detail, 200));
+
+    await applySemanticFollowup("job / 1", "suggestion / 2", fetcher);
+    await dismissSemanticFollowup("job / 1", fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/ai-jobs/job%20%2F%201/semantic-followup/apply",
+      "/api/ai-jobs/job%20%2F%201/semantic-followup/dismiss",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      suggestionId: "suggestion / 2",
+    });
+    expect(fetcher.mock.calls[1]?.[1]?.body).toBe("{}");
   });
 
   it("starts and filters restoration recommendation jobs without exposing pixel operations", async () => {

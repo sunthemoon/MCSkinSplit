@@ -150,6 +150,7 @@ async function fixturePack(): Promise<{
     provider: "test-provider",
     model: "test-model",
     reasoningEffort: "medium" as const,
+    semanticBaseline: "current" as const,
     mode: "full" as const,
     taxonomyLevel: "coarse" as const,
     focus: ["hair"] as const,

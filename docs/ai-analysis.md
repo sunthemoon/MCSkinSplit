@@ -15,13 +15,16 @@ selected Branch HEAD Revision
   -> JSON Schema and pixel-ownership validation
   -> optional single repair attempt
   -> immutable AI Revision or audited failure
+  -> deterministic cross-body classification assessment
+  -> optional user-confirmed classification-repair Revision
+  -> original result plus optional repaired catalog variant
 ```
 
 The output Revision changes semantic segmentation only. Its `skin.png` is copied
 byte-for-byte from the input Revision.
 
 The current semantic runtime pins `mc-skin-segmenter` Skill `1.2.0` and prompt
-`semantic-proposal-v3-tool-free`. Those values are stored on every new Job so a
+`semantic-proposal-v4-tool-free`. Those values are stored on every new Job so a
 retry remains attributable to the contract that actually ran.
 
 ## Analysis workspace
@@ -46,6 +49,27 @@ pixel map in model context. A manifest hashes the source, all derived inputs, th
 schema, and the copied Skill. The worker verifies those hashes after model execution;
 input or Skill mutation invalidates the Run.
 
+### Clean and current semantic baselines
+
+New player-facing analysis defaults to `semanticBaseline: "empty"`. The analysis
+pack still retains the immutable previous segmentation for host validation and
+audit, but the provider prompt does not include its component labels. The model
+therefore classifies from the attached views, candidate regions, and palette
+without inheriting an earlier semantic decision.
+
+Advanced settings can select `semanticBaseline: "current"`. In that mode the
+provider includes a compact previous-component summary as a soft prior. The prompt
+still requires every label to be re-evaluated from the current visual and
+candidate evidence. The selected baseline is stored in `job.json`, participates
+in the input hash, and is preserved by an ordinary retry unless the retry request
+explicitly overrides it. Legacy stored Jobs without the field retain their
+historical current-baseline interpretation; new Jobs default to the clean mode.
+
+Any immutable historical Revision can be analyzed again directly; catalog
+archiving or deletion is not required. When the selected Revision is no longer the
+current Branch HEAD, the service creates a new Branch before appending the new
+analysis result, so the existing history remains unchanged.
+
 ## Codex CLI provider
 
 The default provider follows the official Codex non-interactive `codex exec`
@@ -59,8 +83,9 @@ For semantic analysis, the adapter:
   `--ignore-rules`, JSONL events, attached analysis images, and a bounded timeout;
 - disables shell, web, browser, computer, image-generation, app, plugin, MCP,
   delegation, and related tool capabilities, and inherits no shell environment;
-- inlines the immutable public Job, compact candidate summary, palette, prior
-  component summary, and classification rules through stdin. The model neither
+- inlines the immutable public Job, compact candidate summary, palette,
+  classification rules, and only when requested the current component summary
+  through stdin. The model neither
   reads the workspace nor writes the proposal file; Codex captures its final
   response through `--output-last-message`;
 - resolves the Windows `codex.cmd` shim to the installed Node entry point instead
@@ -166,6 +191,86 @@ target Branch HEAD, the source/result hashes match, and the successful Run ID is
 recorded as AI provenance. This prevents a late model response from overwriting newer
 work.
 
+## Deterministic semantic follow-up
+
+After a successful semantic Job creates its `ai_segment` Revision, the worker
+continues with a host-side assessment. This is not another model call. The current
+assessment conservatively checks whether vertically continuous torso regions that
+were classified as clothing match established head-hair colors closely enough to
+be plausible cross-body long hair. It can return exact candidate-region spans as
+`cross_body_hair_reclassification` suggestions.
+
+New assessments use `cross-body-hair-reclassification-v2`. In addition to the v1
+single-region case, v2 can join nearby, hair-colored candidate fragments on the
+same torso surface before evaluating their combined vertical drape. This covers a
+single visual hair strand split into several candidate regions by shading or a
+small gap without joining fragments across different UV surfaces. The rule also
+uses the dominant connected head-hair palette and excludes a narrow horizontal
+Base-layer bridge when it matches exposed face/skin colors.
+
+`cross-body-hair-reclassification-v1` remains accepted when old Job evidence is
+loaded, so historical results and notices stay readable. Pending v1 suggestions
+are read-only and always require a fresh v2 analysis before they can be applied;
+they are never silently translated into current evidence.
+
+Suggestions are review-only. The assessment never creates coordinates, colors, or
+new pixels: every suggested span is rebuilt from deterministic candidate regions
+and existing semantic ownership. Before applying a suggestion, the worker reloads
+the immutable result snapshot, regenerates the assessment, and requires the same
+evidence hash and suggestion identity. A stale or changed result is rejected.
+
+The user then chooses one of two simple outcomes:
+
+- **Use the classification repair.** The service creates a dedicated Branch from
+  the AI result and reassigns the exact suggested spans through the normal semantic
+  operation service. A single supported source reuses its existing hair component;
+  compatible evidence backed by multiple hair components creates one deterministic
+  cross-body hair component. The resulting Revision is immutable, and its skin RGBA
+  bytes do not change. The catalog retains the AI result as the base entry and nests
+  the new Revision as `分类修复版`.
+- **Keep the original result.** The suggestion becomes `dismissed`; no Revision or
+  pixel state changes, and the original AI result remains the catalog version.
+
+The follow-up state vocabulary is `no_repair`, `awaiting_review`, `applied`,
+`dismissed`, and `assessment_failed`; a failure that occurs before a follow-up row
+exists is represented by the corresponding Job event. `no_repair` has a
+deliberately narrow meaning: the conservative classifier found no safe cross-body
+reclassification suggestion. It does **not** prove that the artwork has no
+occlusion, that clothing
+or hair is complete, or that hidden pixels can be recovered. Likewise, an
+assessment failure does not roll back an already valid semantic Revision.
+
+### Player progress and events
+
+The Studio presents one primary **智能分析皮肤** action and moves technical
+provider, model, reasoning, baseline, retry, Run, and raw-log controls into
+advanced sections. The visible progress model contains six evidence-backed stages:
+
+1. `准备识别`
+2. `识别皮肤部件`
+3. `校验识别结果`
+4. `复核跨部位分类`
+5. `确认分类修复`
+6. `准备分析目录`
+
+A second model attempt that repairs invalid proposal JSON remains part of stages 2
+and 3; it is shown as correcting the recognition result, not as skin-pixel repair.
+Stage 5 is skipped when there is no reviewable suggestion or the user retains the
+original. Closing the browser does not cancel the persistent server Job.
+
+The follow-up appends bounded public events to the existing Job stream:
+
+- `occlusion_assessing` and `occlusion_assessed` describe deterministic review;
+- `repair_review_ready` or `repair_review_skipped` records whether confirmation
+  is needed;
+- `occlusion_assessment_failed` records a non-terminal follow-up failure;
+- `semantic_repair_applied` or `semantic_repair_dismissed` records the explicit
+  user decision;
+- `catalog_ready` records availability of the original or repaired catalog view.
+
+These events contain identifiers, counts, status, and evidence hashes only. They
+do not expose authoritative masks or private pixel lists.
+
 ## HTTP API
 
 ```text
@@ -176,11 +281,21 @@ GET  /api/ai-jobs/:jobId
 GET  /api/ai-jobs/:jobId/events
 POST /api/ai-jobs/:jobId/cancel
 POST /api/ai-jobs/:jobId/retry
+POST /api/ai-jobs/:jobId/semantic-followup/apply
+POST /api/ai-jobs/:jobId/semantic-followup/dismiss
 ```
 
 The start request requires `full` mode, a registered provider, model, reasoning
 effort (`low`, `medium`, `high`, `xhigh`, or `max`), coarse taxonomy, focus category
-list, and `createRevisionOnSuccess` flag. Unknown request fields are rejected.
+list, and `createRevisionOnSuccess` flag. It optionally accepts
+`semanticBaseline: "empty" | "current"`; omission on a new Job selects `empty`.
+Unknown request fields are rejected.
+
+Job detail responses include nullable `semanticFollowup` state. Public suggestions
+contain only ID, label, pixel count, confidence, and reason; notices contain only
+kind and message. Applying requires one exact `suggestionId`; dismissing requires
+an empty object. Both mutation routes return the updated Job detail. The normal
+event endpoint returns the same persisted follow-up events as the Job detail.
 
 ## Environment
 
@@ -216,10 +331,13 @@ The earlier recorded end-to-end A1 Codex run produced 10 components covering all
 remained auditable; the bounded repair attempt succeeded and created the AI
 Revision.
 
+The browser observations below are historical M13-era evidence for prompt v3, not
+verification of the current `semantic-proposal-v4-tool-free` contract.
+
 On 2026-08-13, a separate real-browser run started from the Studio against
-`9058f3af3ffb104c.png` with `max` reasoning, Skill `1.2.0`, and prompt
-`semantic-proposal-v3-tool-free`. The one observed Job/Run completed in 429.5
-seconds (7 minutes 9.5 seconds), passed host validation in Run attempt 1, produced 15
+`9058f3af3ffb104c.png` with `max` reasoning, Skill `1.2.0`, and the historical
+M13 prompt `semantic-proposal-v3-tool-free`. The one observed Job/Run completed in
+429.5 seconds (7 minutes 9.5 seconds), passed host validation in Run attempt 1, produced 15
 components covering all 1,989 visible pixels with zero `unknown` pixels, and
 created an immutable `ai_segment` Revision. It emitted zero `provider_tool` events,
 confirming tool-free execution for that run. Its first schema-constrained transport
@@ -227,10 +345,10 @@ request failed and the narrow local-JSON fallback succeeded, so this observation
 neither a latency benchmark nor evidence that the selected external endpoint
 supports structured output.
 
-On 2026-08-14, after making host-validated single-pass JSON the default, a fresh
-Studio run completed in about 76 seconds with `medium` reasoning. It used one
-Codex session and one model turn, emitted no schema fallback, provider error, or
-failed turn, and created `main #3`. The host accepted all 211 candidate regions
+On 2026-08-14, after making host-validated single-pass JSON the M13 default, a
+fresh v3 Studio run completed in about 76 seconds with `medium` reasoning. It used
+one Codex session and one model turn, emitted no schema fallback, provider error,
+or failed turn, and created `main #3`. The host accepted all 211 candidate regions
 covering 2,047 visible pixels, produced 13 components, and reported zero unknown
 pixels, review items, warnings, or validation errors. This is one functional
 browser observation, not a latency guarantee.
@@ -246,16 +364,19 @@ or backup policy.
 Semantic labels remain probabilistic. Review low-confidence items and use the manual
 editor for corrections before exporting reusable parts or composing a final skin.
 
-The semantic Job card shows a fixed five-stage outline before a task starts:
-queue, isolated input, Codex classification, deterministic validation, and optional
-repair/revalidation. The bar represents completed workflow stages rather than an
-elapsed-time estimate. A second model Run moves into the repair stage without
-resetting earlier progress; failure or cancellation remains attached to the last
-evidenced stage. After machine validation succeeds, the card separately marks the
-handoff to manual review because AI success does not mean that component review is
-complete. The live event list remains the detailed record beneath this outline.
-Paired tool rows and recoverable warnings reduce duplicate noise without changing
-the stored event history or the fixed five-stage progress model.
+The semantic Job card's six-stage bar represents completed workflow stages rather
+than elapsed time. Failure or cancellation remains attached to the last evidenced
+stage. After machine validation succeeds, the card continues through deterministic
+cross-body review and any explicit user decision because AI success does not mean
+that component review is complete. The live event list remains the detailed record
+beneath this outline. Paired tool rows and recoverable warnings reduce duplicate
+noise without changing stored event history.
+
+M15 does not generate pixels hidden by clothing, long hair, or accessories. It
+cannot infer the factual back of a covered garment or reconstruct hair hidden on
+both sides. Generated/inferred texture completion requires a future provenance-
+aware candidate and review workflow; until then, manual component repair and
+Composition restoration remain the explicit authored alternatives.
 
 ## Constrained replacement recommendation
 

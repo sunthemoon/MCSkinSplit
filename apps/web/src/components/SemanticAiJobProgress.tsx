@@ -2,6 +2,7 @@ import type {
   ApiAiJobDetail,
   ApiAiJobEvent,
   ApiAiJobStatus,
+  ApiSemanticFollowupStatus,
 } from "../lib/revisionApi";
 
 type SemanticAiStepState =
@@ -13,7 +14,7 @@ type SemanticAiStepState =
   | "cancelled";
 
 interface SemanticAiStepDefinition {
-  readonly id: "queue" | "pack" | "proposal" | "validation" | "repair";
+  readonly id: "prepare" | "identify" | "validate" | "assess" | "preview" | "catalog";
   readonly label: string;
   readonly description: string;
 }
@@ -34,41 +35,17 @@ export interface SemanticAiProgressModel {
 }
 
 const stepDefinitions: readonly SemanticAiStepDefinition[] = [
-  {
-    id: "queue",
-    label: "任务排队",
-    description: "等待 Worker 接管任务",
-  },
-  {
-    id: "pack",
-    label: "隔离输入",
-    description: "复制 Skill、纹理与候选摘要，校验输入哈希",
-  },
-  {
-    id: "proposal",
-    label: "Codex 分类",
-    description: "模型生成结构化 JSON 语义提案",
-  },
-  {
-    id: "validation",
-    label: "确定性校验",
-    description: "主机校验 Schema、UV、像素归属与快照",
-  },
-  {
-    id: "repair",
-    label: "修复与复检",
-    description: "提案无效时依据报告重新生成并再次校验",
-  },
+  { id: "prepare", label: "准备识别", description: "读取皮肤并准备独立识别输入" },
+  { id: "identify", label: "识别皮肤部件", description: "识别头发、衣服、饰品等部件" },
+  { id: "validate", label: "校验识别结果", description: "检查分类、边界和像素归属" },
+  { id: "assess", label: "复核跨部位分类", description: "检查长发等区域是否被错分" },
+  { id: "preview", label: "确认分类修复", description: "有安全建议时由用户确认" },
+  { id: "catalog", label: "准备分析目录", description: "保存原版或已确认的分类修复版" },
 ] as const;
 
 const activeStageByStatus: Readonly<
   Record<Exclude<ApiAiJobStatus, "succeeded" | "failed" | "cancelled">, number>
-> = {
-  queued: 0,
-  preparing: 1,
-  running: 2,
-  validating: 3,
-};
+> = { queued: 0, preparing: 0, running: 1, validating: 2 };
 
 const stateLabels: Readonly<Record<SemanticAiStepState, string>> = {
   completed: "已完成",
@@ -88,16 +65,16 @@ export function SemanticAiJobProgress({ detail }: SemanticAiJobProgressProps) {
   const currentStepIndex = model.steps.findIndex((step) => step.state === "current");
 
   return (
-    <section className="semantic-ai-progress" aria-label="AI 自动识别进度大纲">
+    <section className="semantic-ai-progress" aria-label="智能分析进度">
       <div className="semantic-ai-progress-heading">
-        <span>AUTO PIPELINE</span>
+        <span>SMART ANALYSIS</span>
         <strong>{model.headline}</strong>
         <small>{model.progressText}</small>
       </div>
       <div
         className="semantic-ai-progress-meter"
         role="progressbar"
-        aria-label="AI 自动识别完成度"
+        aria-label="智能分析完成度"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={model.progressPercent}
@@ -105,7 +82,7 @@ export function SemanticAiJobProgress({ detail }: SemanticAiJobProgressProps) {
       >
         <i style={{ width: `${model.progressPercent}%` }} />
       </div>
-      <ol className="semantic-ai-steps" aria-label="AI 自动识别步骤">
+      <ol className="semantic-ai-steps" aria-label="智能分析步骤">
         {model.steps.map((step, index) => (
           <li
             key={step.id}
@@ -121,12 +98,8 @@ export function SemanticAiJobProgress({ detail }: SemanticAiJobProgressProps) {
           </li>
         ))}
       </ol>
-      <div
-        className="semantic-ai-handoff"
-        data-state={model.handoffState}
-        {...(model.handoffState === "ready" ? { "aria-current": "step" } : {})}
-      >
-        <span>MANUAL REVIEW</span>
+      <div className="semantic-ai-handoff" data-state={model.handoffState}>
+        <span>RESULT</span>
         <div>
           <strong>{model.handoffTitle}</strong>
           <p>{model.handoffDetail}</p>
@@ -140,114 +113,210 @@ export function buildSemanticAiProgress(
   detail: ApiAiJobDetail | null,
 ): SemanticAiProgressModel {
   if (!detail || detail.job.kind !== "semantic_analysis") {
-    return {
-      headline: "尚未开始",
-      progressPercent: 0,
-      progressText: "自动流程 0 / 5 · 启动任务后按步骤更新",
-      steps: createSteps(null),
-      handoffState: "pending",
-      handoffTitle: "任务完成后进入人工审核",
-      handoffDetail: "AI 只生成分类提案；组件确认和修改仍由用户完成。",
-    };
+    return progressModel(
+      "尚未开始",
+      createSteps(null),
+      "pending",
+      "智能分析后自动复核跨部位分类",
+      "发现可能错分的区域时，用户可选择分类修复版或保留原版。",
+    );
   }
 
-  const { job, runs, events } = detail;
+  const { job, runs, events, semanticFollowup } = detail;
   const maximumAttempt = runs.reduce(
     (maximum, run) => Math.max(maximum, run.attempt),
     0,
   );
-  const repairActive = maximumAttempt >= 2;
-
-  if (job.status === "succeeded") {
-    const steps = createSteps(null, repairActive ? "completed" : "skipped");
-    const createdRevision = job.resultRevisionId !== null;
-    return {
-      headline: "机器识别已完成",
-      progressPercent: 100,
-      progressText: `自动流程 5 / 5 · ${repairActive ? `完成 ${maximumAttempt} 次模型调用` : "首轮提案通过，无需自动修复"}`,
-      steps,
-      handoffState: createdRevision ? "ready" : "unavailable",
-      handoffTitle: createdRevision
-        ? "提案已写入 Revision，等待人工确认"
-        : "提案仅保留为审计记录，未创建 Revision",
-      handoffDetail: createdRevision
-        ? reviewHandoffDetail(job.reviewItems.length)
-        : "历史输入的只读重跑不会写入语义编辑器；请在 Branch HEAD 上启动或重试识别，创建可审核的 Revision。",
-    };
-  }
 
   if (job.status === "failed" || job.status === "cancelled") {
-    const stoppedStage = terminalStage(events, maximumAttempt);
+    const stoppedStage = terminalStage(events);
     const terminalState = job.status === "failed" ? "failed" : "cancelled";
-    const steps = createSteps(stoppedStage, undefined, terminalState);
-    return {
-      headline: job.status === "failed" ? "机器识别未完成" : "机器识别已停止",
-      progressPercent: Math.round((stoppedStage / stepDefinitions.length) * 100),
-      progressText: `自动流程 ${stoppedStage} / 5 · ${stepDefinitions[stoppedStage]!.label}${job.status === "failed" ? "失败" : "取消"}`,
-      steps,
-      handoffState: "unavailable",
-      handoffTitle: "尚无可交付的人工审核提案",
-      handoffDetail: job.status === "failed"
-        ? "查看下方错误和实时日志，修正输入或配置后重试。"
-        : "任务已取消；重新运行后会从新的 Job 开始记录。",
-    };
+    return progressModel(
+      job.status === "failed" ? "智能分析未完成" : "智能分析已停止",
+      createSteps(stoppedStage, terminalState),
+      "unavailable",
+      "尚无可用结果",
+      job.status === "failed"
+        ? "可在高级信息中查看错误，修正后重新分析。"
+        : "重新点击智能分析皮肤会创建新任务。",
+    );
   }
 
-  const currentStage = repairActive ? 4 : activeStageByStatus[job.status];
-  const steps = createSteps(currentStage);
-  if (job.cancelRequested) {
-    steps[currentStage] = { ...steps[currentStage]!, stateLabel: "正在取消" };
+  if (job.status !== "succeeded") {
+    const currentStage = activeStageByStatus[job.status];
+    const steps = createSteps(currentStage);
+    if (job.cancelRequested) {
+      steps[currentStage] = { ...steps[currentStage]!, stateLabel: "正在取消" };
+    }
+    const correctingProposal = maximumAttempt >= 2 && currentStage >= 1;
+    return progressModel(
+      correctingProposal ? "正在纠正识别结果" : stepDefinitions[currentStage]!.label,
+      steps,
+      "pending",
+      "识别完成后继续复核跨部位分类",
+      correctingProposal
+        ? "模型正在根据校验结果重新整理分类，不会把这一步当作像素修补。"
+        : "页面关闭后任务仍由服务器继续处理。",
+    );
   }
+
+  if (!job.resultRevisionId) {
+    const steps = createCompletedSemanticSteps();
+    steps[3] = withState(steps[3]!, "skipped");
+    steps[4] = withState(steps[4]!, "skipped");
+    steps[5] = withState(steps[5]!, "skipped");
+    return progressModel(
+      "识别提案已保存",
+      steps,
+      "unavailable",
+      "历史提案不会替换皮肤",
+      "对皮肤最新版本运行智能分析，才能继续检查跨部位错分并准备入库。",
+    );
+  }
+
+  const eventState = latestFollowupEvent(events);
+  const followupStatus = semanticFollowup?.status ?? eventState.status;
+  return completedSemanticProgress(
+    followupStatus,
+    eventState.catalogReady,
+    semanticFollowup?.notices.map((notice) => notice.message) ?? [],
+    semanticFollowup?.applicable ?? true,
+  );
+}
+
+function completedSemanticProgress(
+  status: ApiSemanticFollowupStatus | "assessing" | "assessed" | null,
+  catalogReady: boolean,
+  notices: readonly string[],
+  applicable: boolean,
+): SemanticAiProgressModel {
+  const steps = createCompletedSemanticSteps();
+  const notice = notices[0];
+  if (status === "no_repair") {
+    steps[3] = withState(steps[3]!, "completed");
+    steps[4] = withState(steps[4]!, "skipped");
+    steps[5] = withState(steps[5]!, "completed");
+    return progressModel(
+      "跨部位分类复核完成",
+      steps,
+      "ready",
+      "原识别已准备入库",
+      notice ?? "未发现可安全建议的跨部位分类调整；被遮挡的隐藏内容仍可能需要后续补全。",
+    );
+  }
+  if (status === "awaiting_review") {
+    steps[3] = withState(steps[3]!, "completed");
+    if (!applicable) {
+      steps[4] = withState(steps[4]!, "skipped");
+      steps[5] = withState(steps[5]!, "completed");
+      return progressModel(
+        "旧版分类建议仅供对照",
+        steps,
+        "ready",
+        "请重新运行智能分析",
+        "原识别仍可载入和入库；重新分析后才能使用当前分类调整规则。",
+      );
+    }
+    steps[4] = withState(steps[4]!, "current");
+    return progressModel("发现可选分类调整", steps, "ready", "请选择是否使用分类修复版", notice ?? "分类调整不会自动写入皮肤，确认前原版保持不变。");
+  }
+  if (status === "applied") {
+    steps[3] = withState(steps[3]!, "completed");
+    steps[4] = withState(steps[4]!, "completed");
+    steps[5] = withState(steps[5]!, catalogReady ? "completed" : "current");
+    return progressModel(catalogReady ? "分类修复版已准备入库" : "正在保存分类修复版", steps, "ready", "已使用确认的分类调整", notice ?? "分类修复版和原识别都会保留，方便随时对照。");
+  }
+  if (status === "dismissed") {
+    steps[3] = withState(steps[3]!, "completed");
+    steps[4] = withState(steps[4]!, "skipped");
+    steps[5] = withState(steps[5]!, "completed");
+    return progressModel("已保留原识别", steps, "ready", "原识别已准备入库", notice ?? "分类调整建议已跳过，未改动皮肤像素。");
+  }
+  if (status === "assessment_failed") {
+    steps[3] = withState(steps[3]!, "failed");
+    steps[4] = withState(steps[4]!, "skipped");
+    steps[5] = withState(steps[5]!, catalogReady ? "completed" : "current");
+    return progressModel("识别完成，跨部位复核未完成", steps, "ready", "原识别仍可使用", notice ?? "复核失败不会撤销已经完成的识别结果。");
+  }
+  if (status === "assessed") {
+    steps[3] = withState(steps[3]!, "completed");
+    steps[4] = withState(steps[4]!, "current");
+    return progressModel("正在准备跨部位复核结果", steps, "pending", "识别结果已保存", "系统正在判断是否需要显示分类调整建议。");
+  }
+  steps[3] = withState(steps[3]!, "current");
+  return progressModel("正在复核跨部位分类", steps, "pending", "识别结果已保存", "系统正在检查长发等区域是否被分到错误部位。");
+}
+
+function progressModel(
+  headline: string,
+  steps: readonly SemanticAiProgressStep[],
+  handoffState: SemanticAiProgressModel["handoffState"],
+  handoffTitle: string,
+  handoffDetail: string,
+): SemanticAiProgressModel {
+  const completed = steps.filter((step) => step.state === "completed" || step.state === "skipped").length;
+  const progressPercent = Math.round((completed / stepDefinitions.length) * 100);
   return {
-    headline: repairActive
-      ? `自动修复中 · 第 ${maximumAttempt} 次模型调用`
-      : stepDefinitions[currentStage]!.label,
-    progressPercent: Math.round((currentStage / stepDefinitions.length) * 100),
-    progressText: `自动流程 ${currentStage + 1} / 5 · ${job.cancelRequested ? "正在取消当前步骤" : "当前步骤进行中"}`,
+    headline,
+    progressPercent,
+    progressText: `智能流程 ${completed} / ${stepDefinitions.length}`,
     steps,
-    handoffState: "pending",
-    handoffTitle: "机器提案通过校验后进入人工审核",
-    handoffDetail: repairActive
-      ? "首轮提案未通过，正在按校验报告修复；此前成功步骤不会回退。"
-      : "实时日志显示当前步骤的详细事件，流程大纲只表示确定性阶段。",
+    handoffState,
+    handoffTitle,
+    handoffDetail,
   };
 }
 
 function createSteps(
   currentStage: number | null,
-  repairTerminalState?: "completed" | "skipped",
   stoppedState?: "failed" | "cancelled",
 ): SemanticAiProgressStep[] {
   return stepDefinitions.map((definition, index) => {
-    let state: SemanticAiStepState = "pending";
-    if (repairTerminalState && index < stepDefinitions.length - 1) state = "completed";
-    if (repairTerminalState && index === stepDefinitions.length - 1) {
-      state = repairTerminalState;
-    } else if (currentStage !== null && index < currentStage) {
-      state = "completed";
-    } else if (currentStage !== null && index === currentStage) {
-      state = stoppedState ?? "current";
-    }
+    const state: SemanticAiStepState = currentStage === null
+      ? "pending"
+      : index < currentStage
+        ? "completed"
+        : index === currentStage
+          ? stoppedState ?? "current"
+          : "pending";
     return { ...definition, state, stateLabel: stateLabels[state] };
   });
 }
 
-function terminalStage(
-  events: readonly ApiAiJobEvent[],
-  maximumAttempt: number,
-): number {
-  if (maximumAttempt >= 2) return 4;
-  for (const event of events.toReversed()) {
-    if (event.eventType === "validating") return 3;
-    if (event.eventType === "running" || event.eventType === "run_started") return 2;
-    if (event.eventType === "preparing") return 1;
-    if (event.eventType === "queued") return 0;
-  }
-  return maximumAttempt > 0 ? 2 : 0;
+function createCompletedSemanticSteps(): SemanticAiProgressStep[] {
+  const steps = createSteps(null);
+  for (let index = 0; index < 3; index += 1) steps[index] = withState(steps[index]!, "completed");
+  return steps;
 }
 
-function reviewHandoffDetail(reviewItemCount: number): string {
-  return reviewItemCount > 0
-    ? `系统标记了 ${reviewItemCount} 项重点审核问题；其余组件仍可在语义编辑器中逐项确认。`
-    : "系统没有标记重点审核问题；这不等于审核完成，仍需确认组件边界与分类。";
+function withState(step: SemanticAiProgressStep, state: SemanticAiStepState): SemanticAiProgressStep {
+  return { ...step, state, stateLabel: stateLabels[state] };
+}
+
+function terminalStage(events: readonly ApiAiJobEvent[]): number {
+  for (const event of events.toReversed()) {
+    if (event.eventType === "validating") return 2;
+    if (event.eventType === "running" || event.eventType === "run_started") return 1;
+    if (event.eventType === "preparing" || event.eventType === "queued") return 0;
+  }
+  return 0;
+}
+
+function latestFollowupEvent(events: readonly ApiAiJobEvent[]): {
+  readonly status: ApiSemanticFollowupStatus | "assessing" | "assessed" | null;
+  readonly catalogReady: boolean;
+} {
+  let status: ApiSemanticFollowupStatus | "assessing" | "assessed" | null = null;
+  let catalogReady = false;
+  for (const event of events) {
+    if (event.eventType === "occlusion_assessing") status = "assessing";
+    if (event.eventType === "occlusion_assessed") status = "assessed";
+    if (event.eventType === "occlusion_assessment_failed") status = "assessment_failed";
+    if (event.eventType === "repair_review_ready") status = "awaiting_review";
+    if (event.eventType === "repair_review_skipped") status = "no_repair";
+    if (event.eventType === "semantic_repair_applied") status = "applied";
+    if (event.eventType === "semantic_repair_dismissed") status = "dismissed";
+    if (event.eventType === "catalog_ready") catalogReady = true;
+  }
+  return { status, catalogReady };
 }

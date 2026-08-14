@@ -970,6 +970,7 @@ describe("revision API", () => {
       url: `/api/revisions/${sourceImport.revisionId}/ai-analysis`,
       payload: {
         mode: "full",
+        semanticBaseline: "empty",
         provider: "catalog-provider",
         model: "catalog-model",
         reasoningEffort: "medium",
@@ -982,6 +983,28 @@ describe("revision API", () => {
     const jobId = started.json<{ job: { id: string } }>().job.id;
     const job = await waitForAiJob(app, jobId);
     const analyzedRevisionId = job.job.resultRevisionId!;
+    expect(job.semanticFollowup).toMatchObject({
+      status: "no_repair",
+      suggestions: [],
+    });
+    const invalidFollowup = await app.inject({
+      method: "POST",
+      url: `/api/ai-jobs/${jobId}/semantic-followup/apply`,
+      payload: {
+        suggestionId: `followup_${"a".repeat(24)}`,
+        spans: [],
+      },
+    });
+    expect(invalidFollowup.statusCode).toBe(400);
+    const dismissedNoRepair = await app.inject({
+      method: "POST",
+      url: `/api/ai-jobs/${jobId}/semantic-followup/dismiss`,
+      payload: {},
+    });
+    expect(dismissedNoRepair.statusCode).toBe(200);
+    expect(dismissedNoRepair.json()).toMatchObject({
+      semanticFollowup: { status: "no_repair" },
+    });
 
     const listed = await app.inject({
       method: "GET",
@@ -1482,6 +1505,7 @@ describe("revision API", () => {
         model: "model-b",
         reasoningEffort: "high",
         createRevisionOnSuccess: false,
+        semanticBaseline: "current",
       },
     });
     expect(retried.statusCode).toBe(202);
@@ -1493,6 +1517,7 @@ describe("revision API", () => {
       retryOfJobId: firstJobId,
       provider: "provider-b",
       model: "model-b",
+      options: { semanticBaseline: "current" },
     });
 
     const invalid = await app.inject({
@@ -1770,12 +1795,18 @@ interface AiJobApiDetail {
     readonly model: string;
     readonly proposalSummary: string | null;
     readonly advisoryResult: ReplacementPlanProposal | null;
+    readonly options: { readonly semanticBaseline?: "empty" | "current" };
   };
   readonly runs: readonly {
     readonly status: string;
     readonly assets: readonly unknown[];
   }[];
   readonly events: readonly { readonly eventType: string }[];
+  readonly semanticFollowup: {
+    readonly status: string;
+    readonly suggestions: readonly unknown[];
+    readonly appliedRevisionId: string | null;
+  } | null;
 }
 
 async function waitForAiJob(

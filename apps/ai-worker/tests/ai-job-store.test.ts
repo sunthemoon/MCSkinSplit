@@ -143,6 +143,132 @@ describe("AiJobStore restoration recommendations", () => {
     ).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
   });
 
+  it("keeps historical v1 followups readable but rejects multiple v2 suggestions", async () => {
+    const { revisionStore, jobStore, imported } = await setup();
+    const job = jobStore.createJob({
+      kind: "semantic_analysis",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      skillName: "mc-skin-segmenter",
+      skillVersion: "1.2.0",
+      promptVersion: "semantic-proposal-v4-tool-free",
+      options: {
+        mode: "full",
+        semanticBaseline: "empty",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: true,
+      },
+    });
+    jobStore.transitionJob(job.id, "preparing", "preparing");
+    jobStore.transitionJob(job.id, "running", "running", { inputHash: hash });
+    const run = jobStore.createRun(job.id, "runs/v2-cardinality", "airun_v2_cardinality");
+    jobStore.transitionJob(job.id, "validating", "validating");
+    const analyzed = await revisionStore.commitAiSegmentation(imported.revision.id, {
+      state: await revisionStore.readRevisionSemanticState(imported.revision.id),
+      aiJobId: job.id,
+      aiRunId: run.id,
+      provider: "provider-a",
+      model: "model-a",
+      proposalSummary: "cardinality fixture",
+      reviewItems: [],
+    });
+    const suggestions = [
+      {
+        kind: "cross_body_hair_reclassification" as const,
+        id: `followup_${"a".repeat(24)}`,
+        label: "长发 A",
+        targetComponentId: "hair.cross-body-a",
+        sourceComponentIds: ["upper_clothing.main"],
+        candidateRegionIds: ["region_torso_base_001"],
+        spans: [{ surface: "torso.base.front" as const, y: 20, x0: 20, x1: 20 }],
+        pixelCount: 1,
+        confidence: 0.9,
+        reason: "fixture A",
+      },
+      {
+        kind: "cross_body_hair_reclassification" as const,
+        id: `followup_${"b".repeat(24)}`,
+        label: "长发 B",
+        targetComponentId: "hair.cross-body-b",
+        sourceComponentIds: ["upper_clothing.main"],
+        candidateRegionIds: ["region_torso_base_002"],
+        spans: [{ surface: "torso.base.front" as const, y: 20, x0: 21, x1: 21 }],
+        pixelCount: 1,
+        confidence: 0.9,
+        reason: "fixture B",
+      },
+    ];
+    const notices = [{
+      kind: "possible_hidden_clothing" as const,
+      suggestionIds: suggestions.map((suggestion) => suggestion.id),
+      message: "fixture notice",
+    }];
+
+    expect(() => jobStore.createSemanticFollowup({
+      jobId: job.id,
+      resultRevisionId: analyzed.revision.id,
+      assessment: {
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v2",
+        evidenceHash: hash,
+        suggestions,
+        notices,
+      },
+    })).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
+
+    const singleNotice = [{
+      kind: "possible_hidden_clothing" as const,
+      suggestionIds: [suggestions[0]!.id],
+      message: "single fixture notice",
+    }];
+    expect(() => jobStore.createSemanticFollowup({
+      jobId: job.id,
+      resultRevisionId: analyzed.revision.id,
+      assessment: {
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v1",
+        evidenceHash: hash,
+        suggestions: [{ ...suggestions[0]!, pixelCount: 2 }],
+        notices: singleNotice,
+      },
+    })).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
+    expect(() => jobStore.createSemanticFollowup({
+      jobId: job.id,
+      resultRevisionId: analyzed.revision.id,
+      assessment: {
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v1",
+        evidenceHash: hash,
+        suggestions: [{
+          ...suggestions[0]!,
+          spans: [suggestions[0]!.spans[0]!, suggestions[0]!.spans[0]!],
+          pixelCount: 2,
+        }],
+        notices: singleNotice,
+      },
+    })).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
+
+    const historical = jobStore.createSemanticFollowup({
+      jobId: job.id,
+      resultRevisionId: analyzed.revision.id,
+      assessment: {
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v1",
+        evidenceHash: hash,
+        suggestions,
+        notices,
+      },
+    });
+    expect(historical.assessment).toMatchObject({
+      algorithmVersion: "cross-body-hair-reclassification-v1",
+      suggestions: [{ id: suggestions[0]!.id }, { id: suggestions[1]!.id }],
+    });
+  });
+
   it("enforces the persisted kind/composition shape in migration 008", async () => {
     const { revisionStore, imported } = await setup();
     const composition = await revisionStore.createComposition({

@@ -378,7 +378,8 @@ stderr。默认单次响应通过 `--output-last-message` 捕获，最终 JSON �
 与像素归属 Validator 严格校验。兼容端点可通过 `AI_USE_OUTPUT_SCHEMA=true`
 显式加入 `--output-schema`；该模式发生结构化传输失败时才允许移除参数重试，
 并继续执行同一宿主校验。当前 Skill 版本为 `1.2.0`，prompt 版本为
-`semantic-proposal-v3-tool-free`。
+`semantic-proposal-v4-tool-free`；v4 明确允许长发从头部延伸到躯干表面，并记录
+干净/现有语义基线。
 
 ### 方案 C：Responses API，部署型补充
 
@@ -2539,6 +2540,53 @@ feat(web): add responsive workflow navigation
 
 ---
 
+## M15：玩家优先的干净识别与分类修复
+
+目标：将语义识别、跨部位复核、人工确认和目录版本串成一条面向
+普通玩家的持久化流程，同时严格区分“分类修正”和“生成被遮挡像素”。
+
+实现：
+
+1. 新语义 Job 默认使用 `semanticBaseline: "empty"`，模型不接收旧组件
+   标签；高级设置可选 `"current"`，仅将现有组件摘要作为必须重新
+   验证的软先验。两种模式都在分析包中保留不可变上一版拆分供 Host
+   校验和审计。
+2. 普通界面仅保留一个主操作“智能分析皮肤”；Provider、Model、
+   Reasoning、识别基线、重试、Run 和技术日志收进高级区域。
+3. 固定六阶段进度：准备识别、识别皮肤部件、校验识别结果、复核跨部位
+   分类、确认分类修复、准备分析目录。模型对无效 JSON 的修复仍属于
+   识别/校验阶段，不得显示为皮肤像素修补。
+4. 成功的 `ai_segment` Revision 由 Host 执行确定性跨部位复核。当前
+   `cross-body-hair-reclassification-v2` 可将同一躯干表面上互相靠近、
+   颜色符合头发的碎片候选区域合并为一个发束形态后再检查纵向延伸，
+   并只能将这些精确 spans 建议从服装重分类到目标头发组件。
+   若多个头发组件共同支持同一组证据，则使用一个确定性的“跨部位长发”
+   组件承载一键分类调整。候选像素仍在每个 UV 表面内独立验证；
+   该规则不调用模型、不生成坐标、不修改 RGBA。
+   v1 证据仍可读取和审计，但待确认的 v1 建议始终只读；
+   用户重新运行分析并生成新的 v2 evidence 后才能应用。
+5. 有建议时用户只需选择“使用分类修复”或“保留原识别”。应用前重新
+   加载不可变快照并再评估，严格校验 evidence hash 和 suggestion ID。
+   通过时从 AI 结果创建独立 Branch，并通过普通语义操作创建新的
+   不可变 Revision。
+6. 已分析目录仍以原 `ai_segment` Revision 为根。已应用的修复 Revision
+   经完整性校验后以“分类修复版”嵌套展示，并从该 Revision 自身重新派生
+   完整头发/服装/饰品组；原版、归档状态、Part/Bundle 生命周期均不被改写。
+7. Job 事件持久化跨部位检查开始/完成、等待审核/跳过、应用/保留
+   和目录就绪。跟进失败不撤销已经验证通过的语义 Revision。
+
+边界：
+
+- `no_repair` 只表示保守规则未找到可安全建议的跨部位分类，不证明
+  没有遮挡、不证明服装/头发已完整，也不证明隐藏像素可恢复。
+- M15 不生成被长发、服装或饰品覆盖的像素。隐藏内容补全必须在后续
+  建立区分原图/推导/生成像素的 provenance、预览和显式确认合同后实现。
+
+详细合同见 [`ai-analysis.md`](ai-analysis.md) 与
+[`analyzed-skin-catalog-and-bundles.md`](analyzed-skin-catalog-and-bundles.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2562,7 +2610,8 @@ feat(web): add responsive workflow navigation
 | S13 | M12 长页面工作流定位 | S12 |
 | S14 | M13 语义 JSON 单次传输与诚实诊断 | S13 |
 | S15 | M14 分析结果目录可逆归档 | S8、S12、S14 |
-| S16 | 综合测试与审核 | 全部 |
+| S16 | M15 玩家优先干净识别与分类修复 | S14、S15 |
+| S17 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

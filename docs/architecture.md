@@ -12,6 +12,7 @@ Browser UI
     -> Part repair service (M8)
     -> Composition restoration service (M9)
     -> Restoration recommendation job service (M10)
+    -> Semantic follow-up service (M15)
 
 Deterministic skin core
   -> PNG RGBA decoder
@@ -32,6 +33,7 @@ AI worker
   -> schema and pixel-ownership validator
   -> proposal returned to revision service
   -> separate restoration-recommendation workspace and exact candidate-ID validator
+  -> deterministic post-segmentation assessment and explicit follow-up actions
 
 Part repair service
   -> append-only part-edit Revisions
@@ -47,6 +49,12 @@ Restoration recommendation job service
   -> public candidate catalog and user intent only
   -> repository replacement-planner Skill and shared provider telemetry
   -> advisory ranked IDs loaded for review, never automatic plan application
+
+Semantic follow-up service
+  -> clean semantic baseline by default; existing labels are an advanced soft prior
+  -> deterministic cross-body classification suggestions over exact candidate spans
+  -> user-confirmed immutable semantic Revision on a dedicated Branch
+  -> original catalog result plus optional verified classification-repair variant
 ```
 
 ## M0 decisions
@@ -119,7 +127,9 @@ The detailed contract is in
   starts `codex exec` without a shell in a read-only, tool-free profile, inlines
   the immutable semantic contract, attaches only the prepared skin views, applies
   timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.2.0`
-  and prompt `semantic-proposal-v3-tool-free` identify this runtime contract.
+  and prompt `semantic-proposal-v4-tool-free` identify the current runtime
+  contract. Prompt v4 adds explicit cross-body long-hair guidance and the clean/
+  current semantic-baseline identity.
 - The model returns only a JSON proposal captured by the provider. It cannot read
   or write the Run workspace. Host-side Ajv and deterministic pixel checks require
   complete, non-overlapping ownership before the proposal is converted to semantic
@@ -271,15 +281,48 @@ The detailed contract is in
   opened cannot bypass the lifecycle decision. Historical previews and committed
   snapshots continue to resolve retired IDs.
 
+## M15 decisions
+
+- New semantic Jobs use `semanticBaseline: "empty"` unless the advanced request
+  explicitly selects `"current"`. Both modes retain the immutable previous
+  segmentation in the analysis pack for host validation and audit; only current
+  mode sends a compact component summary to the model as a non-authoritative prior.
+- The player surface has one primary analysis action and six persistent stages:
+  preparation, model identification, host validation, deterministic cross-body
+  assessment, user confirmation when needed, and catalog availability. Provider,
+  model, reasoning, retry, Run, and raw-event controls remain available under
+  advanced disclosure.
+- `packages/skin-analysis-pack` owns the deterministic semantic follow-up
+  assessment. Current algorithm `cross-body-hair-reclassification-v2` can group
+  nearby matching fragments on the same torso surface before testing the combined
+  drape and can suggest reclassifying their exact spans from clothing to an
+  established hair component. Compatible evidence backed by multiple hair
+  components is represented by one deterministic cross-body hair component. The
+  assessor does not call a model or author coordinates, colors, transparency, or
+  new pixels. Version v1 remains readable for historical Job evidence, but pending
+  v1 suggestions are read-only and require a new analysis before application.
+- `apps/ai-worker` persists assessment identity and state next to the successful
+  semantic Job. Apply reloads and reassesses the immutable result, checks the
+  evidence hash and suggestion ID, creates a dedicated Branch, and submits the
+  exact spans through the normal semantic Revision service. Dismiss has no
+  Revision side effect.
+- `packages/skin-revision` keeps the successful AI Revision as the catalog root.
+  An applied follow-up Revision is integrity-loaded and exposed beneath it as
+  `分类修复版`, with groups derived from that Revision rather than copied from the
+  original. Catalog archive and Part/Bundle lifecycle remain independent.
+- Follow-up success is classification repair only. `no_repair` means no safe rule-
+  based suggestion was found; it does not prove that no content is occluded.
+  Generating hidden clothing or hair pixels remains outside M15.
+
 ## Package boundaries
 
 ```text
-apps/web                 UI, editors, AI consoles, compositor, repair, restoration, and preview adapters
-apps/api                 HTTP API, revision, AI, composition, repair, restoration, and recommendation orchestration
-apps/ai-worker           persistent semantic/recommendation jobs, validation, and audit assets
+apps/web                 UI, editors, six-stage AI review, compositor, repair, restoration, and preview adapters
+apps/api                 HTTP API, revision, AI follow-up, composition, repair, restoration, and recommendation orchestration
+apps/ai-worker           persistent semantic/recommendation jobs, follow-up actions, validation, and audit assets
 packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, and restoration (M1-M9)
-packages/skin-revision   immutable snapshots, parts, repair histories, AI audit, and compositions
+packages/skin-revision   immutable snapshots, catalog variants, parts, repair histories, AI audit, and compositions
 packages/skin-compositor ordered layers, restoration, and deterministic conflict evaluation (M6/M9)
-packages/skin-analysis-pack deterministic model inputs, candidate catalogs, and manifests (M5/M10)
+packages/skin-analysis-pack deterministic model inputs, candidate catalogs, follow-up assessment, and manifests (M5/M10/M15)
 packages/ai-provider     replaceable model execution and task-specific validation (M5/M10)
 ```

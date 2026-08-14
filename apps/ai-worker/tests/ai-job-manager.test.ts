@@ -17,7 +17,10 @@ import {
   type ImportProjectResult,
 } from "@mc-skin-split/skin-revision";
 import { afterEach, describe, expect, it } from "vitest";
-import { AiJobManager } from "../src/ai-job-manager";
+import {
+  AiJobManager,
+  type AiJobManagerOptions,
+} from "../src/ai-job-manager";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const fixturePath = resolve(
@@ -100,6 +103,312 @@ describe("AiJobManager", () => {
     });
     expect((await store.readRevisionSkinPng(imported.revision.id))).toEqual(
       await store.readRevisionSkinPng(revision.id),
+    );
+    expect(detail.semanticFollowup).toMatchObject({
+      status: "no_repair",
+      algorithmVersion: "cross-body-hair-reclassification-v2",
+      applicable: true,
+      suggestions: [],
+    });
+    expect(detail.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        "occlusion_assessing",
+        "occlusion_assessed",
+        "repair_review_skipped",
+        "catalog_ready",
+      ]),
+    );
+  });
+
+  it("persists and applies one review-only cross-body semantic repair", async () => {
+    let suggestionRegion: ProviderAnalysisInput["pack"]["candidateRegions"]["regions"][number] | null = null;
+    const provider = new ScriptedProvider("followup-provider", ({ pack }) => {
+      const [hairRegion, clothingRegion, ...remaining] =
+        pack.candidateRegions.regions;
+      suggestionRegion = clothingRegion!;
+      return {
+        schemaVersion: "1.0",
+        sourceRevisionId: pack.job.sourceRevisionId,
+        modelAssessment: { armType: "slim", confidence: 0.9 },
+        components: [
+          {
+            instanceId: "hair.main",
+            displayName: "主头发",
+            category: "hair",
+            subtype: null,
+            confidence: 0.9,
+            candidateRegionIds: [hairRegion!.id],
+            pixelOverrides: { add: [], remove: [] },
+            relations: {
+              attachedTo: null,
+              pairedWith: [],
+              sameOutfitGroup: null,
+            },
+            notes: "",
+          },
+          {
+            instanceId: "outfit.main",
+            displayName: "上装",
+            category: "upper_clothing",
+            subtype: null,
+            confidence: 0.8,
+            candidateRegionIds: [clothingRegion!.id],
+            pixelOverrides: { add: [], remove: [] },
+            relations: {
+              attachedTo: null,
+              pairedWith: [],
+              sameOutfitGroup: "outfit.main",
+            },
+            notes: "",
+          },
+        ],
+        unassignedCandidateRegionIds: remaining.map((region) => region.id),
+        reviewItems: [],
+        summary: "测试跨部位分类修复",
+      } satisfies AnalysisProposal;
+    });
+    const evidenceHash = `sha256:${"e".repeat(64)}`;
+    const { manager, store, imported } = await setup([provider], {
+      semanticFollowupAssessor: () => ({
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v2",
+        evidenceHash,
+        suggestions: [
+          {
+            kind: "cross_body_hair_reclassification",
+            id: `followup_${"a".repeat(24)}`,
+            label: "疑似跨部位长发",
+            targetComponentId: "hair.cross-body-abcdef123456",
+            sourceComponentIds: ["outfit.main"],
+            candidateRegionIds: [suggestionRegion!.id],
+            spans: suggestionRegion!.spans,
+            pixelCount: suggestionRegion!.pixelCount,
+            confidence: 0.92,
+            reason: "测试建议",
+          },
+        ],
+        notices: [
+          {
+            kind: "possible_hidden_clothing",
+            suggestionIds: [`followup_${"a".repeat(24)}`],
+            message: "长发后方的衣服仍需补全确认。",
+          },
+        ],
+      }),
+    });
+    const queued = manager.startAnalysis(imported.revision.id, {
+      mode: "full",
+      semanticBaseline: "empty",
+      provider: provider.providerName,
+      model: "followup-model",
+      reasoningEffort: "medium",
+      taxonomyLevel: "coarse",
+      focus: ["hair", "upper_clothing"],
+      createRevisionOnSuccess: true,
+    });
+    await manager.waitForJob(queued.id);
+    const pending = manager.getJobDetail(queued.id);
+    expect(pending.semanticFollowup).toMatchObject({
+      status: "awaiting_review",
+      algorithmVersion: "cross-body-hair-reclassification-v2",
+      applicable: true,
+      evidenceHash,
+      suggestions: [
+        {
+          id: `followup_${"a".repeat(24)}`,
+          pixelCount: suggestionRegion!.pixelCount,
+        },
+      ],
+    });
+    expect(pending.semanticFollowup).not.toHaveProperty(
+      "suggestions.0.spans",
+    );
+
+    const applied = await manager.applySemanticFollowup(
+      queued.id,
+      `followup_${"a".repeat(24)}`,
+    );
+    expect(applied.semanticFollowup).toMatchObject({
+      status: "applied",
+      appliedRevisionId: expect.any(String),
+    });
+    expect(store.listRevisions(imported.project.id)).toHaveLength(4);
+    const repairBranch = store.listBranches(imported.project.id).find(
+      (branch) => branch.name.startsWith("semantic-repair-"),
+    );
+    expect(repairBranch).toMatchObject({
+      baseRevisionId: pending.job.resultRevisionId,
+      headRevisionId: applied.semanticFollowup!.appliedRevisionId,
+    });
+    const repaired = await store.readRevisionSemanticState(
+      applied.semanticFollowup!.appliedRevisionId!,
+    );
+    expect(
+      suggestionRegion!.pixelIds.every(
+        (pixelId) =>
+          repaired.masks["hair.cross-body-abcdef123456"]![pixelId] === 1,
+      ),
+    ).toBe(true);
+    expect(
+      repaired.document.components.find(
+        (component) => component.instanceId === "hair.cross-body-abcdef123456",
+      ),
+    ).toMatchObject({ displayName: "跨部位长发", category: "hair" });
+    expect(applied.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        "repair_review_ready",
+        "semantic_repair_applied",
+        "catalog_ready",
+      ]),
+    );
+
+    const revisionCountAfterApply = store.listRevisions(imported.project.id).length;
+    const branchCountAfterApply = store.listBranches(imported.project.id).length;
+    const appliedAgain = await manager.applySemanticFollowup(
+      queued.id,
+      `followup_${"a".repeat(24)}`,
+    );
+    expect(appliedAgain.semanticFollowup?.appliedRevisionId).toBe(
+      applied.semanticFollowup!.appliedRevisionId,
+    );
+    expect(store.listRevisions(imported.project.id)).toHaveLength(
+      revisionCountAfterApply,
+    );
+    expect(store.listBranches(imported.project.id)).toHaveLength(
+      branchCountAfterApply,
+    );
+    expect(
+      appliedAgain.events.filter(
+        (event) => event.eventType === "semantic_repair_applied",
+      ),
+    ).toHaveLength(1);
+    await expect(
+      manager.applySemanticFollowup(queued.id, `followup_${"b".repeat(24)}`),
+    ).rejects.toMatchObject({ code: "AI_FOLLOWUP_CONFLICT", statusCode: 409 });
+    expect(store.listRevisions(imported.project.id)).toHaveLength(
+      revisionCountAfterApply,
+    );
+    expect(store.listBranches(imported.project.id)).toHaveLength(
+      branchCountAfterApply,
+    );
+  });
+
+  it("keeps a historical v1 followup readable but requires fresh v2 analysis before apply", async () => {
+    let suggestionRegion: ProviderAnalysisInput["pack"]["candidateRegions"]["regions"][number] | null = null;
+    const provider = new ScriptedProvider("historical-followup-provider", ({ pack }) => {
+      suggestionRegion = pack.candidateRegions.regions[0]!;
+      return validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions);
+    });
+    const evidenceHash = `sha256:${"d".repeat(64)}`;
+    const suggestionId = `followup_${"c".repeat(24)}`;
+    const { manager, store, imported } = await setup([provider], {
+      semanticFollowupAssessor: () => ({
+        schemaVersion: "1.0",
+        algorithmVersion: "cross-body-hair-reclassification-v1",
+        evidenceHash,
+        suggestions: [{
+          kind: "cross_body_hair_reclassification",
+          id: suggestionId,
+          label: "历史长发建议",
+          targetComponentId: "hair.cross-body-historical",
+          sourceComponentIds: ["hair.main"],
+          candidateRegionIds: [suggestionRegion!.id],
+          spans: suggestionRegion!.spans,
+          pixelCount: suggestionRegion!.pixelCount,
+          confidence: 0.9,
+          reason: "v1 fixture",
+        }],
+        notices: [{
+          kind: "possible_hidden_clothing",
+          suggestionIds: [suggestionId],
+          message: "historical fixture",
+        }],
+      }),
+    });
+    const queued = manager.startAnalysis(imported.revision.id, {
+      mode: "full",
+      semanticBaseline: "empty",
+      provider: provider.providerName,
+      model: "historical-followup-model",
+      reasoningEffort: "medium",
+      taxonomyLevel: "coarse",
+      focus: ["hair"],
+      createRevisionOnSuccess: true,
+    });
+    await manager.waitForJob(queued.id);
+
+    expect(manager.jobStore.getSemanticFollowup(queued.id)?.assessment)
+      .toMatchObject({
+        algorithmVersion: "cross-body-hair-reclassification-v1",
+        suggestions: [{ id: suggestionId }],
+      });
+    expect(manager.getJobDetail(queued.id).semanticFollowup).toMatchObject({
+      status: "awaiting_review",
+      algorithmVersion: "cross-body-hair-reclassification-v1",
+      applicable: false,
+    });
+    const revisionCount = store.listRevisions(imported.project.id).length;
+    const branchCount = store.listBranches(imported.project.id).length;
+    await expect(manager.applySemanticFollowup(queued.id, suggestionId))
+      .rejects.toMatchObject({
+        code: "AI_FOLLOWUP_STALE",
+        statusCode: 409,
+        details: {
+          storedAlgorithmVersion: "cross-body-hair-reclassification-v1",
+          currentAlgorithmVersion: "cross-body-hair-reclassification-v2",
+        },
+      });
+    expect(store.listRevisions(imported.project.id)).toHaveLength(revisionCount);
+    expect(store.listBranches(imported.project.id)).toHaveLength(branchCount);
+    expect(
+      manager.getJobDetail(queued.id).events.some(
+        (event) => event.eventType === "semantic_repair_applied",
+      ),
+    ).toBe(false);
+
+    const resultRevisionId = manager.getJobDetail(queued.id).job.resultRevisionId!;
+    const historicalBranch = await store.branchFromRevision(resultRevisionId, {
+      name: "historical-semantic-repair-fixture",
+      actorId: "semantic-followup",
+    });
+    const durableHistoricalApply = await store.applyManualOperation(
+      historicalBranch.revision.id,
+      {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.cross-body-historical",
+            displayName: "历史跨部位长发",
+            category: "hair",
+          },
+          spans: suggestionRegion!.spans,
+        },
+        actorId: "semantic-followup",
+        semanticFollowup: {
+          jobId: queued.id,
+          resultRevisionId,
+          suggestionId,
+          evidenceHash,
+        },
+      },
+    );
+    const durableRevisionCount = store.listRevisions(imported.project.id).length;
+    const durableBranchCount = store.listBranches(imported.project.id).length;
+    const historicalAppliedAgain = await manager.applySemanticFollowup(
+      queued.id,
+      suggestionId,
+    );
+    expect(historicalAppliedAgain.semanticFollowup).toMatchObject({
+      status: "applied",
+      algorithmVersion: "cross-body-hair-reclassification-v1",
+      applicable: false,
+      appliedRevisionId: durableHistoricalApply.revision.id,
+    });
+    expect(store.listRevisions(imported.project.id)).toHaveLength(
+      durableRevisionCount,
+    );
+    expect(store.listBranches(imported.project.id)).toHaveLength(
+      durableBranchCount,
     );
   });
 
@@ -257,6 +566,7 @@ describe("AiJobManager", () => {
       model: "model-b",
       reasoningEffort: "high",
       createRevisionOnSuccess: false,
+      semanticBaseline: "current",
     });
     const finishedRetry = await manager.waitForJob(retry.id);
 
@@ -272,6 +582,7 @@ describe("AiJobManager", () => {
       retryOfJobId: first.id,
       provider: "provider-b",
       model: "model-b",
+      options: { semanticBaseline: "current" },
     });
     expect(finishedRetry.inputHash).not.toBe(
       manager.getJobDetail(first.id).job.inputHash,
@@ -311,7 +622,7 @@ describe("AiJobManager", () => {
 
     expect(retry).toMatchObject({
       skillVersion: "1.2.0",
-      promptVersion: "semantic-proposal-v3-tool-free",
+      promptVersion: "semantic-proposal-v4-tool-free",
     });
     await manager.waitForJob(retry.id);
   });
@@ -624,6 +935,9 @@ describe("AiJobManager", () => {
     await expect(
       manager.retryJob(first.id, { createRevisionOnSuccess: true }),
     ).rejects.toMatchObject({ code: "INVALID_AI_JOB", statusCode: 400 });
+    await expect(
+      manager.retryJob(first.id, { semanticBaseline: "empty" }),
+    ).rejects.toMatchObject({ code: "INVALID_AI_JOB", statusCode: 400 });
     expect(provider.replacementCalls).toBe(1);
 
     await store.setCompositionRestorationPlan(composition.composition.id, {
@@ -720,7 +1034,10 @@ class ScriptedReplacementProvider implements SkinSemanticAiProvider {
   }
 }
 
-async function setup(providers: readonly SkinSemanticAiProvider[]): Promise<{
+async function setup(
+  providers: readonly SkinSemanticAiProvider[],
+  options: Pick<AiJobManagerOptions, "semanticFollowupAssessor"> = {},
+): Promise<{
   readonly manager: AiJobManager;
   readonly store: RevisionStore;
   readonly imported: ImportProjectResult;
@@ -739,6 +1056,7 @@ async function setup(providers: readonly SkinSemanticAiProvider[]): Promise<{
     dataDirectory,
     skillDirectory,
     recoverInterruptedJobs: false,
+    ...options,
   });
   cleanups.push(async () => {
     await manager.close();

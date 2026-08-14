@@ -271,6 +271,11 @@ interface RetryAiJobBody {
   readonly model?: string;
   readonly reasoningEffort?: AnalysisReasoningEffort;
   readonly createRevisionOnSuccess?: boolean;
+  readonly semanticBaseline?: "empty" | "current";
+}
+
+interface ApplySemanticFollowupBody {
+  readonly suggestionId: string;
 }
 
 export function buildApi(options: ApiOptions = {}): FastifyInstance {
@@ -1143,6 +1148,23 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     async (request) => aiJobManager.getJobDetail(request.params.jobId),
   );
 
+  app.post<{ Params: AiJobParams; Body: ApplySemanticFollowupBody }>(
+    "/api/ai-jobs/:jobId/semantic-followup/apply",
+    { schema: { body: applySemanticFollowupSchema } },
+    async (request) =>
+      await aiJobManager.applySemanticFollowup(
+        request.params.jobId,
+        request.body.suggestionId,
+      ),
+  );
+
+  app.post<{ Params: AiJobParams; Body: Record<string, never> }>(
+    "/api/ai-jobs/:jobId/semantic-followup/dismiss",
+    { schema: { body: emptyObjectSchema } },
+    async (request) =>
+      await aiJobManager.dismissSemanticFollowup(request.params.jobId),
+  );
+
   app.get<{ Params: AiJobParams }>(
     "/api/ai-jobs/:jobId/events",
     async (request) => {
@@ -1782,6 +1804,7 @@ const startAiAnalysisSchema = {
   ],
   properties: {
     mode: { const: "full" },
+    semanticBaseline: { type: "string", enum: ["empty", "current"] },
     provider: {
       type: "string",
       minLength: 1,
@@ -1798,6 +1821,18 @@ const startAiAnalysisSchema = {
       items: { type: "string", enum: SEMANTIC_CATEGORIES },
     },
     createRevisionOnSuccess: { type: "boolean" },
+  },
+} as const;
+
+const applySemanticFollowupSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["suggestionId"],
+  properties: {
+    suggestionId: {
+      type: "string",
+      pattern: "^followup_[0-9a-f]{24}$",
+    },
   },
 } as const;
 
@@ -1841,6 +1876,7 @@ const retryAiJobSchema = {
     model: { type: "string", minLength: 1, maxLength: 120 },
     reasoningEffort: { type: "string", enum: ANALYSIS_REASONING_EFFORTS },
     createRevisionOnSuccess: { type: "boolean" },
+    semanticBaseline: { type: "string", enum: ["empty", "current"] },
   },
 } as const;
 

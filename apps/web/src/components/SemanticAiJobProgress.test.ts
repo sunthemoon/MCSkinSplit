@@ -5,6 +5,7 @@ import type {
   ApiAiJobDetail,
   ApiAiJobEvent,
   ApiAiJobStatus,
+  ApiSemanticFollowup,
 } from "../lib/revisionApi";
 import {
   SemanticAiJobProgress,
@@ -12,122 +13,162 @@ import {
 } from "./SemanticAiJobProgress";
 
 describe("semantic AI job progress", () => {
-  it("shows the complete outline before any job starts", () => {
+  it("shows the player-first six-stage outline before a job starts", () => {
     const html = renderToStaticMarkup(
       createElement(SemanticAiJobProgress, { detail: null }),
     );
 
-    expect(html).toContain("尚未开始");
-    expect(html).toContain("任务排队");
-    expect(html).toContain("隔离输入");
-    expect(html).toContain("Codex 分类");
-    expect(html).toContain("确定性校验");
-    expect(html).toContain("修复与复检");
-    expect(html).toContain("自动流程 0 / 5");
-    expect(html).not.toContain('aria-current="step"');
+    expect(html).toContain("准备识别");
+    expect(html).toContain("识别皮肤部件");
+    expect(html).toContain("校验识别结果");
+    expect(html).toContain("复核跨部位分类");
+    expect(html).toContain("确认分类修复");
+    expect(html).toContain("准备分析目录");
+    expect(html).toContain("智能流程 0 / 6");
   });
 
   it.each([
-    ["queued", "任务排队", 0],
-    ["preparing", "隔离输入", 20],
-    ["running", "Codex 分类", 40],
-    ["validating", "确定性校验", 60],
-  ] as const)("maps %s to a visible current step", (status, label, percent) => {
+    ["queued", "准备识别", 0],
+    ["preparing", "准备识别", 0],
+    ["running", "识别皮肤部件", 17],
+    ["validating", "校验识别结果", 33],
+  ] as const)("maps %s to one honest current stage", (status, label, percent) => {
     const model = buildSemanticAiProgress(jobDetail(status));
     expect(model.headline).toBe(label);
     expect(model.progressPercent).toBe(percent);
-    expect(model.steps.filter((step) => step.state === "current")).toHaveLength(1);
     expect(model.steps.find((step) => step.state === "current")?.label).toBe(label);
   });
 
-  it("keeps progress monotonic during the validation repair loop", () => {
-    const detail = jobDetail("running", {
+  it("describes repeated JSON proposal attempts as classification correction", () => {
+    const model = buildSemanticAiProgress(jobDetail("running", {
       runs: [run(1, "failed"), run(2, "running")],
+    }));
+
+    expect(model.headline).toBe("正在纠正识别结果");
+    expect(model.steps[1]).toMatchObject({ label: "识别皮肤部件", state: "current" });
+    expect(model.steps[4]).toMatchObject({ label: "确认分类修复", state: "pending" });
+    expect(model.handoffDetail).toContain("不会把这一步当作像素修补");
+  });
+
+  it("pauses below 100 percent while a repair suggestion awaits review", () => {
+    const model = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      semanticFollowup: followup("awaiting_review"),
+    }));
+
+    expect(model.progressPercent).toBe(67);
+    expect(model.steps[4]).toMatchObject({ state: "current" });
+    expect(model.steps[5]).toMatchObject({ state: "pending" });
+    expect(model.handoffTitle).toContain("请选择");
+  });
+
+  it("marks historical suggestions as read-only and asks for a fresh analysis", () => {
+    const legacy = {
+      ...followup("awaiting_review"),
+      algorithmVersion: "cross-body-hair-reclassification-v1",
+      applicable: false,
+    };
+    const model = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      semanticFollowup: legacy,
+    }));
+
+    expect(model.headline).toBe("旧版分类建议仅供对照");
+    expect(model.steps[4]).toMatchObject({ state: "skipped" });
+    expect(model.handoffTitle).toBe("请重新运行智能分析");
+  });
+
+  it("maps persisted occlusion events without claiming a repair early", () => {
+    const assessing = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      events: [event(1, "occlusion_assessing")],
+    }));
+    expect(assessing.steps[3]).toMatchObject({ state: "current" });
+
+    const assessed = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      events: [event(1, "occlusion_assessed")],
+    }));
+    expect(assessed.steps[3]).toMatchObject({ state: "completed" });
+    expect(assessed.steps[4]).toMatchObject({ state: "current" });
+    expect(assessed.progressPercent).toBeLessThan(100);
+  });
+
+  it("finishes with an applied or skipped classification repair backed by persisted state", () => {
+    const applied = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      semanticFollowup: followup("applied"),
+      events: [event(1, "catalog_ready")],
+    }));
+    expect(applied.progressPercent).toBe(100);
+    expect(applied.headline).toBe("分类修复版已准备入库");
+
+    const noRepair = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      semanticFollowup: followup("no_repair"),
+    }));
+    expect(noRepair.progressPercent).toBe(100);
+    expect(noRepair.steps[4]?.state).toBe("skipped");
+    expect(noRepair.headline).toBe("跨部位分类复核完成");
+    expect(noRepair.handoffDetail).toContain("隐藏内容仍可能需要后续补全");
+
+    const eventOnly = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
       events: [
-        event(1, "validating"),
-        event(2, "run_started", { attempt: 2 }),
-        event(3, "running"),
+        event(1, "occlusion_assessed"),
+        event(2, "repair_review_skipped"),
+        event(3, "catalog_ready"),
       ],
-    });
-    const model = buildSemanticAiProgress(detail);
-
-    expect(model.headline).toBe("自动修复中 · 第 2 次模型调用");
-    expect(model.progressPercent).toBe(80);
-    expect(model.steps[3]).toMatchObject({ label: "确定性校验", state: "completed" });
-    expect(model.steps[4]).toMatchObject({ label: "修复与复检", state: "current" });
-    expect(model.handoffDetail).toContain("首轮提案未通过");
+    }));
+    expect(eventOnly.steps[4]?.state).toBe("skipped");
+    expect(eventOnly.headline).toBe("跨部位分类复核完成");
   });
 
-  it("separates machine success from required human review", () => {
-    const withReview = buildSemanticAiProgress(jobDetail("succeeded", {
-      reviewItemCount: 2,
-      resultRevisionId: "revision_result",
-    }));
-    expect(withReview.progressPercent).toBe(100);
-    expect(withReview.steps[4]?.state).toBe("skipped");
-    expect(withReview.handoffState).toBe("ready");
-    expect(withReview.handoffTitle).toContain("等待人工确认");
-    expect(withReview.handoffDetail).toContain("2 项重点审核问题");
+  it("marks unavailable followup stages as skipped for a proposal-only success", () => {
+    const model = buildSemanticAiProgress(jobDetail("succeeded"));
 
-    const withoutRevision = buildSemanticAiProgress(jobDetail("succeeded"));
-    expect(withoutRevision.handoffState).toBe("unavailable");
-    expect(withoutRevision.handoffTitle).toContain("仅保留为审计记录");
-    expect(withoutRevision.handoffDetail).toContain("Branch HEAD");
-    expect(withoutRevision.handoffDetail).not.toContain("语义编辑器中逐项确认");
-
-    const withoutReviewItems = buildSemanticAiProgress(jobDetail("succeeded", {
-      resultRevisionId: "revision_result",
-    }));
-    expect(withoutReviewItems.handoffDetail).toContain("不等于审核完成");
+    expect(model.progressPercent).toBe(100);
+    expect(model.steps.slice(3)).toEqual([
+      expect.objectContaining({ state: "skipped" }),
+      expect.objectContaining({ state: "skipped" }),
+      expect.objectContaining({ state: "skipped" }),
+    ]);
   });
 
-  it.each(["failed", "cancelled"] as const)(
-    "stops at the evidenced phase when the job is %s",
-    (status) => {
-      const model = buildSemanticAiProgress(jobDetail(status, {
-        events: [event(1, "preparing"), event(2, "running")],
-        runs: [run(1, status)],
-      }));
+  it("keeps a successful semantic result usable when assessment fails", () => {
+    const model = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      semanticFollowup: followup("assessment_failed"),
+    }));
 
-      expect(model.progressPercent).toBe(40);
-      expect(model.steps[2]?.state).toBe(status);
-      expect(model.steps[3]?.state).toBe("pending");
-      expect(model.handoffState).toBe("unavailable");
-    },
-  );
+    expect(model.steps[3]?.state).toBe("failed");
+    expect(model.handoffState).toBe("ready");
+    expect(model.handoffTitle).toBe("原识别仍可使用");
 
-  it("marks cancellation in progress without changing the current phase", () => {
-    const detail = jobDetail("validating", { cancelRequested: true });
-    const html = renderToStaticMarkup(
-      createElement(SemanticAiJobProgress, { detail }),
-    );
-
-    expect(html).toContain("正在取消");
-    expect(html.match(/aria-current="step"/g)).toHaveLength(1);
-    expect(html).toContain('role="progressbar"');
-    expect(html).toContain('aria-valuenow="60"');
+    const eventOnly = buildSemanticAiProgress(jobDetail("succeeded", {
+      resultRevisionId: "revision_result",
+      events: [
+        event(1, "occlusion_assessing"),
+        event(2, "occlusion_assessment_failed"),
+        event(3, "catalog_ready"),
+      ],
+    }));
+    expect(eventOnly.steps[3]?.state).toBe("failed");
+    expect(eventOnly.handoffTitle).toBe("原识别仍可使用");
   });
 });
 
 interface JobDetailOverrides {
   readonly runs?: ApiAiJobDetail["runs"];
   readonly events?: readonly ApiAiJobEvent[];
-  readonly reviewItemCount?: number;
   readonly resultRevisionId?: string | null;
-  readonly cancelRequested?: boolean;
+  readonly semanticFollowup?: ApiSemanticFollowup | null;
 }
 
 function jobDetail(
   status: ApiAiJobStatus,
   overrides: JobDetailOverrides = {},
 ): ApiAiJobDetail {
-  const reviewItems = Array.from({ length: overrides.reviewItemCount ?? 0 }, (_, index) => ({
-    type: "low_confidence" as const,
-    candidateRegionIds: [`candidate_${index}`],
-    question: `审核问题 ${index + 1}`,
-    suggestedCategories: ["hair" as const],
-    confidence: 0.5,
-  }));
   return {
     job: {
       id: "job_semantic_1",
@@ -153,19 +194,18 @@ function jobDetail(
         taxonomyLevel: "coarse",
         focus: ["hair"],
         createRevisionOnSuccess: true,
+        semanticBaseline: "empty",
       },
-      reviewItems,
+      reviewItems: [],
       proposalSummary: null,
       advisoryResult: null,
-      cancelRequested: overrides.cancelRequested ?? false,
+      cancelRequested: false,
       createdAt: "2026-08-13T00:00:00.000Z",
       startedAt: status === "queued" ? null : "2026-08-13T00:00:01.000Z",
       finishedAt: ["succeeded", "failed", "cancelled"].includes(status)
         ? "2026-08-13T00:00:02.000Z"
         : null,
-      error: status === "failed"
-        ? { code: "AI_FAILED", message: "识别失败" }
-        : null,
+      error: status === "failed" ? { code: "AI_FAILED", message: "识别失败" } : null,
     },
     runs: overrides.runs ?? (status === "queued" || status === "preparing"
       ? []
@@ -173,6 +213,23 @@ function jobDetail(
         ? status as "succeeded" | "failed" | "cancelled"
         : "running")]),
     events: overrides.events ?? [event(1, status)],
+    semanticFollowup: overrides.semanticFollowup ?? null,
+  };
+}
+
+function followup(status: ApiSemanticFollowup["status"]): ApiSemanticFollowup {
+  return {
+    status,
+    algorithmVersion: "cross-body-hair-reclassification-v2",
+    applicable: true,
+    evidenceHash: `sha256:${"a".repeat(64)}`,
+    suggestions: status === "awaiting_review"
+      ? [{ id: "suggestion_1", label: "将疑似长发从衣服改为头发", pixelCount: 24, confidence: 0.88, reason: "跨部位区域可核对" }]
+      : [],
+    notices: [],
+    appliedRevisionId: status === "applied" ? "rev_repaired_1" : null,
+    createdAt: "2026-08-14T00:00:00.000Z",
+    updatedAt: "2026-08-14T00:00:00.000Z",
   };
 }
 
@@ -197,17 +254,13 @@ function run(
   };
 }
 
-function event(
-  id: number,
-  eventType: string,
-  data: Readonly<Record<string, unknown>> = {},
-): ApiAiJobEvent {
+function event(id: number, eventType: string): ApiAiJobEvent {
   return {
     id,
     jobId: "job_semantic_1",
     eventType,
     message: eventType,
-    data,
+    data: {},
     createdAt: `2026-08-13T00:00:${String(id).padStart(2, "0")}.000Z`,
   };
 }

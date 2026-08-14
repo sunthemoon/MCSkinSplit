@@ -5,6 +5,7 @@ import type {
   ReplacementPlanValidationReport,
 } from "@mc-skin-split/ai-provider";
 import type { AnalysisReasoningEffort } from "@mc-skin-split/skin-analysis-pack";
+import type { SemanticFollowupAssessment } from "@mc-skin-split/skin-analysis-pack";
 export { ANALYSIS_REASONING_EFFORTS } from "@mc-skin-split/skin-analysis-pack";
 export type { AnalysisReasoningEffort } from "@mc-skin-split/skin-analysis-pack";
 import type { SemanticCategory } from "@mc-skin-split/skin-core";
@@ -31,6 +32,8 @@ export type AiRunFileRole =
 
 export interface AiAnalysisOptions {
   readonly mode: "full";
+  /** Empty is the player-facing default; current is an advanced soft-prior mode. */
+  readonly semanticBaseline?: "empty" | "current";
   readonly provider: string;
   readonly model: string;
   readonly reasoningEffort: AnalysisReasoningEffort;
@@ -148,10 +151,55 @@ export interface AiJobEvent {
   readonly createdAt: string;
 }
 
+export type SemanticFollowupStatus =
+  | "no_repair"
+  | "awaiting_review"
+  | "applied"
+  | "dismissed"
+  | "assessment_failed";
+
+export interface StoredSemanticFollowup {
+  readonly jobId: string;
+  readonly resultRevisionId: string;
+  readonly status: SemanticFollowupStatus;
+  readonly assessment: SemanticFollowupAssessment;
+  readonly evidenceHash: string;
+  readonly appliedRevisionId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SemanticFollowupPublicSuggestion {
+  readonly id: string;
+  readonly kind: "cross_body_hair_reclassification";
+  readonly label: string;
+  readonly pixelCount: number;
+  readonly confidence: number;
+  readonly reason: string;
+}
+
+export interface SemanticAnalysisFollowup {
+  readonly jobId: string;
+  readonly resultRevisionId: string;
+  readonly status: SemanticFollowupStatus;
+  readonly algorithmVersion: SemanticFollowupAssessment["algorithmVersion"];
+  readonly applicable: boolean;
+  readonly evidenceHash: string;
+  readonly suggestions: readonly SemanticFollowupPublicSuggestion[];
+  readonly notices: readonly {
+    readonly kind: SemanticFollowupAssessment["notices"][number]["kind"];
+    readonly message: string;
+  }[];
+  readonly appliedRevisionId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface AiJobDetail {
   readonly job: AiJob;
   readonly runs: readonly (AiRun & { readonly assets: readonly AiRunAsset[] })[];
   readonly events: readonly AiJobEvent[];
+  readonly semanticFollowup: SemanticAnalysisFollowup | null;
 }
 
 interface CreateAiJobInputBase {

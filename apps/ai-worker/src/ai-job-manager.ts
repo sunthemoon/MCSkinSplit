@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -19,13 +19,16 @@ import {
 import {
   PROMPT_VERSION,
   REPLACEMENT_PLANNING_PROMPT_VERSION,
+  SEMANTIC_FOLLOWUP_ALGORITHM_VERSION,
+  assessSemanticFollowup,
   buildAnalysisPack,
   buildReplacementPlanningPack,
+  createAnalysisDocuments,
   verifyAnalysisPackIntegrity,
   verifyReplacementPlanningPackIntegrity,
   type PublicRestorationCandidateCatalog,
 } from "@mc-skin-split/skin-analysis-pack";
-import { decodeSkinPng } from "@mc-skin-split/skin-core";
+import { decodeSkinPng, getSkinLayout } from "@mc-skin-split/skin-core";
 import {
   RevisionStore,
   RevisionStoreError,
@@ -44,8 +47,10 @@ import type {
   AiJobListFilters,
   AiRestorationRecommendationOptions,
   AiRun,
+  SemanticAnalysisFollowup,
   SemanticAnalysisAiJob,
   StartAiRestorationRecommendationInput,
+  StoredSemanticFollowup,
 } from "./types";
 
 export interface AiJobManagerOptions {
@@ -57,6 +62,7 @@ export interface AiJobManagerOptions {
   readonly jobStore?: AiJobStore;
   readonly maxRepairAttempts?: number;
   readonly recoverInterruptedJobs?: boolean;
+  readonly semanticFollowupAssessor?: typeof assessSemanticFollowup;
 }
 
 export class AiJobManager {
@@ -66,10 +72,18 @@ export class AiJobManager {
   readonly skillDirectory: string;
   readonly replacementSkillDirectory: string;
   readonly maxRepairAttempts: number;
+  private readonly semanticFollowupAssessor: typeof assessSemanticFollowup;
   private readonly providers = new Map<string, SkinSemanticAiProvider>();
   private readonly active = new Map<
     string,
     { readonly controller: AbortController; readonly promise: Promise<void> }
+  >();
+  private readonly semanticFollowupActions = new Map<
+    string,
+    {
+      readonly actionKey: string;
+      readonly promise: Promise<AiJobDetail>;
+    }
   >();
   private readonly ownsJobStore: boolean;
   private closed = false;
@@ -99,6 +113,8 @@ export class AiJobManager {
         ),
     );
     this.maxRepairAttempts = options.maxRepairAttempts ?? 1;
+    this.semanticFollowupAssessor =
+      options.semanticFollowupAssessor ?? assessSemanticFollowup;
     if (
       !Number.isInteger(this.maxRepairAttempts) ||
       this.maxRepairAttempts < 0 ||
@@ -211,7 +227,11 @@ export class AiJobManager {
     overrides: Partial<
       Pick<
         AiAnalysisOptions,
-        "provider" | "model" | "reasoningEffort" | "createRevisionOnSuccess"
+        | "provider"
+        | "model"
+        | "reasoningEffort"
+        | "createRevisionOnSuccess"
+        | "semanticBaseline"
       >
     > = {},
   ): Promise<AiJob> {
@@ -225,10 +245,13 @@ export class AiJobManager {
       );
     }
     if (source.kind === "restoration_recommendation") {
-      if (overrides.createRevisionOnSuccess !== undefined) {
+      if (
+        overrides.createRevisionOnSuccess !== undefined ||
+        overrides.semanticBaseline !== undefined
+      ) {
         throw new AiJobStoreError(
           "INVALID_AI_JOB",
-          "AI 换装建议不会创建 Revision",
+          "AI 换装建议不接受语义识别选项",
           400,
         );
       }
@@ -265,6 +288,9 @@ export class AiJobManager {
         : {}),
       ...(overrides.createRevisionOnSuccess !== undefined
         ? { createRevisionOnSuccess: overrides.createRevisionOnSuccess }
+        : {}),
+      ...(overrides.semanticBaseline
+        ? { semanticBaseline: overrides.semanticBaseline }
         : {}),
     });
     this.requireProvider(options.provider);
@@ -312,7 +338,246 @@ export class AiJobManager {
       ...run,
       assets: this.jobStore.listRunAssets(run.id),
     }));
-    return { job, runs, events: this.jobStore.listEvents(job.id) };
+    return {
+      job,
+      runs,
+      events: this.jobStore.listEvents(job.id),
+      semanticFollowup:
+        job.kind === "semantic_analysis"
+          ? publicSemanticFollowup(this.jobStore.getSemanticFollowup(job.id))
+          : null,
+    };
+  }
+
+  async applySemanticFollowup(
+    jobId: string,
+    suggestionId: string,
+  ): Promise<AiJobDetail> {
+    this.assertOpen();
+    const normalizedSuggestionId = suggestionId.trim();
+    return this.runSemanticFollowupAction(
+      jobId,
+      `apply:${normalizedSuggestionId}`,
+      async () => {
+        const job = requireSemanticAnalysisJob(this.jobStore.getJob(jobId));
+        if (job.status !== "succeeded" || !job.resultRevisionId) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_CONFLICT",
+            "语义识别完成后才能应用修复建议",
+            409,
+          );
+        }
+        const followup = this.jobStore.getSemanticFollowup(job.id);
+        if (!followup) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_NOT_FOUND",
+            "此识别结果没有修复建议",
+            404,
+          );
+        }
+        if (followup.status === "applied") {
+          if (this.isAppliedSemanticFollowupSuggestion(followup, normalizedSuggestionId)) {
+            return this.getJobDetail(job.id);
+          }
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_CONFLICT",
+            "此识别结果已应用另一项修复建议",
+            409,
+          );
+        }
+        if (followup.status !== "awaiting_review") {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_CONFLICT",
+            "此修复建议已经处理",
+            409,
+            { status: followup.status },
+          );
+        }
+        if (
+          followup.assessment.algorithmVersion !==
+            SEMANTIC_FOLLOWUP_ALGORITHM_VERSION
+        ) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_STALE",
+            "历史分类修复建议需要使用当前算法重新分析",
+            409,
+            {
+              storedAlgorithmVersion: followup.assessment.algorithmVersion,
+              currentAlgorithmVersion: SEMANTIC_FOLLOWUP_ALGORITHM_VERSION,
+            },
+          );
+        }
+        const storedSuggestion = followup.assessment.suggestions.find(
+          (suggestion) => suggestion.id === normalizedSuggestionId,
+        );
+        if (!storedSuggestion) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_INVALID",
+            "修复建议 ID 不属于此识别结果",
+            400,
+          );
+        }
+        const skinPng = await this.revisionStore.readRevisionSkinPng(
+          followup.resultRevisionId,
+        );
+        const image = decodeSkinPng(skinPng);
+        const state = await this.revisionStore.readRevisionSemanticState(
+          followup.resultRevisionId,
+        );
+        const reassessed = this.semanticFollowupAssessor({
+          state,
+          image,
+          candidateRegions: createAnalysisDocuments(
+            image,
+            getSkinLayout(state.document.source.armType),
+          ).candidateRegions,
+        });
+        if (reassessed.evidenceHash !== followup.evidenceHash) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_STALE",
+            "皮肤或识别证据已经变化，请重新运行分析",
+            409,
+          );
+        }
+        const suggestion = reassessed.suggestions.find(
+          (candidate) => candidate.id === normalizedSuggestionId,
+        );
+        if (!suggestion) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_STALE",
+            "修复建议已不再适用，请重新运行分析",
+            409,
+          );
+        }
+        const target = state.document.components.find(
+          (component) => component.instanceId === suggestion.targetComponentId,
+        );
+        if (target && target.category !== "hair") {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_STALE",
+            "建议引用的目标组件已不是头发",
+            409,
+          );
+        }
+        const operationTarget = target
+          ? {
+              instanceId: target.instanceId,
+              displayName: target.displayName,
+              category: "hair" as const,
+              ...(target.subtype ? { subtype: target.subtype } : {}),
+            }
+          : {
+              instanceId: suggestion.targetComponentId,
+              displayName: "跨部位长发",
+              category: "hair" as const,
+            };
+        const editableRevision = await this.semanticFollowupEditableRevision(
+          followup.resultRevisionId,
+          job.id,
+          suggestion.id,
+        );
+        if (!editableRevision) return this.getJobDetail(job.id);
+        let applied;
+        try {
+          applied = await this.revisionStore.applyManualOperation(
+            editableRevision.id,
+            {
+              operation: {
+                type: "assign_pixels",
+                target: operationTarget,
+                spans: suggestion.spans,
+              },
+              actorId: "semantic-followup",
+              summary: `应用推荐分类修复：${suggestion.label}`,
+              semanticFollowup: {
+                jobId: job.id,
+                resultRevisionId: followup.resultRevisionId,
+                suggestionId: suggestion.id,
+                evidenceHash: followup.evidenceHash,
+              },
+            },
+          );
+        } catch (error) {
+          const concurrent = this.jobStore.getSemanticFollowup(job.id);
+          if (concurrent?.status === "applied" && concurrent.appliedRevisionId) {
+            if (this.isAppliedSemanticFollowupSuggestion(
+              concurrent,
+              normalizedSuggestionId,
+            )) {
+              return this.getJobDetail(job.id);
+            }
+            throw new AiJobStoreError(
+              "AI_FOLLOWUP_CONFLICT",
+              "此识别结果已应用另一项修复建议",
+              409,
+            );
+          }
+          throw error;
+        }
+        const persisted = this.jobStore.getSemanticFollowup(job.id);
+        if (
+          persisted?.status !== "applied" ||
+          persisted.appliedRevisionId !== applied.revision.id
+        ) {
+          throw new AiJobStoreError(
+            "AI_FOLLOWUP_CONFLICT",
+            "分类修复 Revision 与持久化状态不一致",
+            409,
+          );
+        }
+        this.jobStore.appendEvent(
+          job.id,
+          "semantic_repair_applied",
+          "推荐分类修复已创建为新 Revision",
+          {
+            suggestionId: suggestion.id,
+            resultRevisionId: applied.revision.id,
+            pixelCount: suggestion.pixelCount,
+          },
+        );
+        this.jobStore.appendEvent(
+          job.id,
+          "catalog_ready",
+          "分类修复版已加入分析目录",
+          { resultRevisionId: applied.revision.id, variant: "semantic_repair" },
+        );
+        return this.getJobDetail(job.id);
+      },
+    );
+  }
+
+  async dismissSemanticFollowup(jobId: string): Promise<AiJobDetail> {
+    this.assertOpen();
+    return this.runSemanticFollowupAction(jobId, "dismiss", async () => {
+      const job = requireSemanticAnalysisJob(this.jobStore.getJob(jobId));
+      const followup = this.jobStore.getSemanticFollowup(job.id);
+      if (!followup) return this.getJobDetail(job.id);
+      if (followup.status === "dismissed" || followup.status === "no_repair") {
+        return this.getJobDetail(job.id);
+      }
+      if (followup.status !== "awaiting_review") {
+        throw new AiJobStoreError(
+          "AI_FOLLOWUP_CONFLICT",
+          "已应用的修复版不能改为保留原识别",
+          409,
+        );
+      }
+      const transition = this.jobStore.transitionSemanticFollowup(job.id, "dismissed");
+      if (!transition.changed) return this.getJobDetail(job.id);
+      this.jobStore.appendEvent(
+        job.id,
+        "semantic_repair_dismissed",
+        "已保留原识别结果",
+        {},
+      );
+      this.jobStore.appendEvent(
+        job.id,
+        "catalog_ready",
+        "原识别结果已保留在分析目录",
+        { resultRevisionId: followup.resultRevisionId },
+      );
+      return this.getJobDetail(job.id);
+    });
   }
 
   listJobs(filtersOrRevisionId?: AiJobListFilters | string): AiJob[] {
@@ -328,12 +593,116 @@ export class AiJobManager {
     return this.jobStore.getJob(jobId);
   }
 
+  private runSemanticFollowupAction(
+    jobId: string,
+    actionKey: string,
+    action: () => Promise<AiJobDetail>,
+  ): Promise<AiJobDetail> {
+    const existing = this.semanticFollowupActions.get(jobId);
+    if (existing) {
+      if (existing.actionKey === actionKey) return existing.promise;
+      const retry = () => {
+        this.assertOpen();
+        return this.runSemanticFollowupAction(jobId, actionKey, action);
+      };
+      return existing.promise.then(retry, retry);
+    }
+    const promise = action().finally(() => {
+      if (this.semanticFollowupActions.get(jobId)?.promise === promise) {
+        this.semanticFollowupActions.delete(jobId);
+      }
+    });
+    this.semanticFollowupActions.set(jobId, { actionKey, promise });
+    return promise;
+  }
+
+  private async semanticFollowupEditableRevision(
+    resultRevisionId: string,
+    jobId: string,
+    suggestionId: string,
+  ) {
+    const resultRevision = this.revisionStore.getRevision(resultRevisionId);
+    const branchName = semanticFollowupBranchName(jobId, suggestionId);
+    let branch = this.revisionStore
+      .listBranches(resultRevision.projectId)
+      .find((candidate) => candidate.name === branchName);
+    if (!branch) {
+      try {
+        const created = await this.revisionStore.branchFromRevision(
+          resultRevision.id,
+          {
+            name: branchName,
+            actorId: "semantic-followup",
+            summary: "从识别结果创建分类修复分支",
+          },
+        );
+        return created.revision;
+      } catch (error) {
+        branch = this.revisionStore
+          .listBranches(resultRevision.projectId)
+          .find((candidate) => candidate.name === branchName);
+        if (
+          !branch ||
+          !(error instanceof RevisionStoreError) ||
+          error.code !== "CONFLICT"
+        ) {
+          throw error;
+        }
+      }
+    }
+    if (
+      branch.baseRevisionId !== resultRevision.id ||
+      !branch.headRevisionId
+    ) {
+      throw new AiJobStoreError(
+        "AI_FOLLOWUP_CONFLICT",
+        "分类修复分支与识别结果不一致",
+        409,
+      );
+    }
+    const head = this.revisionStore.getRevision(branch.headRevisionId);
+    const persisted = this.jobStore.getSemanticFollowup(jobId);
+    if (
+      persisted?.status === "applied" &&
+      persisted.appliedRevisionId === head.id
+    ) {
+      return null;
+    }
+    if (
+      head.operationType !== "branch" ||
+      head.parentRevisionId !== resultRevision.id
+    ) {
+      throw new AiJobStoreError(
+        "AI_FOLLOWUP_CONFLICT",
+        "分类修复分支已包含其他修改",
+        409,
+      );
+    }
+    return head;
+  }
+
+  private isAppliedSemanticFollowupSuggestion(
+    followup: StoredSemanticFollowup,
+    suggestionId: string,
+  ): boolean {
+    if (!followup.appliedRevisionId) return false;
+    const revision = this.revisionStore.getRevision(followup.appliedRevisionId);
+    const context = objectRecord(revision.metadata.semanticFollowup);
+    return context?.jobId === followup.jobId &&
+      context.resultRevisionId === followup.resultRevisionId &&
+      context.evidenceHash === followup.evidenceHash &&
+      context.suggestionId === suggestionId;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     for (const active of this.active.values()) active.controller.abort();
     await Promise.allSettled(
       [...this.active.values()].map((active) => active.promise),
+    );
+    await Promise.allSettled(
+      [...this.semanticFollowupActions.values()].map((action) => action.promise),
     );
     if (this.ownsJobStore) this.jobStore.close();
   }
@@ -411,6 +780,7 @@ export class AiJobManager {
           provider: job.provider,
           model: job.model,
           reasoningEffort: job.options.reasoningEffort,
+          semanticBaseline: job.options.semanticBaseline ?? "current",
           focus: job.options.focus,
           createRevisionOnSuccess: job.options.createRevisionOnSuccess,
           skillVersion: job.skillVersion,
@@ -528,6 +898,66 @@ export class AiJobManager {
               },
             );
             resultRevisionId = committed.revision.id;
+          }
+          if (resultRevisionId) {
+            this.jobStore.appendEvent(
+              job.id,
+              "occlusion_assessing",
+              "正在检查跨部位遮挡与可疑分类",
+              { resultRevisionId },
+            );
+            try {
+              const assessment = this.semanticFollowupAssessor({
+                state: validation.state,
+                image,
+                candidateRegions: pack.candidateRegions,
+              });
+              const followup = this.jobStore.createSemanticFollowup({
+                jobId: job.id,
+                resultRevisionId,
+                assessment,
+              });
+              this.jobStore.appendEvent(
+                job.id,
+                "occlusion_assessed",
+                assessment.suggestions.length > 0
+                  ? `发现 ${assessment.suggestions.length} 项建议确认的跨部位分类`
+                  : "未发现可安全建议的跨部位分类修复",
+                {
+                  resultRevisionId,
+                  status: followup.status,
+                  suggestionCount: assessment.suggestions.length,
+                  suggestedPixelCount: assessment.suggestions.reduce(
+                    (sum, suggestion) => sum + suggestion.pixelCount,
+                    0,
+                  ),
+                  evidenceHash: assessment.evidenceHash,
+                },
+              );
+              this.jobStore.appendEvent(
+                job.id,
+                assessment.suggestions.length > 0
+                  ? "repair_review_ready"
+                  : "repair_review_skipped",
+                assessment.suggestions.length > 0
+                  ? "修复建议已准备，等待用户确认"
+                  : "未生成分类修复建议",
+                { status: followup.status },
+              );
+            } catch (error) {
+              this.jobStore.appendEvent(
+                job.id,
+                "occlusion_assessment_failed",
+                "遮挡检查未完成；语义识别结果仍然可用",
+                { message: safeFollowupErrorMessage(error) },
+              );
+            }
+            this.jobStore.appendEvent(
+              job.id,
+              "catalog_ready",
+              "识别结果已进入已分析皮肤目录",
+              { resultRevisionId },
+            );
           }
           this.jobStore.finishRun({
             runId: currentRun.id,
@@ -1020,6 +1450,7 @@ export class AiJobManager {
 function normalizeOptions(options: AiAnalysisOptions): AiAnalysisOptions {
   return {
     mode: "full",
+    semanticBaseline: options.semanticBaseline ?? "empty",
     provider: options.provider.trim(),
     model: options.model.trim(),
     reasoningEffort: options.reasoningEffort,
@@ -1027,6 +1458,43 @@ function normalizeOptions(options: AiAnalysisOptions): AiAnalysisOptions {
     focus: [...new Set(options.focus)].sort(),
     createRevisionOnSuccess: options.createRevisionOnSuccess,
   };
+}
+
+function publicSemanticFollowup(
+  followup: ReturnType<AiJobStore["getSemanticFollowup"]>,
+): SemanticAnalysisFollowup | null {
+  if (!followup) return null;
+  return {
+    jobId: followup.jobId,
+    resultRevisionId: followup.resultRevisionId,
+    status: followup.status,
+    algorithmVersion: followup.assessment.algorithmVersion,
+    applicable:
+      followup.assessment.algorithmVersion ===
+        SEMANTIC_FOLLOWUP_ALGORITHM_VERSION,
+    evidenceHash: followup.evidenceHash,
+    suggestions: followup.assessment.suggestions.map((suggestion) => ({
+      id: suggestion.id,
+      kind: suggestion.kind,
+      label: suggestion.label,
+      pixelCount: suggestion.pixelCount,
+      confidence: suggestion.confidence,
+      reason: suggestion.reason,
+    })),
+    notices: followup.assessment.notices.map((notice) => ({
+      kind: notice.kind,
+      message: notice.message,
+    })),
+    appliedRevisionId: followup.appliedRevisionId,
+    createdAt: followup.createdAt,
+    updatedAt: followup.updatedAt,
+  };
+}
+
+function safeFollowupErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.replace(/[\u0000-\u001f\u007f]/gu, " ").trim();
+  return normalized.slice(0, 300) || "未知错误";
 }
 
 function normalizeRestorationRecommendationOptions(
@@ -1199,4 +1667,20 @@ function sanitizeProviderCommandSummary(value: string | undefined): string | und
 
 function cryptoRandomSuffix(): string {
   return randomUUID().replaceAll("-", "");
+}
+
+function objectRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value !== null && !Array.isArray(value) && typeof value === "object"
+    ? value as Readonly<Record<string, unknown>>
+    : null;
+}
+
+function semanticFollowupBranchName(jobId: string, suggestionId: string): string {
+  const identity = createHash("sha256")
+    .update(jobId)
+    .update("\0")
+    .update(suggestionId)
+    .digest("hex")
+    .slice(0, 32);
+  return `semantic-repair-${identity}`;
 }

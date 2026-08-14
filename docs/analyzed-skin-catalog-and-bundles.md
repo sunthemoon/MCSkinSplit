@@ -52,6 +52,40 @@ members, or provenance. Existing Parts and Bundles keep their independent
 allows an obsolete analysis card to be hidden without invalidating material that
 was already exported from that Revision.
 
+## Classification-repair variants
+
+M15 keeps the successful `ai_segment` Revision as the catalog entry identity and
+attaches nullable semantic follow-up state to that entry. The public catalog
+summary includes follow-up status, evidence hash, suggestion and suggested-pixel
+counts, and bounded notices containing only `kind` and `message`. Exact internal
+spans and candidate evidence do not cross this catalog boundary.
+
+When deterministic follow-up finds a conservative cross-body classification
+candidate, the original entry remains usable while the Job waits for a simple user
+decision. Accepting one exact suggestion creates a separate immutable semantic
+Revision on a dedicated Branch. The catalog verifies that Revision snapshot,
+derives its complete-category groups from its own segmentation, and nests it under
+the original card with the fixed label `分类修复版`. It does not replace the base
+Revision, copy lifecycle state, or flatten both versions into one texture.
+
+New follow-up evidence uses `cross-body-hair-reclassification-v2`, which may join
+nearby matching candidate fragments only when they lie on the same torso surface
+and form one combined vertical hair shape. Stored v1 evidence remains readable for
+historical catalog and Job inspection, but pending v1 suggestions are read-only.
+The player must run a new analysis to produce current v2 evidence before applying
+a classification repair.
+
+Dismissing the suggestion keeps the original result. A `no_repair` result also
+keeps the original result and does not create a nested variant. In this context,
+`no_repair` means only that the conservative assessment found no safe
+reclassification suggestion. It is not evidence that no hair or accessory covers
+clothing, and it does not certify that any semantic group is visually complete.
+
+Catalog archive remains scoped to the base result Revision. Archiving a card hides
+the card and its nested repaired view from the default list without deleting the
+follow-up evidence or applied Revision. Restoring the base entry exposes the same
+variant again. Part and Bundle lifecycle remains independent.
+
 ## Bundle export and storage
 
 Exporting a catalog group creates an immutable Bundle and one ordinary immutable
@@ -125,6 +159,10 @@ POST /api/analyzed-skins/:revisionId/archive
 POST /api/analyzed-skins/:revisionId/restore
 POST /api/revisions/:revisionId/export-bundle
 
+GET  /api/ai-jobs/:jobId
+POST /api/ai-jobs/:jobId/semantic-followup/apply
+POST /api/ai-jobs/:jobId/semantic-followup/dismiss
+
 GET  /api/part-bundles?kind=&sourceRevisionId=&projectId=&status=&q=
 GET  /api/part-bundles/:bundleId
 GET  /api/part-bundles/:bundleId/preview.png
@@ -155,5 +193,9 @@ hash checks.
   Composition restoration remain explicit separate workflows; see
   [`component-repair-workflow.md`](component-repair-workflow.md) and
   [`composition-restoration-workflow.md`](composition-restoration-workflow.md).
+- A classification-repair variant reassigns existing opaque pixels only. It does
+  not generate the back of an occluded garment, invent missing hair, fill skin
+  beneath clothing, or claim to recover factual source pixels. Hidden-content
+  completion remains a future provenance-aware capability.
 - Bundle compatibility is the intersection of its member manifests. A Bundle with
   no common arm model is rejected during export.

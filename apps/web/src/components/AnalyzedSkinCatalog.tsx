@@ -30,8 +30,14 @@ interface AnalyzedSkinCatalogProps {
   readonly selectedRevisionId: string | null;
   readonly initialStatusFilter?: CatalogStatusFilter;
   readonly onActivate: (item: ApiAnalyzedSkin) => void;
+  readonly onActivateRevision: (item: ApiAnalyzedSkin, revisionId: string) => void;
   readonly onExportGroup: (
     item: ApiAnalyzedSkin,
+    group: ApiAnalyzedSkinGroup,
+  ) => void;
+  readonly onExportVariantGroup: (
+    item: ApiAnalyzedSkin,
+    revisionId: string,
     group: ApiAnalyzedSkinGroup,
   ) => void;
   readonly onArchive: (
@@ -51,15 +57,38 @@ export function filterAnalyzedSkinCatalog(
       (item) =>
         filters.status === "all" || item.catalogStatus === filters.status,
     )
-    .map((item) => ({
-      ...item,
-      groups:
-        filters.kind === "all"
-          ? item.groups
-          : item.groups.filter((group) => group.kind === filters.kind),
-    }))
+    .map((item) => {
+      const groups = filterCatalogGroups(item.groups, filters.kind);
+      const appliedVariant = item.semanticFollowup?.appliedVariant;
+      return {
+        ...item,
+        groups,
+        semanticFollowup: item.semanticFollowup
+          ? {
+              ...item.semanticFollowup,
+              appliedVariant: appliedVariant
+                ? {
+                    ...appliedVariant,
+                    groups: filterCatalogGroups(
+                      appliedVariant.groups,
+                      filters.kind,
+                    ),
+                  }
+                : null,
+            }
+          : null,
+      };
+    })
     .filter((item) => {
-      if (filters.kind !== "all" && item.groups.length === 0) return false;
+      const variantGroups =
+        item.semanticFollowup?.appliedVariant?.groups ?? [];
+      if (
+        filters.kind !== "all" &&
+        item.groups.length === 0 &&
+        variantGroups.length === 0
+      ) {
+        return false;
+      }
       if (!normalizedQuery) return true;
       return [
         item.project.name,
@@ -68,8 +97,34 @@ export function filterAnalyzedSkinCatalog(
         item.aiJob.provider,
         item.aiJob.model,
         item.archivedReason ?? "",
+        ...item.groups.flatMap((group) => [
+          group.kind,
+          group.displayName,
+          ...group.componentIds,
+        ]),
+        ...(item.semanticFollowup?.appliedVariant
+          ? [
+              item.semanticFollowup.appliedVariant.label,
+              item.semanticFollowup.appliedVariant.revision.branchName,
+              `#${item.semanticFollowup.appliedVariant.revision.sequence}`,
+              ...variantGroups.flatMap((group) => [
+                group.kind,
+                group.displayName,
+                ...group.componentIds,
+              ]),
+            ]
+          : []),
       ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
+}
+
+function filterCatalogGroups(
+  groups: readonly ApiAnalyzedSkinGroup[],
+  kind: CatalogFilter,
+): readonly ApiAnalyzedSkinGroup[] {
+  return kind === "all"
+    ? groups
+    : groups.filter((group) => group.kind === kind);
 }
 
 export function analyzedSkinArchiveDescription(item: ApiAnalyzedSkin): string {
@@ -85,7 +140,9 @@ export function AnalyzedSkinCatalog({
   selectedRevisionId,
   initialStatusFilter = "active",
   onActivate,
+  onActivateRevision,
   onExportGroup,
+  onExportVariantGroup,
   onArchive,
   onRestore,
 }: AnalyzedSkinCatalogProps) {
@@ -330,6 +387,50 @@ export function AnalyzedSkinCatalog({
                     </div>
                   </dl>
 
+                  {item.semanticFollowup && (
+                    <div className="analyzed-followup-state" data-status={item.semanticFollowup.status}>
+                      <strong>{followupLabel(item.semanticFollowup.status)}</strong>
+                      {item.semanticFollowup.status === "awaiting_review" && (
+                        <small>{item.semanticFollowup.suggestionCount} 个分类建议记录，载入后查看是否可用</small>
+                      )}
+                      {item.semanticFollowup.notices[0] && <p>{item.semanticFollowup.notices[0].message}</p>}
+                    </div>
+                  )}
+
+                  {item.semanticFollowup?.appliedVariant && (
+                    <section className="analyzed-repair-variant" aria-label="分类修复版">
+                      <button
+                        type="button"
+                        className="analyzed-repair-select"
+                        data-active={selectedRevisionId === item.semanticFollowup.appliedVariant.revision.id}
+                        onClick={() => onActivateRevision(item, item.semanticFollowup!.appliedVariant!.revision.id)}
+                      >
+                        <img src={item.semanticFollowup.appliedVariant.skinUrl} alt="" />
+                        <span>
+                          <small>分类调整后的版本</small>
+                          <strong>{item.semanticFollowup.appliedVariant.label || "分类修复版"}</strong>
+                        </span>
+                        <em>载入查看</em>
+                      </button>
+                      <div className="analyzed-repair-groups">
+                        {item.semanticFollowup.appliedVariant.groups.map((group) => {
+                          const variantRevisionId = item.semanticFollowup!.appliedVariant!.revision.id;
+                          const busyKey = `${variantRevisionId}:${group.key}`;
+                          return (
+                            <button
+                              key={group.key}
+                              type="button"
+                              disabled={Boolean(group.exportedBundleId) || busyGroupKey !== null}
+                              onClick={() => onExportVariantGroup(item, variantRevisionId, group)}
+                            >
+                              {group.exportedBundleId ? "已入库" : busyGroupKey === busyKey ? "入库中…" : `${group.displayName}入库`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  )}
+
                   <div className="aggregate-group-list" data-empty={item.groups.length === 0}>
                     {item.groups.length === 0 ? (
                       <p>此筛选下没有可组成完整大类的组件。</p>
@@ -450,4 +551,14 @@ function formatCatalogTime(value: string): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+function followupLabel(status: NonNullable<ApiAnalyzedSkin["semanticFollowup"]>["status"]): string {
+  return {
+    no_repair: "未发现跨部位分类建议 · 隐藏内容仍可能需补全",
+    awaiting_review: "发现可选分类调整",
+    applied: "已生成分类修复版",
+    dismissed: "已保留原识别",
+    assessment_failed: "跨部位分类复核未完成 · 原识别可用",
+  }[status];
 }

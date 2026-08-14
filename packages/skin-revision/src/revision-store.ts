@@ -128,6 +128,7 @@ import {
   type RevisePartBundleResult,
   type RevertRevisionInput,
   type SerializedPartRepairOperation,
+  type SemanticAnalysisFollowupStatus,
   type ReorderCompositionLayersInput,
   type ResolveCompositionConflictInput,
   type SetCompositionRestorationPlanInput,
@@ -316,6 +317,11 @@ interface AnalyzedCatalogRow {
   readonly finished_at: string;
   readonly archived_at: string | null;
   readonly archived_reason: string | null;
+  readonly followup_job_id: string | null;
+  readonly followup_status: string | null;
+  readonly followup_assessment_json: string | null;
+  readonly followup_evidence_hash: string | null;
+  readonly followup_applied_revision_id: string | null;
 }
 
 interface CompositionProjectRow {
@@ -1041,11 +1047,18 @@ export class RevisionStore {
           job.review_items_json,
           job.finished_at,
           archive.archived_at,
-          archive.archived_reason
+          archive.archived_reason,
+          followup.job_id AS followup_job_id,
+          followup.status AS followup_status,
+          followup.assessment_json AS followup_assessment_json,
+          followup.evidence_hash AS followup_evidence_hash,
+          followup.applied_revision_id AS followup_applied_revision_id
         FROM ai_job AS job
         JOIN skin_project AS project ON project.id = job.project_id
         LEFT JOIN analyzed_skin_catalog_archive AS archive
           ON archive.result_revision_id = job.result_revision_id
+        LEFT JOIN semantic_analysis_followup AS followup
+          ON followup.result_revision_id = job.result_revision_id
         WHERE job.job_kind = 'semantic_analysis'
           AND job.status = 'succeeded'
           AND job.result_revision_id IS NOT NULL
@@ -1150,6 +1163,31 @@ export class RevisionStore {
     const segmentation = await this.readRevisionSegmentation(revision.id);
     const bundles = this.listPartBundles(undefined, revision.id);
     const groups = aggregateCatalogGroups(segmentation, bundles);
+    const followup = parseSemanticAnalysisFollowup(row);
+    this.assertSemanticFollowupCatalogIntegrity(row, revision, followup);
+    let appliedVariant = null;
+    if (followup?.appliedRevisionId) {
+      const appliedRevision = this.getRevision(followup.appliedRevisionId);
+      this.assertSemanticFollowupAppliedRevision(
+        revision,
+        appliedRevision,
+        followup,
+      );
+      const appliedSegmentation = await this.readRevisionSegmentation(appliedRevision.id);
+      const appliedBundles = this.listPartBundles(undefined, appliedRevision.id);
+      appliedVariant = {
+        label: "分类修复版" as const,
+        revision: {
+          id: appliedRevision.id,
+          branchId: appliedRevision.branchId,
+          branchName: appliedRevision.branchName,
+          sequence: appliedRevision.sequence,
+          createdAt: appliedRevision.createdAt,
+        },
+        groups: aggregateCatalogGroups(appliedSegmentation, appliedBundles),
+        skinUrl: `/api/revisions/${encodeURIComponent(appliedRevision.id)}/skin.png`,
+      };
+    }
     return {
       project: { id: row.project_id, name: row.project_name },
       revision: {
@@ -1171,10 +1209,163 @@ export class RevisionStore {
       reviewItemCount: parseJsonArray(row.review_items_json, `AI Job ${row.job_id} review items`).length,
       groups,
       skinUrl: `/api/revisions/${encodeURIComponent(revision.id)}/skin.png`,
+      semanticFollowup: followup === null
+        ? null
+        : {
+            jobId: followup.jobId,
+            status: followup.status,
+            evidenceHash: followup.evidenceHash,
+            suggestionCount: followup.suggestionCount,
+            suggestedPixelCount: followup.suggestedPixelCount,
+            notices: followup.notices,
+            appliedVariant,
+          },
       catalogStatus: catalogLifecycle.status,
       archivedAt: catalogLifecycle.archivedAt,
       archivedReason: catalogLifecycle.archivedReason,
     };
+  }
+
+  private assertSemanticFollowupCatalogIntegrity(
+    row: AnalyzedCatalogRow,
+    revision: SkinRevision,
+    followup: ParsedSemanticAnalysisFollowup | null,
+  ): void {
+    if (!followup) return;
+    const provenance = this.database.prepare(`
+      SELECT job.input_revision_id, run.job_id AS run_job_id
+      FROM ai_job AS job
+      JOIN ai_run AS run ON run.job_id = job.id
+      WHERE job.id = ? AND run.id = ?
+    `).get(followup.jobId, revision.aiRunId ?? null) as {
+      readonly input_revision_id: string;
+      readonly run_job_id: string;
+    } | undefined;
+    if (
+      followup.jobId !== row.job_id ||
+      revision.operationType !== "ai_segment" ||
+      revision.actorType !== "ai" ||
+      !revision.aiRunId ||
+      !provenance ||
+      provenance.run_job_id !== followup.jobId ||
+      revision.parentRevisionId !== provenance.input_revision_id ||
+      revision.metadata.aiJobId !== followup.jobId ||
+      revision.metadata.aiRunId !== revision.aiRunId
+    ) {
+      throw snapshotCorrupt(revision.id, "分析后续结果与 AI Job provenance 不一致");
+    }
+  }
+
+  private assertSemanticFollowupAppliedRevision(
+    resultRevision: SkinRevision,
+    appliedRevision: SkinRevision,
+    followup: ParsedSemanticAnalysisFollowup,
+  ): void {
+    const context = isJsonObject(appliedRevision.metadata.semanticFollowup)
+      ? appliedRevision.metadata.semanticFollowup
+      : null;
+    const operation = isJsonObject(appliedRevision.metadata.operation)
+      ? appliedRevision.metadata.operation
+      : null;
+    const target = operation && isJsonObject(operation.target)
+      ? operation.target
+      : null;
+    const suggestionId = typeof context?.suggestionId === "string"
+      ? context.suggestionId
+      : null;
+    const storedSuggestion = suggestionId === null
+      ? null
+      : followup.suggestions.find((suggestion) => suggestion.id === suggestionId) ?? null;
+    if (
+      appliedRevision.projectId !== resultRevision.projectId ||
+      appliedRevision.operationType !== "manual_edit" ||
+      appliedRevision.actorType !== "user" ||
+      appliedRevision.actorId !== "semantic-followup" ||
+      operation?.type !== "assign_pixels" ||
+      target?.category !== "hair" ||
+      context?.jobId !== followup.jobId ||
+      context?.resultRevisionId !== resultRevision.id ||
+      context?.evidenceHash !== followup.evidenceHash ||
+      !storedSuggestion ||
+      target?.instanceId !== storedSuggestion.targetComponentId ||
+      !sameSemanticSpanSet(operation?.spans, storedSuggestion.spans)
+    ) {
+      throw snapshotCorrupt(resultRevision.id, "分类修复版 provenance 无效");
+    }
+
+    const branchRevision = appliedRevision.parentRevisionId
+      ? this.getRevision(appliedRevision.parentRevisionId)
+      : null;
+    if (
+      !branchRevision ||
+      branchRevision.projectId !== resultRevision.projectId ||
+      branchRevision.operationType !== "branch" ||
+      branchRevision.actorType !== "user" ||
+      branchRevision.actorId !== "semantic-followup" ||
+      branchRevision.parentRevisionId !== resultRevision.id ||
+      branchRevision.branchId !== appliedRevision.branchId ||
+      branchRevision.metadata.baseRevisionId !== resultRevision.id
+    ) {
+      throw snapshotCorrupt(
+        resultRevision.id,
+        "分类修复版不是识别结果的确定性修复分支",
+      );
+    }
+  }
+
+  private assertSemanticFollowupOperation(
+    context: NonNullable<ManualRevisionOperationInput["semanticFollowup"]>,
+    operation: Extract<ManualSemanticOperation, { readonly type: "assign_pixels" }>,
+  ): void {
+    const evidence = this.database.prepare(`
+      SELECT
+        json_extract(suggestion.value, '$.targetComponentId') AS target_component_id,
+        json_extract(suggestion.value, '$.spans') AS spans_json
+      FROM semantic_analysis_followup AS followup,
+           json_each(followup.assessment_json, '$.suggestions') AS suggestion
+      WHERE followup.job_id = ?
+        AND followup.result_revision_id = ?
+        AND followup.status = 'awaiting_review'
+        AND followup.evidence_hash = ?
+        AND json_extract(suggestion.value, '$.id') = ?
+      LIMIT 1
+    `).get(
+      context.jobId,
+      context.resultRevisionId,
+      context.evidenceHash,
+      context.suggestionId,
+    ) as {
+      readonly target_component_id: unknown;
+      readonly spans_json: unknown;
+    } | undefined;
+    if (!evidence) {
+      throw conflict("语义分类修复已被处理或证据已经变化", {
+        jobId: context.jobId,
+        suggestionId: context.suggestionId,
+      });
+    }
+
+    let expectedSpans: unknown;
+    try {
+      expectedSpans = typeof evidence.spans_json === "string"
+        ? JSON.parse(evidence.spans_json)
+        : null;
+    } catch (error) {
+      throw snapshotCorrupt(
+        context.resultRevisionId,
+        "语义分类修复建议的像素证据无效",
+        { cause: error },
+      );
+    }
+    if (
+      evidence.target_component_id !== operation.target.instanceId ||
+      !sameSemanticSpanSet(expectedSpans, operation.spans)
+    ) {
+      throw conflict("语义分类修复操作与建议证据不一致", {
+        jobId: context.jobId,
+        suggestionId: context.suggestionId,
+      });
+    }
   }
 
   async addCompositionPart(
@@ -4245,6 +4436,24 @@ export class RevisionStore {
       });
     }
 
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const semanticFollowup = input.semanticFollowup
+      ? validateSemanticFollowupRevisionContext(input.semanticFollowup)
+      : null;
+    if (
+      semanticFollowup &&
+      (
+        actorId !== "semantic-followup" ||
+        input.operation.type !== "assign_pixels" ||
+        input.operation.target.category !== "hair"
+      )
+    ) {
+      throw invalidInput("语义分类修复必须使用专用 actor 将像素分配给头发组件");
+    }
+    if (semanticFollowup && input.operation.type === "assign_pixels") {
+      this.assertSemanticFollowupOperation(semanticFollowup, input.operation);
+    }
+
     const sourceSnapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
     const sourceSegmentation = parseSegmentation(
       sourceSnapshot.files["segmentation.json"].bytes,
@@ -4276,7 +4485,6 @@ export class RevisionStore {
 
     const ids = this.revisionIds();
     const createdAt = this.now();
-    const actorId = validateOptionalText("actorId", input.actorId, 120);
     const operationType = manualRevisionOperationType(input.operation.type);
     const summary = validateText(
       "Revision 摘要",
@@ -4293,7 +4501,10 @@ export class RevisionStore {
     const affectedComponents = manualAffectedComponents(input.operation);
     const affectedSpans =
       "spans" in input.operation ? input.operation.spans : [];
-    const metadata = { operation: input.operation };
+    const metadata = {
+      operation: input.operation,
+      ...(semanticFollowup ? { semanticFollowup } : {}),
+    };
     const operation = createOperation({
       type: operationType,
       inputRevisionId: sourceRevision.id,
@@ -4345,6 +4556,34 @@ export class RevisionStore {
         });
         this.attachAssetsToRevision(ids.revisionId, assetIds);
         this.insertOperation(project.id, ids, operationType, summary, createdAt);
+        if (semanticFollowup) {
+          const transition = this.database.prepare(`
+            UPDATE semantic_analysis_followup
+            SET status = 'applied', applied_revision_id = ?, updated_at = ?
+            WHERE job_id = ?
+              AND result_revision_id = ?
+              AND status = 'awaiting_review'
+              AND evidence_hash = ?
+              AND EXISTS (
+                SELECT 1
+                FROM json_each(assessment_json, '$.suggestions') AS suggestion
+                WHERE json_extract(suggestion.value, '$.id') = ?
+              )
+          `).run(
+            ids.revisionId,
+            createdAt,
+            semanticFollowup.jobId,
+            semanticFollowup.resultRevisionId,
+            semanticFollowup.evidenceHash,
+            semanticFollowup.suggestionId,
+          );
+          if (transition.changes !== 1) {
+            throw conflict("语义分类修复已被处理或证据已经变化", {
+              jobId: semanticFollowup.jobId,
+              suggestionId: semanticFollowup.suggestionId,
+            });
+          }
+        }
         this.database
           .prepare("UPDATE skin_branch SET head_revision_id = ? WHERE id = ?")
           .run(ids.revisionId, branch.id);
@@ -5915,6 +6154,239 @@ function assertAnalyzedSkinCatalogLifecycle(
   };
 }
 
+interface ParsedSemanticAnalysisFollowup {
+  readonly jobId: string;
+  readonly status: SemanticAnalysisFollowupStatus;
+  readonly evidenceHash: string;
+  readonly suggestionCount: number;
+  readonly suggestedPixelCount: number;
+  readonly suggestionIds: readonly string[];
+  readonly suggestions: readonly {
+    readonly id: string;
+    readonly targetComponentId: string;
+    readonly spans: readonly unknown[];
+  }[];
+  readonly notices: readonly { readonly kind: string; readonly message: string }[];
+  readonly appliedRevisionId: string | null;
+}
+
+function parseSemanticAnalysisFollowup(
+  row: AnalyzedCatalogRow,
+): ParsedSemanticAnalysisFollowup | null {
+  const required = [
+    row.followup_job_id,
+    row.followup_status,
+    row.followup_assessment_json,
+    row.followup_evidence_hash,
+  ];
+  if (required.every((value) => value === null)) {
+    if (row.followup_applied_revision_id !== null) {
+      throw snapshotCorrupt(row.result_revision_id, "分析后续状态不完整");
+    }
+    return null;
+  }
+  if (required.some((value) => value === null)) {
+    throw snapshotCorrupt(row.result_revision_id, "分析后续状态不完整");
+  }
+
+  const jobId = row.followup_job_id as string;
+  const status = row.followup_status;
+  const evidenceHash = row.followup_evidence_hash as string;
+  const appliedRevisionId = row.followup_applied_revision_id;
+  if (!isSemanticAnalysisFollowupStatus(status)) {
+    throw snapshotCorrupt(row.result_revision_id, "分析后续状态无效");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/u.test(evidenceHash)) {
+    throw snapshotCorrupt(row.result_revision_id, "分析后续证据哈希无效");
+  }
+  if ((status === "applied") !== (appliedRevisionId !== null)) {
+    throw snapshotCorrupt(row.result_revision_id, "分析后续状态与修复 Revision 不一致");
+  }
+
+  try {
+    const assessment = JSON.parse(row.followup_assessment_json as string) as unknown;
+    if (!isJsonObject(assessment)) {
+      throw new TypeError("assessment 必须是 JSON object");
+    }
+    if (
+      assessment.schemaVersion !== "1.0" ||
+      !isBoundedStoredText(assessment.algorithmVersion, 80) ||
+      assessment.evidenceHash !== evidenceHash ||
+      !Array.isArray(assessment.suggestions) ||
+      !Array.isArray(assessment.notices)
+    ) {
+      throw new TypeError("assessment 顶层结构无效");
+    }
+    if (
+      assessment.algorithmVersion === "cross-body-hair-reclassification-v2" &&
+      assessment.suggestions.length > 1
+    ) {
+      throw new TypeError("v2 assessment 不能包含多条修复建议");
+    }
+
+    let suggestedPixelCount = 0;
+    const suggestionIds = new Set<string>();
+    const suggestions: {
+      readonly id: string;
+      readonly targetComponentId: string;
+      readonly spans: readonly unknown[];
+    }[] = [];
+    for (const suggestion of assessment.suggestions) {
+      if (!isJsonObject(suggestion)) {
+        throw new TypeError("suggestion 必须是 JSON object");
+      }
+      if (
+        !isBoundedStoredText(suggestion.id, 120) ||
+        suggestionIds.has(suggestion.id) ||
+        !isBoundedStoredText(suggestion.kind, 80) ||
+        !isBoundedStoredText(suggestion.label, 160) ||
+        !isBoundedStoredText(suggestion.targetComponentId, 120) ||
+        !isUniqueStoredTextArray(suggestion.sourceComponentIds, 120) ||
+        !isUniqueStoredTextArray(suggestion.candidateRegionIds, 160) ||
+        !Array.isArray(suggestion.spans) ||
+        suggestion.spans.length === 0 ||
+        !Number.isInteger(suggestion.pixelCount) ||
+        (suggestion.pixelCount as number) < 1 ||
+        typeof suggestion.confidence !== "number" ||
+        !Number.isFinite(suggestion.confidence) ||
+        suggestion.confidence < 0 ||
+        suggestion.confidence > 1 ||
+        !isBoundedStoredText(suggestion.reason, 500)
+      ) {
+        throw new TypeError("suggestion 结构无效");
+      }
+      suggestionIds.add(suggestion.id);
+      let spanPixelCount = 0;
+      for (const span of suggestion.spans) {
+        if (
+          !isJsonObject(span) ||
+          typeof span.surface !== "string" ||
+          !(span.surface in getSkinLayout("wide").surfaces) ||
+          !Number.isInteger(span.y) ||
+          !Number.isInteger(span.x0) ||
+          !Number.isInteger(span.x1) ||
+          (span.y as number) < 0 ||
+          (span.y as number) > 63 ||
+          (span.x0 as number) < 0 ||
+          (span.x1 as number) > 63 ||
+          (span.x0 as number) > (span.x1 as number)
+        ) {
+          throw new TypeError("suggestion span 无效");
+        }
+        spanPixelCount += (span.x1 as number) - (span.x0 as number) + 1;
+      }
+      if (spanPixelCount !== suggestion.pixelCount) {
+        throw new TypeError("suggestion pixelCount 与 spans 不一致");
+      }
+      suggestions.push({
+        id: suggestion.id,
+        targetComponentId: suggestion.targetComponentId,
+        spans: suggestion.spans,
+      });
+      suggestedPixelCount += suggestion.pixelCount;
+    }
+    if (
+      (status === "no_repair" && suggestionIds.size !== 0) ||
+      (status !== "no_repair" && suggestionIds.size === 0)
+    ) {
+      throw new TypeError("分析后续状态与修复建议数量不一致");
+    }
+
+    const notices = assessment.notices.map((notice) => {
+      if (
+        !isJsonObject(notice) ||
+        !isBoundedStoredText(notice.kind, 40) ||
+        !isBoundedStoredText(notice.message, 300)
+      ) {
+        throw new TypeError("notice 结构无效");
+      }
+      return { kind: notice.kind, message: notice.message };
+    });
+
+    return {
+      jobId,
+      status,
+      evidenceHash,
+      suggestionCount: assessment.suggestions.length,
+      suggestedPixelCount,
+      suggestionIds: [...suggestionIds],
+      suggestions,
+      notices,
+      appliedRevisionId,
+    };
+  } catch (error) {
+    if (error instanceof RevisionStoreError) throw error;
+    throw snapshotCorrupt(row.result_revision_id, "分析后续评估证据无效", { cause: error });
+  }
+}
+
+function isSemanticAnalysisFollowupStatus(
+  value: unknown,
+): value is SemanticAnalysisFollowupStatus {
+  return value === "no_repair" ||
+    value === "awaiting_review" ||
+    value === "applied" ||
+    value === "dismissed" ||
+    value === "assessment_failed";
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && !Array.isArray(value) && typeof value === "object";
+}
+
+function sameSemanticSpanSet(left: unknown, right: unknown): boolean {
+  const leftKeys = semanticSpanKeys(left);
+  const rightKeys = semanticSpanKeys(right);
+  return leftKeys !== null &&
+    rightKeys !== null &&
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index]);
+}
+
+function semanticSpanKeys(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const layout = getSkinLayout("wide");
+  const keys: string[] = [];
+  for (const span of value) {
+    if (
+      !isJsonObject(span) ||
+      typeof span.surface !== "string" ||
+      !(span.surface in layout.surfaces) ||
+      !Number.isInteger(span.y) ||
+      !Number.isInteger(span.x0) ||
+      !Number.isInteger(span.x1) ||
+      (span.y as number) < 0 ||
+      (span.y as number) > 63 ||
+      (span.x0 as number) < 0 ||
+      (span.x1 as number) > 63 ||
+      (span.x0 as number) > (span.x1 as number)
+    ) {
+      return null;
+    }
+    keys.push(JSON.stringify([
+      span.surface,
+      span.y,
+      span.x0,
+      span.x1,
+    ]));
+  }
+  return keys.sort();
+}
+
+function isBoundedStoredText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= maxLength &&
+    value.trim() === value &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function isUniqueStoredTextArray(value: unknown, maxLength: number): value is string[] {
+  return Array.isArray(value) &&
+    value.every((item) => isBoundedStoredText(item, maxLength)) &&
+    new Set(value).size === value.length;
+}
+
 function assertLibraryStatus(
   value: string,
   id: string,
@@ -6637,6 +7109,25 @@ function validateOptionalText(
   maxLength: number,
 ): string | undefined {
   return value === undefined ? undefined : validateText(label, value, maxLength);
+}
+
+function validateSemanticFollowupRevisionContext(
+  value: NonNullable<ManualRevisionOperationInput["semanticFollowup"]>,
+): NonNullable<ManualRevisionOperationInput["semanticFollowup"]> {
+  if (
+    !isSafeReferenceId(value.jobId) ||
+    !isSafeReferenceId(value.resultRevisionId) ||
+    !/^followup_[0-9a-f]{24}$/u.test(value.suggestionId) ||
+    !/^sha256:[0-9a-f]{64}$/u.test(value.evidenceHash)
+  ) {
+    throw invalidInput("语义分类修复上下文无效");
+  }
+  return {
+    jobId: value.jobId,
+    resultRevisionId: value.resultRevisionId,
+    suggestionId: value.suggestionId,
+    evidenceHash: value.evidenceHash,
+  };
 }
 
 function isPartEditOperationType(value: unknown): value is PartEditOperationType {
