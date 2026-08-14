@@ -33,6 +33,12 @@ interface ProjectedEventRow extends SemanticAiEventRow {
   readonly toolOperation: string | null;
 }
 
+interface RecoveredStructuredOutputFallback {
+  readonly events: readonly ApiAiJobEvent[];
+  readonly warning: ApiAiJobEvent;
+  readonly recoveredBy: ApiAiJobEvent;
+}
+
 export interface SemanticAiEventLogProps {
   readonly events: readonly ApiAiJobEvent[];
   readonly running: boolean;
@@ -82,8 +88,22 @@ export function buildSemanticAiEventRows(
   events: readonly ApiAiJobEvent[],
 ): readonly SemanticAiEventRow[] {
   const rows: ProjectedEventRow[] = [];
+  const recoveredFallbacks = findRecoveredStructuredOutputFallbacks(events);
+  const recoveredFallbackEvents = new Set(
+    [...recoveredFallbacks.values()].flatMap((fallback) => [
+      ...fallback.events.map((event) => event.id),
+      fallback.warning.id,
+    ]),
+  );
 
   for (const event of events) {
+    const recoveredFallback = recoveredFallbacks.get(event.id);
+    if (recoveredFallback) {
+      rows.push(projectRecoveredStructuredOutputFallback(recoveredFallback));
+      continue;
+    }
+    if (recoveredFallbackEvents.has(event.id)) continue;
+
     if (event.eventType === "provider_tool") {
       projectToolEvent(rows, event);
       continue;
@@ -111,6 +131,129 @@ export function buildSemanticAiEventRows(
   }
 
   return rows.map(({ toolScope: _scope, toolIdentity: _identity, toolOperation: _operation, ...row }) => row);
+}
+
+function findRecoveredStructuredOutputFallbacks(
+  events: readonly ApiAiJobEvent[],
+): ReadonlyMap<number, RecoveredStructuredOutputFallback> {
+  const fallbacks = new Map<number, RecoveredStructuredOutputFallback>();
+
+  for (let warningIndex = 0; warningIndex < events.length; warningIndex += 1) {
+    const warning = events[warningIndex]!;
+    if (!isStructuredOutputFallbackWarning(warning)) continue;
+
+    const providerErrors: ApiAiJobEvent[] = [];
+    for (let errorIndex = warningIndex - 1; errorIndex >= 0; errorIndex -= 1) {
+      const candidate = events[errorIndex]!;
+      if (candidate.eventType !== "provider_error") break;
+      if (!isStructuredOutputCapabilityError(candidate)) break;
+      if (
+        providerErrors.length > 0 &&
+        eventScope(candidate) !== eventScope(providerErrors[0]!)
+      ) {
+        break;
+      }
+      providerErrors.unshift(candidate);
+    }
+    if (providerErrors.length === 0) continue;
+
+    const recoveredBy = findFallbackRecoveryEvent(
+      events,
+      warningIndex + 1,
+      providerErrors[0]!,
+    );
+    if (!recoveredBy) continue;
+
+    const fallback = {
+      events: providerErrors,
+      warning,
+      recoveredBy,
+    } satisfies RecoveredStructuredOutputFallback;
+    fallbacks.set(providerErrors[0]!.id, fallback);
+  }
+
+  return fallbacks;
+}
+
+function projectRecoveredStructuredOutputFallback(
+  fallback: RecoveredStructuredOutputFallback,
+): ProjectedEventRow {
+  const firstError = fallback.events[0]!;
+  return {
+    key: `ai-event-${firstError.id}`,
+    eventIds: [
+      ...fallback.events.map((event) => event.id),
+      fallback.warning.id,
+    ],
+    eventType: fallback.warning.eventType,
+    kind: "warning",
+    status: "completed",
+    message: "已启用兼容 JSON 校验",
+    detail: "原生结构化请求失败 · 模型分析已自动继续",
+    createdAt: firstError.createdAt,
+    completedAt: fallback.recoveredBy.createdAt,
+    toolScope: eventScope(firstError),
+    toolIdentity: null,
+    toolOperation: null,
+  };
+}
+
+function isStructuredOutputFallbackWarning(event: ApiAiJobEvent): boolean {
+  return event.eventType === "provider_warning" &&
+    /(?:结构化输出|原生结构化请求).*(?:本地\s*JSON\s*校验|兼容)/i.test(event.message);
+}
+
+function isStructuredOutputCapabilityError(event: ApiAiJobEvent): boolean {
+  if (event.message === "Codex 报告运行错误") return true;
+
+  const evidence = [event.message, ...dataStringValues(event.data)].join(" ");
+  return /(?:structured[_ -]?output|response[_ -]?format|json[_ -]?schema|结构化输出)/i.test(
+    evidence,
+  );
+}
+
+function findFallbackRecoveryEvent(
+  events: readonly ApiAiJobEvent[],
+  startIndex: number,
+  providerError: ApiAiJobEvent,
+): ApiAiJobEvent | null {
+  for (let index = startIndex; index < events.length; index += 1) {
+    const candidate = events[index]!;
+    if (candidate.eventType === "failed" || candidate.eventType === "cancelled") {
+      return null;
+    }
+    if (
+      candidate.eventType === "provider_error" ||
+      candidate.eventType === "provider_warning" ||
+      providerEventStatus(candidate) === "failed"
+    ) {
+      continue;
+    }
+    if (!eventsShareProviderScope(providerError, candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function eventsShareProviderScope(
+  providerError: ApiAiJobEvent,
+  candidate: ApiAiJobEvent,
+): boolean {
+  const errorRunId = visibleDataString(providerError.data.runId);
+  const candidateRunId = visibleDataString(candidate.data.runId);
+  if (errorRunId && candidateRunId && errorRunId !== candidateRunId) return false;
+
+  const errorAttempt = visibleDataNumber(providerError.data.attempt);
+  const candidateAttempt = visibleDataNumber(candidate.data.attempt);
+  return errorAttempt === null || candidateAttempt === null || errorAttempt === candidateAttempt;
+}
+
+function dataStringValues(data: Readonly<Record<string, unknown>>): readonly string[] {
+  return Object.values(data).flatMap((value) => {
+    if (typeof value === "string") return [value];
+    if (!value || typeof value !== "object") return [];
+    return Object.values(value).filter((nested): nested is string => typeof nested === "string");
+  });
 }
 
 function projectToolEvent(rows: ProjectedEventRow[], event: ApiAiJobEvent): void {

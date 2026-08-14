@@ -72,13 +72,18 @@ For semantic analysis, the adapter:
   assets when persistence succeeds;
 - projects JSONL stdout incrementally into safe Job events for the Studio process
   display while the provider is still running;
-- first requests schema-constrained output and, only for a structured-output
-  transport/capability failure, may retry transport without `--output-schema`.
+- captures one JSON response by default, then applies the repository Schema and
+  deterministic pixel validator on the host;
+- can explicitly opt into native structured-output transport. Only that opt-in
+  path may retry without `--output-schema` after a recognized native-request or
+  transport failure.
 
-The fallback never weakens host validation. The same Ajv and pixel validator checks
-the final JSON in both paths. A successful fallback proves that the provider can
-return host-valid JSON without schema-constrained transport; it does not establish
-that the selected external endpoint supports structured output.
+Neither mode weakens host validation. The same Ajv and pixel validator checks the
+final JSON in every path. The default avoids an otherwise redundant failed request
+on endpoints that do not carry native structured-output parameters. A successful
+opt-in fallback proves only that the provider can return host-valid JSON without
+schema-constrained transport; it does not establish endpoint support for structured
+output.
 
 By default semantic analysis retains the user's model/provider selection so
 existing authentication and custom provider routing work, while the adapter
@@ -186,7 +191,8 @@ list, and `createRevisionOnSuccess` flag. Unknown request fields are rejected.
 | `AI_TIMEOUT_SECONDS` | `600` | Per-provider time budget, 10-1800 seconds |
 | `AI_MAX_REPAIR_ATTEMPTS` | `1` | Validation repair attempts, 0-3 |
 | `AI_IGNORE_USER_CONFIG` | `false` | Add Codex `--ignore-user-config` |
-| `AI_ALLOW_SCHEMA_FALLBACK` | `true` | Retry only supported schema-transport failures |
+| `AI_USE_OUTPUT_SCHEMA` | `false` | Opt into native `--output-schema` transport |
+| `AI_ALLOW_SCHEMA_FALLBACK` | `true` | When native transport is enabled, retry only supported schema-transport failures |
 | `MC_SKIN_AI_SKILL_DIR` | repository Skill | Alternate Skill source directory |
 | `MC_SKIN_REPLACEMENT_SKILL_DIR` | repository replacement Skill | Alternate replacement-planner Skill source directory |
 | `MC_SKIN_DATA_DIR` | repository `data/` | SQLite, snapshots, Run workspaces, and audit assets |
@@ -220,6 +226,14 @@ confirming tool-free execution for that run. Its first schema-constrained transp
 request failed and the narrow local-JSON fallback succeeded, so this observation is
 neither a latency benchmark nor evidence that the selected external endpoint
 supports structured output.
+
+On 2026-08-14, after making host-validated single-pass JSON the default, a fresh
+Studio run completed in about 76 seconds with `medium` reasoning. It used one
+Codex session and one model turn, emitted no schema fallback, provider error, or
+failed turn, and created `main #3`. The host accepted all 211 candidate regions
+covering 2,047 visible pixels, produced 13 components, and reported zero unknown
+pixels, review items, warnings, or validation errors. This is one functional
+browser observation, not a latency guarantee.
 
 ## Privacy and operational boundaries
 

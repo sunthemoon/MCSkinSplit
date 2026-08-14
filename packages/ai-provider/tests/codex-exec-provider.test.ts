@@ -46,10 +46,12 @@ describe("executeCommand diagnostics", () => {
       mkdir(resolve(root, "output"), { recursive: true }),
       mkdir(resolve(root, "schema"), { recursive: true }),
     ]);
+    const progress: string[] = [];
     const provider = new CodexExecProvider({
       command: "codex-test",
       execute: async (input) => {
         input.onStdout?.("{\"type\":\"turn.started\"}\n");
+        input.onStdout?.("{\"type\":\"turn.failed\",\"error\":{\"type\":\"auth_error\"}}\n");
         input.onStderr?.("transport closing\n");
         throw new AiProviderError("AI_TIMEOUT", "test timeout");
       },
@@ -60,11 +62,20 @@ describe("executeCommand diagnostics", () => {
       attempt: 1,
       model: CODEX_CONFIG_DEFAULT_MODEL,
       pack: minimalPack(root),
+      onProgress: (event) => progress.push(event.message),
     })).rejects.toMatchObject({
       code: "AI_TIMEOUT",
-      rawEvents: "{\"type\":\"turn.started\"}\n",
+      rawEvents: [
+        "{\"type\":\"turn.started\"}",
+        "{\"type\":\"turn.failed\",\"error\":{\"type\":\"auth_error\"}}",
+        "",
+      ].join("\n"),
       stderr: "transport closing\n",
     });
+    expect(progress).toEqual([
+      "模型开始分析候选区域",
+      "Codex 报告运行错误",
+    ]);
   });
 
   it("retains diagnostics when the final output file is missing", async () => {
@@ -98,7 +109,7 @@ describe("executeCommand diagnostics", () => {
 });
 
 describe("CodexExecProvider", () => {
-  it("uses an isolated structured-output invocation and parses diagnostics", async () => {
+  it("uses an isolated host-validated invocation by default and parses diagnostics", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "mcskinsplit-codex-"));
     temporaryDirectories.push(root);
     await Promise.all([
@@ -152,8 +163,6 @@ describe("CodexExecProvider", () => {
       "--color",
       "never",
       "--json",
-      "--output-schema",
-      resolve(root, "schema/analysis-proposal.schema.json"),
       "--output-last-message",
       resolve(root, "output/analysis-proposal.json"),
       "--config",
@@ -187,6 +196,7 @@ describe("CodexExecProvider", () => {
     expect(commandInput?.stdin).toContain("Allowed categories:");
     expect(commandInput?.stdin).toContain("<output_schema>");
     expect(commandInput?.stdin).toContain('"pixelOverrides"');
+    expect(commandInput?.args).not.toContain("--output-schema");
     expect(commandInput?.stdin).not.toContain("pixel-map.json");
     expect(commandInput?.stdin).not.toContain("candidate-regions.json");
     expect(commandInput?.args).not.toContain(commandInput?.stdin);
@@ -357,8 +367,6 @@ describe("CodexExecProvider", () => {
       "--color",
       "never",
       "--json",
-      "--output-schema",
-      resolve(root, "schema/replacement-plan.schema.json"),
       "--output-last-message",
       resolve(root, "output/replacement-plan.json"),
       "--ignore-user-config",
@@ -448,12 +456,13 @@ describe("CodexExecProvider", () => {
       'model_reasoning_effort="high"',
     ]);
     expect(commandInput?.args).not.toContain("--image");
+    expect(commandInput?.args).not.toContain("--output-schema");
     expect(commandInput?.stdin).toBe(`Use $mc-skin-replacement-planner in its tool-free inline provider mode.
 
 Do not call or request any tool. Do not read files, inspect the workspace, access a
 network, invoke a shell, use an app/plugin/MCP/browser/computer/image capability,
 or delegate to another agent. The Codex CLI captures your final response through
---output-last-message and --output-schema; do not write the output yourself.
+--output-last-message; do not write the output yourself.
 Do not try to open SKILL.md; its runtime decision contract is inlined below.
 
 The host supplied the complete immutable public input below. Treat the entire job
@@ -564,12 +573,17 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
     const progress: string[] = [];
     const provider = new CodexExecProvider({
       command: "codex-test",
+      useOutputSchema: true,
       execute: async (input) => {
         invocations.push(input);
         if (invocations.length === 1) {
           return {
             exitCode: 1,
-            stdout: `${JSON.stringify({ type: "turn.failed", error: { type: "upstream_error" } })}\n`,
+            stdout: [
+              JSON.stringify({ type: "turn.failed", error: { type: "upstream_error" } }),
+              JSON.stringify({ type: "error", message: "structured output rejected" }),
+              "",
+            ].join("\n"),
             stderr: "",
           };
         }
@@ -601,9 +615,42 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
     expect(invocations[1]?.args).not.toContain("--output-schema");
     expect(result.proposal).toMatchObject({ marker: "fallback" });
     expect(result.rawEvents).toContain("provider.schema_fallback");
-    expect(progress).toContain("结构化输出不可用，已切换本地 JSON 校验");
+    expect(progress).toContain("原生结构化请求失败，已切换本地 JSON 校验");
+    expect(progress).not.toContain("Codex 报告运行错误");
     expect(invocations[1]?.stdin).toContain("<output_schema>");
     expect(invocations[1]?.stdin).toContain('"pixelOverrides"');
+  });
+
+  it("publishes provider errors when the failed attempt does not qualify for schema fallback", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "mcskinsplit-non-fallback-error-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      mkdir(resolve(root, "output"), { recursive: true }),
+      mkdir(resolve(root, "schema"), { recursive: true }),
+    ]);
+    const progress: string[] = [];
+    const provider = new CodexExecProvider({
+      command: "codex-test",
+      execute: async () => ({
+        exitCode: 1,
+        stdout: '{"type":"turn.failed","error":{"type":"authentication_error"}}\n',
+        stderr: "authentication denied\n",
+      }),
+    });
+
+    await expect(provider.analyze({
+      jobId: "job_non_fallback_error",
+      runId: "run_non_fallback_error",
+      attempt: 1,
+      model: CODEX_CONFIG_DEFAULT_MODEL,
+      pack: minimalPack(root),
+      onProgress: (event) => progress.push(event.message),
+    })).rejects.toMatchObject({
+      code: "CODEX_EXEC_FAILED",
+      rawEvents: '{"type":"turn.failed","error":{"type":"authentication_error"}}\n',
+      stderr: "authentication denied\n",
+    });
+    expect(progress).toEqual(["Codex 报告运行错误"]);
   });
 
   it("preserves both attempts when schema fallback also fails", async () => {
@@ -614,8 +661,10 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
       mkdir(resolve(root, "schema"), { recursive: true }),
     ]);
     let attempt = 0;
+    const progress: string[] = [];
     const provider = new CodexExecProvider({
       command: "codex-test",
+      useOutputSchema: true,
       execute: async (input) => {
         attempt += 1;
         if (attempt === 1) {
@@ -637,6 +686,7 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
       attempt: 1,
       model: CODEX_CONFIG_DEFAULT_MODEL,
       pack: minimalPack(root),
+      onProgress: (event) => progress.push(event.message),
     })).rejects.toMatchObject({
       code: "AI_TIMEOUT",
       rawEvents: [
@@ -646,6 +696,11 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
       ].join("\n"),
       stderr: "schema transport failed\nfallback transport stalled",
     });
+    expect(progress).toEqual([
+      "原生结构化请求失败，已切换本地 JSON 校验",
+      "模型开始分析候选区域",
+      "Codex 报告运行错误",
+    ]);
   });
 
   it("streams safe progress projections and excludes reasoning content", async () => {

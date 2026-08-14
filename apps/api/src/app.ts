@@ -307,6 +307,10 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
               process.env.AI_IGNORE_USER_CONFIG,
               false,
             ),
+            useOutputSchema: readBoolean(
+              process.env.AI_USE_OUTPUT_SCHEMA,
+              false,
+            ),
             allowSchemaFallback: readBoolean(
               process.env.AI_ALLOW_SCHEMA_FALLBACK,
               true,

@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 ## Milestones
 
@@ -19,6 +19,7 @@ Last updated: 2026-08-13
 | M10 constrained AI replacement recommendation | Complete | Repository Skill, ID-only validated proposal, shared Job/Run/Event telemetry, and explicit user Apply boundary |
 | M11 source-aware library lifecycle and correction | Complete | Whole-component unassign, provenance filters, soft retirement, immutable Bundle revision, and corrected-HEAD re-export |
 | M12 responsive workflow navigation | Complete | Seven stable section targets, sticky desktop/mobile navigation, scroll-aware active state, native hash links, and reduced-motion behavior |
+| M13 single-pass semantic JSON transport | Complete | Default one-call JSON capture, strict host validation, honest recovered diagnostics, and real browser AI completion |
 
 ## M0 baseline
 
@@ -815,3 +816,42 @@ Last updated: 2026-08-13
 - Navigation changes the viewport location and active-link presentation only. It
   does not select a Project, Revision, Part, Bundle, repair, or Composition, and
   it does not create or mutate persisted data.
+
+## M13 deliverables
+
+- Semantic analysis and replacement recommendation now omit native
+  `--output-schema` transport by default. Semantic analysis keeps the Schema in
+  its immutable prompt; replacement recommendation keeps its immutable decision
+  contract and candidate catalog. Captured JSON still passes the complete host
+  Schema, candidate-coverage, pixel-ownership, or exact-catalog validators before
+  it can create a Revision or advisory result.
+- Added `AI_USE_OUTPUT_SCHEMA=false` as the explicit transport-mode switch.
+  Compatible endpoints can enable it; `AI_ALLOW_SCHEMA_FALLBACK` applies only to
+  that opt-in path.
+- The opt-in fallback buffers provisional structured-transport errors. A
+  successful fallback records one compatibility notice rather than two generic
+  red provider errors, while non-fallback and terminal provider failures remain
+  visible.
+- Historical event streams containing the old error/error/fallback pattern are
+  projected as one completed compatibility notice after later progress proves
+  that the model continued.
+
+## M13 verification evidence
+
+- `pnpm verify` passes deterministic fixture checks, every workspace TypeScript
+  project, all `257` Vitest cases, and every production build. Package totals are
+  core `71`, compositor `8`, analysis pack `4`, provider `24`, Revision `32`,
+  Worker `15`, API `12`, and Web `91`.
+- A fresh real Chrome flow started Job
+  `aijob_56aa7a1179454a109f7b79908388f3b8` from the Studio. Its single Run
+  `airun_9f11c5eaf35a423a8940ad8d6d731fad` completed in about 76 seconds and
+  created `rev_314873d5ad0e41f6bcbb9eb6b683c036` as `main #3`.
+- The browser event list and persisted Job events contain one provider session,
+  no structured-output fallback, no provider error, and no failed turn. The raw
+  JSONL contains one `thread.started`, one `turn.started`, and one
+  `turn.completed`; the disabled Code Mode capability remains a non-terminal raw
+  item notice and is not projected as a Job error.
+- Host validation accepted all `211` candidate regions covering `2,047` visible
+  pixels, produced `13` components, and reported zero unknown pixels, review
+  items, warnings, or validation errors. The successful Run retained all five
+  expected audit assets.

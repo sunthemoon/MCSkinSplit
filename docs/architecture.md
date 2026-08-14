@@ -232,6 +232,11 @@ The detailed contract is in
   uses the same tool-free/read-only capability boundary with attached skin views
   and an inline semantic contract, while retaining configured model/provider
   routing unless `AI_IGNORE_USER_CONFIG` is enabled.
+- Both tool-free providers capture one JSON response by default and apply the
+  repository Schema plus deterministic host validation. Native
+  `--output-schema` transport is available only through
+  `AI_USE_OUTPUT_SCHEMA=true`; its compatibility fallback never bypasses host
+  validation.
 - `packages/ai-provider` accepts only the planner's structured ID recommendation.
   Deterministic validation requires exact Job/Composition/candidate-set identity,
   every Base group, exact per-group ID permutations, a complete selected

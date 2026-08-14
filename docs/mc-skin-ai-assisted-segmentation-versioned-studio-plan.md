@@ -323,6 +323,7 @@ AI_PROVIDER=codex-sdk
 AI_MODEL=gpt-5.6
 AI_TIMEOUT_SECONDS=300
 AI_MAX_REPAIR_ATTEMPTS=1
+AI_USE_OUTPUT_SCHEMA=false
 AI_KEEP_RUN_WORKSPACE=true
 ```
 
@@ -358,7 +359,7 @@ AI_KEEP_RUN_WORKSPACE=true
 
 - 本地任务队列；
 - 通过附图与内联的不可变语义输入调用模型；
-- 希望优先使用 JSON Schema 约束最终输出，并在传输能力失败时保留宿主校验回退。
+- 希望把 JSON Schema 与确定性像素校验保留在宿主边界，并兼容不支持原生结构化传输的模型端点。
 
 当前实现由 Provider 直接构造参数并通过 stdin 传递内联契约；等价的权限边界示意如下：
 
@@ -367,16 +368,17 @@ codex exec \
   --sandbox read-only \
   --ephemeral \
   --json \
-  --output-schema ./runs/$RUN_ID/schema/analysis-proposal.schema.json \
   --output-last-message ./runs/$RUN_ID/output/analysis-proposal.json \
   "<inline immutable semantic contract and inputs>"
 ```
 
 Provider 还会关闭 shell、web、browser、computer、image generation、apps、
 plugins、MCP 与多代理等能力，附加经过确定性生成的皮肤视图，并捕获 JSONL 与
-stderr。结构化输出传输失败时只允许移除 `--output-schema` 重试；最终 JSON 仍由
-同一宿主 Schema 与像素归属 Validator 校验。当前 Skill 版本为 `1.2.0`，prompt
-版本为 `semantic-proposal-v3-tool-free`。
+stderr。默认单次响应通过 `--output-last-message` 捕获，最终 JSON 由宿主 Schema
+与像素归属 Validator 严格校验。兼容端点可通过 `AI_USE_OUTPUT_SCHEMA=true`
+显式加入 `--output-schema`；该模式发生结构化传输失败时才允许移除参数重试，
+并继续执行同一宿主校验。当前 Skill 版本为 `1.2.0`，prompt 版本为
+`semantic-proposal-v3-tool-free`。
 
 ### 方案 C：Responses API，部署型补充
 
@@ -2478,6 +2480,30 @@ feat(web): add responsive workflow navigation
 
 ---
 
+## M13：语义 JSON 单次传输与诚实诊断
+
+目标：避免对已知不兼容的模型端点先发送一次必然失败的原生结构化请求，在不
+降低 Schema、候选覆盖或像素归属校验的前提下，让默认语义识别只调用模型一次。
+
+实现：
+
+1. 默认使用 `--output-last-message` 捕获一个 JSON 响应；输出 Schema 继续内联
+   在不可变 prompt 中，Host 仍执行完整 Ajv 与像素 Validator。
+2. `AI_USE_OUTPUT_SCHEMA=true` 才启用原生 `--output-schema` 传输；
+   `AI_ALLOW_SCHEMA_FALLBACK` 仅控制该显式模式的兼容回退。
+3. 显式模式成功回退时，第一次结构化传输的临时错误保留在 raw JSONL 审计中，
+   但实时界面只显示一条已恢复的兼容提示；真正的 provider/Job 失败仍显示。
+4. 旧历史事件中的 error/error/fallback 序列在后续进度证明恢复后，同样合并为
+   一条完成提示，避免把非终态兼容回退显示成两次红色失败。
+
+验收：
+
+- 默认真实网页识别只产生一个模型会话，不出现 schema fallback 或重复红色错误。
+- 输出仍须通过 Schema、候选唯一覆盖和像素归属校验后才能创建 Revision。
+- 显式原生结构化模式仍可启用，失败回退及终态错误都保留完整审计证据。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2499,7 +2525,8 @@ feat(web): add responsive workflow navigation
 | S11 | M10 受限 AI 换装候选建议 | S10 |
 | S12 | M11 组件库治理与误识别修正 | S5、S8、S9 |
 | S13 | M12 长页面工作流定位 | S12 |
-| S14 | 综合测试与审核 | 全部 |
+| S14 | M13 语义 JSON 单次传输与诚实诊断 | S13 |
+| S15 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

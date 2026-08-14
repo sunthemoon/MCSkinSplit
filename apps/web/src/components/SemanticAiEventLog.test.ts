@@ -161,6 +161,98 @@ describe("semantic AI event log", () => {
     expect(rows[0]?.detail).toContain("重复 2 次");
     expect(rows[1]).toMatchObject({ kind: "warning", status: null });
   });
+
+  it("projects a recovered structured-output fallback as one completed warning", () => {
+    const events = [
+      event(1, "provider_error", "Codex 报告运行错误", {
+        runId: "run_1",
+        attempt: 1,
+        kind: "error",
+        status: "failed",
+      }),
+      event(2, "provider_error", "Codex 报告运行错误", {
+        runId: "run_1",
+        attempt: 1,
+        kind: "error",
+        status: "failed",
+      }),
+      event(3, "provider_warning", "结构化输出不可用，已切换本地 JSON 校验"),
+      event(4, "provider_session", "Codex 会话已建立", {
+        runId: "run_1",
+        attempt: 1,
+        status: "started",
+      }),
+    ];
+    const rows = buildSemanticAiEventRows(events);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      eventIds: [1, 2, 3],
+      eventType: "provider_warning",
+      kind: "warning",
+      status: "completed",
+      message: "已启用兼容 JSON 校验",
+      detail: "原生结构化请求失败 · 模型分析已自动继续",
+      completedAt: "2026-08-13T00:00:04.000Z",
+    });
+
+    const html = renderToStaticMarkup(
+      createElement(SemanticAiEventLog, { events, running: true }),
+    );
+    expect(html).toContain("已启用兼容 JSON 校验");
+    expect(html).not.toContain("模型阶段错误");
+    expect(html).not.toContain('data-status="recoverable"');
+  });
+
+  it("keeps unrelated provider errors visible beside a fallback warning", () => {
+    const rows = buildSemanticAiEventRows([
+      event(1, "provider_error", "Codex 认证失败", {
+        runId: "run_1",
+        attempt: 1,
+        status: "failed",
+      }),
+      event(2, "provider_warning", "结构化输出不可用，已切换本地 JSON 校验"),
+      event(3, "provider_session", "Codex 会话已建立", {
+        runId: "run_1",
+        attempt: 1,
+        status: "started",
+      }),
+    ]);
+
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toMatchObject({
+      kind: "warning",
+      status: "recoverable",
+      message: "Codex 认证失败",
+    });
+    expect(rows[1]).toMatchObject({ kind: "warning", status: null });
+  });
+
+  it("preserves a terminal job failure after a recovered fallback", () => {
+    const rows = buildSemanticAiEventRows([
+      event(1, "provider_error", "Codex 报告运行错误", {
+        runId: "run_1",
+        attempt: 1,
+        status: "failed",
+      }),
+      event(2, "provider_warning", "结构化输出不可用，已切换本地 JSON 校验"),
+      event(3, "provider_session", "Codex 会话已建立", {
+        runId: "run_1",
+        attempt: 1,
+        status: "started",
+      }),
+      event(4, "failed", "AI 分析失败", {
+        error: { code: "AI_TIMEOUT" },
+      }),
+    ]);
+
+    expect(rows[0]).toMatchObject({ kind: "warning", status: "completed" });
+    expect(rows.at(-1)).toMatchObject({
+      kind: "terminal",
+      status: "terminal",
+      message: "AI 分析失败",
+    });
+  });
 });
 
 function event(
