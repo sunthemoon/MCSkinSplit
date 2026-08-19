@@ -1029,16 +1029,29 @@ Last updated: 2026-08-19
 ## M16 verification status
 
 - Final repository `pnpm verify`: **passed** on 2026-08-19. Fixture checks,
-  workspace typechecks, all 316 tests, and all production builds passed. Package
+  workspace typechecks, all 320 tests, and all production builds passed. Package
   totals are core 71, compositor 8, analysis pack 17, provider 32, Revision 43,
-  worker 24, API 13, and Web 108. The existing Vite warning for two chunks larger
+  worker 28, API 13, and Web 108. The existing Vite warning for two chunks larger
   than 500 kB remains.
 - API integration confirms a committing asynchronous analysis returns 409 for a
   composed Revision and creates no semantic Job; `focus: ["unknown"]` is rejected
   at the public schema boundary.
-- No real model or browser run is required for this contract/storage milestone;
-  provider behavior is covered by deterministic proposal fixtures and a scripted
-  worker provider.
+- A real Studio run against `alex-mix-real` completed Job
+  `aijob_7b6d8cf5d6074c5292d43c25ee3c525d` in about 128 seconds and created
+  `main #2` Revision `rev_c90c7c83071749e38bb2ef22496ebfe5`. The browser showed
+  all six stages complete, 11 components, 0 review items, and 0 unknown pixels.
+  The Run used proposal Schema `1.1`, passed validator v2, emitted no normalized
+  provider-error, provider-warning, or provider-tool events and used no structured-
+  output fallback. Its non-empty raw-event asset retains the CLI's informational
+  `Code Mode host disabled` item for audit rather than presenting it as a Job error.
+- The same browser session rejected a commit-enabled analysis of a composed
+  Revision before creating a Job. Live history loading exposed and then verified
+  the compatibility fix for pre-M15 Skill v1-v3 option shapes: all 29 semantic
+  Jobs load successfully, while Retry of a v1 Job returns the explicit stale-
+  contract 409 and creates no additional Job. Reloading the Studio and activating
+  the new catalog result restored its persisted 6/6 run record without an
+  application error. Browser-extension message-channel noise remains unrelated
+  to the application.
 
 ## M16 boundaries
 

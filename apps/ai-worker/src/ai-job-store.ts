@@ -1093,12 +1093,78 @@ function validateOptionsForWrite(
 }
 
 function parseJobOptions(row: AiJobRow): AiJobOptions {
+  const stored = parseJsonUnknown(row.options_json, "options_json");
   return validateJobOptions(
-    parseJsonUnknown(row.options_json, "options_json"),
+    applyLegacySemanticAnalysisReadDefaults(stored, row),
     row.job_kind as AiJobKind,
     row.composition_id,
     (message) => corrupt(message),
   );
+}
+
+const LEGACY_SEMANTIC_ANALYSIS_READ_DEFAULTS = new Map<
+  string,
+  Readonly<{
+    reasoningEffort?: AiAnalysisOptions["reasoningEffort"];
+    semanticBaseline: NonNullable<AiAnalysisOptions["semanticBaseline"]>;
+  }>
+>([
+  [
+    semanticAnalysisContractKey(
+      "mc-skin-segmenter",
+      "1.0.0",
+      "semantic-proposal-v1",
+    ),
+    { reasoningEffort: "medium", semanticBaseline: "current" },
+  ],
+  [
+    semanticAnalysisContractKey(
+      "mc-skin-segmenter",
+      "1.1.0",
+      "semantic-proposal-v2",
+    ),
+    { reasoningEffort: "medium", semanticBaseline: "current" },
+  ],
+  [
+    semanticAnalysisContractKey(
+      "mc-skin-segmenter",
+      "1.2.0",
+      "semantic-proposal-v3-tool-free",
+    ),
+    { semanticBaseline: "current" },
+  ],
+]);
+
+function applyLegacySemanticAnalysisReadDefaults(
+  value: unknown,
+  row: AiJobRow,
+): unknown {
+  if (row.job_kind !== "semantic_analysis" || !isRecord(value)) return value;
+  const defaults = LEGACY_SEMANTIC_ANALYSIS_READ_DEFAULTS.get(
+    semanticAnalysisContractKey(
+      row.skill_name,
+      row.skill_version,
+      row.prompt_version,
+    ),
+  );
+  if (!defaults) return value;
+  return {
+    ...value,
+    ...(!Object.hasOwn(value, "reasoningEffort") && defaults.reasoningEffort
+      ? { reasoningEffort: defaults.reasoningEffort }
+      : {}),
+    ...(!Object.hasOwn(value, "semanticBaseline")
+      ? { semanticBaseline: defaults.semanticBaseline }
+      : {}),
+  };
+}
+
+function semanticAnalysisContractKey(
+  skillName: string,
+  skillVersion: string,
+  promptVersion: string,
+): string {
+  return `${skillName}\u0000${skillVersion}\u0000${promptVersion}`;
 }
 
 function validateJobOptions(
@@ -1113,6 +1179,7 @@ function validateJobOptions(
       value,
       [
         "mode",
+        "semanticBaseline",
         "provider",
         "model",
         "reasoningEffort",
@@ -1122,25 +1189,23 @@ function validateJobOptions(
       ],
       "semantic_analysis options",
       failure,
-      ["semanticBaseline"],
     );
     if (
       value.mode !== "full" ||
+      (value.semanticBaseline !== "empty" &&
+        value.semanticBaseline !== "current") ||
       value.taxonomyLevel !== "coarse" ||
       !isReasoningEffort(value.reasoningEffort) ||
       !Array.isArray(value.focus) ||
       !value.focus.every(isSemanticCategory) ||
       new Set(value.focus).size !== value.focus.length ||
       typeof value.createRevisionOnSuccess !== "boolean"
-      || (value.semanticBaseline !== undefined &&
-        value.semanticBaseline !== "empty" &&
-        value.semanticBaseline !== "current")
     ) {
       throw failure("semantic_analysis options 无效");
     }
     return {
       mode: "full",
-      semanticBaseline: value.semanticBaseline === "empty" ? "empty" : "current",
+      semanticBaseline: value.semanticBaseline,
       provider: validateTextValue(value.provider, "provider", 80, failure),
       model: validateTextValue(value.model, "model", 120, failure),
       reasoningEffort: value.reasoningEffort,

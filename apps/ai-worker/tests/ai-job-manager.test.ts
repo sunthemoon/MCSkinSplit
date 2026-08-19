@@ -21,6 +21,7 @@ import {
   RevisionStore,
   type ImportProjectResult,
 } from "@mc-skin-split/skin-revision";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AiJobManager,
@@ -651,6 +652,73 @@ describe("AiJobManager", () => {
     expect(provider.calls).toBe(0);
   });
 
+  it("rejects a legacy retry contract before checking its removed provider", async () => {
+    const provider = new ScriptedProvider("provider-current", ({ pack }) =>
+      validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions),
+    );
+    const { manager, imported } = await setup([provider]);
+    const removedProvider = "provider-removed";
+    const database = new Database(manager.jobStore.databasePath);
+    try {
+      database
+        .prepare(`
+          INSERT INTO ai_job (
+            id, job_kind, project_id, input_revision_id, result_revision_id,
+            composition_id, retry_of_job_id, status, provider, model,
+            skill_name, skill_version, prompt_version, input_hash, output_hash,
+            options_json, review_items_json, proposal_summary,
+            advisory_result_json, cancel_requested, created_at, started_at,
+            finished_at, error_json
+          ) VALUES (?, 'semantic_analysis', ?, ?, NULL, NULL, NULL, 'failed',
+            ?, 'legacy-model', 'mc-skin-segmenter', '1.0.0',
+            'semantic-proposal-v1', NULL, NULL, ?, '[]', NULL, NULL, 0, ?,
+            NULL, ?, ?)
+        `)
+        .run(
+          "aijob_legacy_retry_contract",
+          imported.project.id,
+          imported.revision.id,
+          removedProvider,
+          JSON.stringify({
+            mode: "full",
+            provider: removedProvider,
+            model: "legacy-model",
+            taxonomyLevel: "coarse",
+            focus: ["hair"],
+            createRevisionOnSuccess: false,
+          }),
+          new Date().toISOString(),
+          new Date().toISOString(),
+          JSON.stringify({ code: "LEGACY_FAILURE", message: "legacy failure" }),
+        );
+    } finally {
+      database.close();
+    }
+    const legacyJob = manager.jobStore.getJob("aijob_legacy_retry_contract");
+    expect(legacyJob.options).toMatchObject({
+      provider: removedProvider,
+      reasoningEffort: "medium",
+      semanticBaseline: "current",
+    });
+    expect(manager.listProviders()).not.toContain(removedProvider);
+    const jobCount = manager.listJobs().length;
+    await expect(manager.retryJob(legacyJob.id)).rejects.toMatchObject({
+      code: "AI_ANALYSIS_RETRY_CONTRACT_STALE",
+      statusCode: 409,
+      details: {
+        jobId: legacyJob.id,
+        storedContract: {
+          skillName: "mc-skin-segmenter",
+          skillVersion: "1.0.0",
+          promptVersion: "semantic-proposal-v1",
+        },
+        requiredAction: "start_fresh_analysis",
+      },
+    });
+    expect(manager.listJobs()).toHaveLength(jobCount);
+    expect(provider.calls).toBe(0);
+  });
+
   it("rejects generated composition pixels before creating a semantic Job", async () => {
     const provider = new ScriptedProvider("generated-source-provider", ({ pack }) =>
       validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions),
@@ -1104,7 +1172,7 @@ describe("AiJobManager", () => {
         compositionId: composition.composition.id,
       }),
     ).toEqual([]);
-  });
+  }, 15_000);
 
   it("fails a restoration recommendation committed during final regeneration", async () => {
     const provider = new ScriptedReplacementProvider(

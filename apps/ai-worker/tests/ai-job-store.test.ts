@@ -2,6 +2,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  AI_SKILL_NAME,
+  AI_SKILL_VERSION,
+} from "@mc-skin-split/ai-provider";
+import { PROMPT_VERSION } from "@mc-skin-split/skin-analysis-pack";
 import { RevisionStore } from "@mc-skin-split/skin-revision";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
@@ -98,6 +103,7 @@ describe("AiJobStore restoration recommendations", () => {
       promptVersion: "semantic-proposal-v2",
       options: {
         mode: "full",
+        semanticBaseline: "current",
         provider: "provider-a",
         model: "model-a",
         reasoningEffort: "medium",
@@ -308,6 +314,257 @@ describe("AiJobStore restoration recommendations", () => {
     ).toThrow(/invalid AI job kind shape/u);
   });
 });
+
+describe("AiJobStore historical semantic contracts", () => {
+  it("keeps current semantic write fields required", async () => {
+    const { jobStore, imported } = await setup();
+    const completeOptions = {
+      mode: "full",
+      semanticBaseline: "empty",
+      provider: "provider-a",
+      model: "model-a",
+      reasoningEffort: "medium",
+      taxonomyLevel: "coarse",
+      focus: ["hair"],
+      createRevisionOnSuccess: false,
+    } as const;
+    const invalidOptions = [
+      {
+        mode: "full",
+        semanticBaseline: "empty",
+        provider: "provider-a",
+        model: "model-a",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: false,
+      },
+      {
+        mode: "full",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: false,
+      },
+    ] as const;
+
+    for (const options of invalidOptions) {
+      expect(() =>
+        jobStore.createJob({
+          kind: "semantic_analysis",
+          projectId: imported.project.id,
+          inputRevisionId: imported.revision.id,
+          skillName: AI_SKILL_NAME,
+          skillVersion: AI_SKILL_VERSION,
+          promptVersion: PROMPT_VERSION,
+          options: options as typeof completeOptions,
+        }),
+      ).toThrowError(
+        expect.objectContaining({ code: "INVALID_AI_JOB", statusCode: 400 }),
+      );
+    }
+    expect(jobStore.listJobs({ kind: "semantic_analysis" })).toEqual([]);
+  });
+
+  it("reads only the field defaults defined by each pre-M15 contract", async () => {
+    const { revisionStore, jobStore, imported } = await setup();
+    const database = new Database(revisionStore.databasePath);
+    cleanups.push(() => {
+      database.close();
+    });
+    const baseOptions = {
+      mode: "full",
+      provider: "provider-a",
+      model: "model-a",
+      taxonomyLevel: "coarse",
+      focus: ["hair"],
+      createRevisionOnSuccess: false,
+    };
+    const historical = [
+      {
+        id: "aijob_historical_v1",
+        skillVersion: "1.0.0",
+        promptVersion: "semantic-proposal-v1",
+        options: baseOptions,
+        expectedReasoningEffort: "medium",
+      },
+      {
+        id: "aijob_historical_v2",
+        skillVersion: "1.1.0",
+        promptVersion: "semantic-proposal-v2",
+        options: baseOptions,
+        expectedReasoningEffort: "medium",
+      },
+      {
+        id: "aijob_historical_v2_explicit_reasoning",
+        skillVersion: "1.1.0",
+        promptVersion: "semantic-proposal-v2",
+        options: { ...baseOptions, reasoningEffort: "max" },
+        expectedReasoningEffort: "max",
+      },
+      {
+        id: "aijob_historical_v3",
+        skillVersion: "1.2.0",
+        promptVersion: "semantic-proposal-v3-tool-free",
+        options: { ...baseOptions, reasoningEffort: "high" },
+        expectedReasoningEffort: "high",
+      },
+    ] as const;
+
+    for (const fixture of historical) {
+      insertStoredSemanticJob(database, {
+        id: fixture.id,
+        projectId: imported.project.id,
+        revisionId: imported.revision.id,
+        skillVersion: fixture.skillVersion,
+        promptVersion: fixture.promptVersion,
+        options: fixture.options,
+      });
+    }
+
+    expect(
+      jobStore
+        .listJobs({ kind: "semantic_analysis" })
+        .map((job) => {
+          if (job.kind !== "semantic_analysis") {
+            throw new Error("semantic_analysis filter returned another Job kind");
+          }
+          return {
+            id: job.id,
+            reasoningEffort: job.options.reasoningEffort,
+            semanticBaseline: job.options.semanticBaseline,
+          };
+        }),
+    ).toEqual(
+      historical.map((fixture) => ({
+        id: fixture.id,
+        reasoningEffort: fixture.expectedReasoningEffort,
+        semanticBaseline: "current",
+      })),
+    );
+  });
+
+  it("does not apply legacy defaults to current or unknown contracts", async () => {
+    const { revisionStore, jobStore, imported } = await setup();
+    const database = new Database(revisionStore.databasePath);
+    cleanups.push(() => {
+      database.close();
+    });
+    const options = {
+      mode: "full",
+      provider: "provider-a",
+      model: "model-a",
+      taxonomyLevel: "coarse",
+      focus: ["hair"],
+      createRevisionOnSuccess: false,
+    };
+    insertStoredSemanticJob(database, {
+      id: "aijob_v3_missing_reasoning",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillVersion: "1.2.0",
+      promptVersion: "semantic-proposal-v3-tool-free",
+      options,
+    });
+    insertStoredSemanticJob(database, {
+      id: "aijob_current_missing_reasoning",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillVersion: "1.3.0",
+      promptVersion: "semantic-proposal-v5-bounded-transfers",
+      options,
+    });
+    insertStoredSemanticJob(database, {
+      id: "aijob_unknown_missing_reasoning",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillVersion: "9.9.9",
+      promptVersion: "unknown-prompt",
+      options,
+    });
+    insertStoredSemanticJob(database, {
+      id: "aijob_v1_version_with_v2_prompt",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillVersion: "1.0.0",
+      promptVersion: "semantic-proposal-v2",
+      options,
+    });
+    insertStoredSemanticJob(database, {
+      id: "aijob_v2_version_with_v1_prompt",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillVersion: "1.1.0",
+      promptVersion: "semantic-proposal-v1",
+      options,
+    });
+    insertStoredSemanticJob(database, {
+      id: "aijob_wrong_skill_with_v2_contract",
+      projectId: imported.project.id,
+      revisionId: imported.revision.id,
+      skillName: "other-skin-segmenter",
+      skillVersion: "1.1.0",
+      promptVersion: "semantic-proposal-v2",
+      options,
+    });
+
+    for (const jobId of [
+      "aijob_v3_missing_reasoning",
+      "aijob_current_missing_reasoning",
+      "aijob_unknown_missing_reasoning",
+      "aijob_v1_version_with_v2_prompt",
+      "aijob_v2_version_with_v1_prompt",
+      "aijob_wrong_skill_with_v2_contract",
+    ]) {
+      expect(() => jobStore.getJob(jobId)).toThrowError(
+        expect.objectContaining({ code: "AI_JOB_CORRUPT" }),
+      );
+    }
+  });
+});
+
+function insertStoredSemanticJob(
+  database: Database.Database,
+  input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly skillName?: string;
+    readonly skillVersion: string;
+    readonly promptVersion: string;
+    readonly options: Readonly<Record<string, unknown>>;
+    readonly status?: "failed" | "succeeded";
+  },
+): void {
+  database
+    .prepare(`
+      INSERT INTO ai_job (
+        id, job_kind, project_id, input_revision_id, result_revision_id,
+        composition_id, retry_of_job_id, status, provider, model, skill_name,
+        skill_version, prompt_version, input_hash, output_hash, options_json,
+        review_items_json, proposal_summary, advisory_result_json,
+        cancel_requested, created_at, started_at, finished_at, error_json
+      ) VALUES (?, 'semantic_analysis', ?, ?, NULL, NULL, NULL, ?,
+        'provider-a', 'model-a', ?, ?, ?, NULL, NULL, ?,
+        '[]', NULL, NULL, 0, ?, NULL, ?, ?)
+    `)
+    .run(
+      input.id,
+      input.projectId,
+      input.revisionId,
+      input.status ?? "failed",
+      input.skillName ?? "mc-skin-segmenter",
+      input.skillVersion,
+      input.promptVersion,
+      JSON.stringify(input.options),
+      new Date().toISOString(),
+      new Date().toISOString(),
+      input.status === "succeeded"
+        ? null
+        : JSON.stringify({ code: "LEGACY_FAILURE", message: "legacy failure" }),
+    );
+}
 
 async function setup() {
   const dataDirectory = await mkdtemp(resolve(tmpdir(), "mcskinsplit-ai-store-"));

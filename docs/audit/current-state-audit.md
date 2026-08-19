@@ -14,10 +14,10 @@
 | 技术栈 | pnpm workspace；React/Vite Web、Fastify API、SQLite RevisionStore、TypeScript core/provider/worker packages |
 | 开发命令 | `pnpm dev`，或分别运行 `pnpm dev:api` / `pnpm dev:web` |
 | 总验证命令 | `pnpm verify`，依次执行 fixture 校验、typecheck、test、build |
-| 本次验证 | M16 后 `pnpm verify` 通过；8 个包共 316 项测试通过 |
+| 本次验证 | M16 后 `pnpm verify` 通过；8 个包共 320 项测试通过；另完成 1 次真实模型/浏览器回归 |
 | 已知非阻断提示 | Web 构建存在两个大于 500 kB 的 chunk 警告 |
 
-测试分布：skin-core 71、skin-compositor 8、skin-analysis-pack 17、ai-provider 32、skin-revision 43、ai-worker 24、API 13、Web 108。
+测试分布：skin-core 71、skin-compositor 8、skin-analysis-pack 17、ai-provider 32、skin-revision 43、ai-worker 28、API 13、Web 108。
 
 ## 2. 总结判定
 
@@ -77,6 +77,8 @@ generated 或包含 `apply_part`/`compose`/`palette_change` 的有效内容祖�
 显式只读分析仍可用于比较，旧 Skill/Prompt Job 则必须新建分析而不能静默重试；
 Migration 013 用 18 个 trigger 固化 Revision、Operation、Asset 和 Part/Bundle
 历史，保留创建期一次性绑定与明确的生命周期字段更新。
+旧 Skill v1-v3 Job 只在精确历史合同下补齐当时未存储的读取默认值，
+当前写入与未知合同仍保持严格校验。
 
 第 5 项视觉 grounding 保留为 M17，逐像素来源与隐藏内容补全仍分别受
 M18/M19 约束，未在本里程碑提前实现。
@@ -103,7 +105,7 @@ M18/M19 约束，未在本里程碑提前实现。
 | 人工编辑工具 | `SemanticEditorCanvas.tsx`、`App.tsx` 语义操作、`editor.ts` | 单像素/拖动选择、assign、unassign、merge、split、reclassify、整组件回 Unknown 均可用 | 核心已实现，效率工具缺失 | 明确新建组件模式；补显隐、Diff、魔棒、框选、接缝选择、Undo/Redo、关系编辑 |
 | 部件导出与复用 | `packages/skin-core/src/semantic/parts.ts`、`part-storage.ts` | Part 保存 texture/write-mask/manifest/preview/source；单部件应用检查模型兼容及与 Base 的同/异色重叠，并由用户选择 `use_part`/`keep_base`；Composition 另行检查声明外 UV 与多层冲突 | 已实现 | Manifest 2.0 增 origin artifact、generated mask 与来源传播；旧 1.0/1.1 保持可读 |
 | skinview3d 初始化 | `SkinPreview.tsx`、`mcSkinPreview.ts` | Mount 初始化一个 Viewer，换 Revision 只 loadSkin，unmount dispose；Blob URL 切换/卸载时 revoke | 已实现 | 补真实浏览器/WebGL/多 Viewer 回归；不重写 Viewer |
-| 自动化测试 | workspace `*.test.ts`、fixtures、`pnpm verify` | 本次 316 项测试、typecheck、fixture check、build 全部通过 | 单元/集成较强，浏览器与 completion GT 缺失 | 引入 Playwright/Vitest Browser；增加合成遮挡真值和视觉回归 |
+| 自动化测试 | workspace `*.test.ts`、fixtures、`pnpm verify` | 本次 320 项测试、typecheck、fixture check、build 全部通过；另有一次真实模型/浏览器 smoke | 单元/集成较强，可重复浏览器 E2E 与 completion GT 仍缺失 | 引入 Playwright/Vitest Browser；增加合成遮挡真值和视觉回归 |
 
 ## 4. 强制判定问题
 
