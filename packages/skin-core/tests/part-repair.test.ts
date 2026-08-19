@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { createRgbaImage, getPixel, setPixel } from "../src";
+import {
+  createLegacyMixedPixelOriginDocument,
+  createPixelOriginDocument,
+  createRgbaImage,
+  getPixel,
+  getPixelOrigin,
+  setPixel,
+  summarizePixelOrigins,
+} from "../src";
 import { getSkinLayout } from "../src/layouts/layout";
 import {
   applyPartRepairOperation,
+  applyPartRepairOperationWithOrigins,
   createLimbMirrorMappings,
   derivePartWriteMask,
+  type OriginAwarePartRepairState,
   type PartRepairState,
 } from "../src/semantic/part-repair";
 import { buildSurfaceTexels } from "../src/uv/surface-model";
@@ -216,6 +226,134 @@ describe("deterministic part repair", () => {
       /unused UV pixel/i,
     );
   });
+
+  it("persists manual paint/replace and erasure origins per edit Revision", () => {
+    const state = originAwareEmptyState("slim", "parteditrev_base");
+    const span = firstSpan("slim", "head.base.front", 1);
+    const pixelId = span.y * 64 + span.x0;
+    const painted = applyPartRepairOperationWithOrigins(
+      state,
+      { type: "paint_color", spans: [span], rgba: [1, 2, 3, 255] },
+      {
+        resultSubject: { kind: "part_edit_revision", id: "parteditrev_painted" },
+        actor: { type: "user", id: "Player One" },
+        operationId: "op_paint",
+      },
+    );
+
+    expect(getPixelOrigin(painted.originDocument, pixelId)).toMatchObject({
+      intrinsicOrigin: "manual_authored",
+      evidence: {
+        actor: { type: "user", id: "Player One" },
+        operationId: "op_paint",
+      },
+      copyLineage: null,
+    });
+    expect(summarizePixelOrigins(painted.originDocument)).toMatchObject({
+      containsGeneratedPixels: false,
+      counts: { manual_authored: 1, generated_completion: 0 },
+    });
+
+    const replaced = applyPartRepairOperationWithOrigins(
+      painted,
+      {
+        type: "replace_color",
+        from: [1, 2, 3, 255],
+        to: [7, 8, 9, 255],
+      },
+      {
+        resultSubject: { kind: "part_edit_revision", id: "parteditrev_replaced" },
+        actor: { type: "user" },
+        operationId: "op_replace",
+      },
+    );
+    expect(getPixelOrigin(replaced.originDocument, pixelId)).toMatchObject({
+      intrinsicOrigin: "manual_authored",
+      evidence: { operationId: "op_replace" },
+    });
+
+    const erased = applyPartRepairOperationWithOrigins(
+      replaced,
+      { type: "erase_pixels", spans: [span] },
+      {
+        resultSubject: { kind: "part_edit_revision", id: "parteditrev_erased" },
+        actor: { type: "user" },
+        operationId: "op_erase",
+      },
+    );
+    expect(getPixelOrigin(erased.originDocument, pixelId)).toBeUndefined();
+    expect(erased.originChangedPixelIds).toEqual([pixelId]);
+    expect(summarizePixelOrigins(erased.originDocument).counts.manual_authored).toBe(0);
+  });
+
+  it("copies intrinsic origin with exact immediate ancestry, including same-RGBA copies", () => {
+    const sourcePixel = canonicalPixel("slim", "head.base.front", 0, 0);
+    const targetPixel = canonicalPixel("slim", "head.base.back", 0, 0);
+    const sourceTexture = createRgbaImage(64, 64);
+    const targetTexture = createRgbaImage(64, 64);
+    setPixel(sourceTexture, sourcePixel.x, sourcePixel.y, [3, 4, 5, 255]);
+    setPixel(targetTexture, targetPixel.x, targetPixel.y, [3, 4, 5, 255]);
+    const source: OriginAwarePartRepairState = {
+      armType: "slim",
+      texture: sourceTexture,
+      writeMask: derivePartWriteMask(sourceTexture, "slim"),
+      originDocument: createPixelOriginDocument({
+        subject: { kind: "part", id: "part_source" },
+        armType: "slim",
+        image: sourceTexture,
+        intrinsicOrigin: "generated_completion",
+        evidence: {
+          candidateId: "candidate_test",
+          evidenceHash: `sha256:${"b".repeat(64)}`,
+          decisionId: "decision_test",
+          actor: { type: "system" },
+        },
+      }),
+      sourceComponentInstanceId: "hair.main",
+    };
+    const target: OriginAwarePartRepairState = {
+      armType: "slim",
+      texture: targetTexture,
+      writeMask: derivePartWriteMask(targetTexture, "slim"),
+      originDocument: createLegacyMixedPixelOriginDocument({
+        subject: { kind: "part_edit_revision", id: "parteditrev_target" },
+        sourceRevisionId: "rev_legacy",
+        armType: "slim",
+        image: targetTexture,
+      }),
+      sourceComponentInstanceId: "hair.main",
+    };
+    const result = applyPartRepairOperationWithOrigins(
+      target,
+      {
+        type: "copy_surfaces",
+        source,
+        mappings: [
+          {
+            sourceSurface: "head.base.front",
+            targetSurface: "head.base.back",
+          },
+        ],
+      },
+      {
+        resultSubject: { kind: "part_edit_revision", id: "parteditrev_copied" },
+        actor: { type: "user" },
+        operationId: "op_copy",
+      },
+    );
+    const targetPixelId = targetPixel.y * 64 + targetPixel.x;
+
+    expect(result.changedPixelIds).toEqual([]);
+    expect(result.originChangedPixelIds).toEqual([targetPixelId]);
+    expect(getPixelOrigin(result.originDocument, targetPixelId)).toMatchObject({
+      intrinsicOrigin: "generated_completion",
+      copyLineage: {
+        sourceSubject: { kind: "part", id: "part_source" },
+        sourceComponentInstanceId: "hair.main",
+        sourcePixelId: sourcePixel.y * 64 + sourcePixel.x,
+      },
+    });
+  });
 });
 
 function emptyState(armType: ArmType): PartRepairState {
@@ -227,6 +365,23 @@ function withDerivedMask(state: PartRepairState): PartRepairState {
   return {
     ...state,
     writeMask: derivePartWriteMask(state.texture, state.armType),
+  };
+}
+
+function originAwareEmptyState(
+  armType: ArmType,
+  subjectId: string,
+): OriginAwarePartRepairState {
+  const state = emptyState(armType);
+  return {
+    ...state,
+    originDocument: createLegacyMixedPixelOriginDocument({
+      subject: { kind: "part_edit_revision", id: subjectId },
+      sourceRevisionId: "rev_legacy",
+      armType,
+      image: state.texture,
+    }),
+    sourceComponentInstanceId: "hair.main",
   };
 }
 

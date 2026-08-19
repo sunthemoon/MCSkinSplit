@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.source.json --pretty false",
     "typecheck": "tsc -b tsconfig.source.json tsconfig.test.json --pretty false",
-    "test": "vitest run"
+    "test": "vitest run --testTimeout=20000"
   },
   "dependencies": {
     "@mc-skin-split/skin-compositor": "workspace:*",

@@ -2713,6 +2713,57 @@ CandidateRegion 精确分区、Host 像素所有权和不可变 Revision 合同�
 
 ---
 
+## M18：逐像素来源与 Part 2.0
+
+状态：**已完成**。
+
+目标：把原图、玩家修改、已接受的推测补全和无法精确追溯的旧历史区分到
+每个有效可见像素，并让来源随 Revision、Part、Bundle、Composition 和组件
+修补完整传播，为 M19 的隐藏内容补全建立可校验基础。
+
+实现：
+
+1. `PixelOriginDocument` Schema `1.0` 以 canonical spans 覆盖当前皮肤所有
+   非透明 used-UV 像素且不重叠。固有来源限定为 `source_visible`、
+   `manual_authored`、`generated_completion`、`legacy_mixed`。
+2. copied 是独立推导关系，不是第五种固有来源。复制像素保留原固有来源，
+   只记录直接来源 subject/component/pixel；更早血缘通过不可变来源文档继续查询。
+3. 新 Revision 快照保存 checksummed `origin.json`，并把 canonical origin 纳入
+   新版 result hash。旧 Revision 保留原 hash；首次派生能证明的来源继续传播，
+   不能证明的全部标记为 `legacy_mixed`，绝不默认为原图。
+4. Part 2.0 保存 texture、write mask、`origin.json`、由来源确定性派生的
+   `generated-mask.png`、manifest、preview、source 共七项文件。生成 mask 必须
+   是 write mask 子集；历史 Part 1.0/1.1 的五文件读取合同保持不变。
+5. 语义组件中的 generated 布尔值与四类像素计数只允许由服务端按 origin 和
+   authoritative mask 派生。AI 提案和客户端不能独立声明这些结果。
+6. Import、人工/AI 语义操作、Part/Bundle 应用、Composition、Branch、Revert、
+   Part 导出与 append-only 修补统一传播来源。paint/replace 的实际 RGBA 变化记为
+   manual authored；copy 保留固有来源和直接复制血缘；erase 同时移除像素与来源。
+7. Migration 014 扩展 Revision/Part/PartEdit 资产合同和 closed file-role enums，
+   继续执行一次性绑定及写后不可变约束。旧行仅因早于迁移而允许来源引用为空。
+8. `GET /api/revisions/:revisionId/origin` 返回已校验来源、总计和组件计数；旧快照
+   返回 `legacy_unavailable`。Studio 以玩家可读名称展示四类来源并明确旧资产边界。
+
+验证门：
+
+- Revision→Part→新 Revision 后固有来源不变，复制只增加直接 lineage；
+- PartEdit 的 paint/replace/copy/erase 逐 Revision 往返并校验来源；
+- v13→v14 复制数据库升级、旧 Part/Revision 读取及新七文件写入均通过；
+- 篡改 origin、generated mask、摘要、文件角色或 hash 会被存储层拒绝；
+- 全仓 `pnpm verify` 已通过：8 个 package 的 typecheck/build 与 373 项测试
+  全部通过；`skin-revision` 的 56 项测试覆盖 v13→v14、旧资产兼容、来源
+  往返、同 RGBA 来源变化、文件绑定及篡改/回滚。
+- 隔离真实浏览器流程已验证 Revision 来源面板与 Part 2.0 卡片：1,767 px
+  原图来源、1 px 复制关系、0 px 手动/推测/历史不明；API 重启后结果保持，
+  700/1,200/1,904 px 三种宽度均无 document 横向溢出。
+
+边界：
+
+- M18 不生成被遮挡内容；`generated_completion` 的首个正式生产者属于 M19。
+- `legacy_mixed` 是可继续传播的诚实未知来源，不表示像素一定经过 AI 或人工修改。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。

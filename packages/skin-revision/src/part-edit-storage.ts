@@ -3,12 +3,21 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { sha256 } from "./hash";
 
-export const PART_EDIT_FILE_NAMES = [
+export const LEGACY_PART_EDIT_FILE_NAMES = [
   "texture.png",
   "write-mask.png",
   "revision.json",
 ] as const;
 
+export const PART_EDIT_FILE_NAMES = [
+  "texture.png",
+  "write-mask.png",
+  "origin.json",
+  "generated-mask.png",
+  "revision.json",
+] as const;
+
+export type LegacyPartEditFileName = (typeof LEGACY_PART_EDIT_FILE_NAMES)[number];
 export type PartEditFileName = (typeof PART_EDIT_FILE_NAMES)[number];
 
 export interface PartEditStorageInput {
@@ -26,7 +35,8 @@ export interface StoredPartEditFile {
 
 export interface VerifiedPartEditStorage {
   readonly directory: string;
-  readonly files: Readonly<Record<PartEditFileName, StoredPartEditFile>>;
+  readonly files: Readonly<Record<LegacyPartEditFileName, StoredPartEditFile>> &
+    Readonly<Partial<Record<PartEditFileName, StoredPartEditFile>>>;
 }
 
 /** Immutable, atomic storage for one part-repair revision. */
@@ -79,7 +89,7 @@ export class PartEditStorage {
       }
       await rename(temporaryDirectory, finalDirectory);
       finalized = true;
-      return await this.readRevision(input.projectId, input.revisionId);
+      return await this.readRevision(input.projectId, input.revisionId, true);
     } catch (error) {
       await rm(temporaryDirectory, { recursive: true, force: true });
       if (finalized) {
@@ -92,10 +102,15 @@ export class PartEditStorage {
   async readRevision(
     projectId: string,
     revisionId: string,
+    hasOrigin: boolean,
   ): Promise<VerifiedPartEditStorage> {
     const directory = this.revisionDirectory(projectId, revisionId);
-    const files = {} as Record<PartEditFileName, StoredPartEditFile>;
-    for (const fileName of PART_EDIT_FILE_NAMES) {
+    const files = {} as Record<LegacyPartEditFileName, StoredPartEditFile> &
+      Partial<Record<PartEditFileName, StoredPartEditFile>>;
+    const fileNames = hasOrigin
+      ? PART_EDIT_FILE_NAMES
+      : LEGACY_PART_EDIT_FILE_NAMES;
+    for (const fileName of fileNames) {
       const bytes = new Uint8Array(
         await readFile(resolveWithin(directory, fileName)),
       );
@@ -106,7 +121,7 @@ export class PartEditStorage {
         sha256: sha256(bytes),
       };
     }
-    return { directory, files };
+    return { directory, files } as VerifiedPartEditStorage;
   }
 
   async removeNewRevision(

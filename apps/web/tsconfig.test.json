@@ -15,6 +15,7 @@
     "src/components/AnalyzedSkinCatalog.tsx",
     "src/components/LibraryLifecycleControls.tsx",
     "src/components/LibraryToolbar.tsx",
+    "src/components/PixelOriginSummaryPanel.tsx",
     "src/components/RestorationRecommendationPanel.tsx",
     "src/components/SemanticAiEventLog.tsx",
     "src/components/SemanticAiJobProgress.tsx",

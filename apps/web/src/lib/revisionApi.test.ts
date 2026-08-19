@@ -24,6 +24,7 @@ import {
   listAiProviders,
   listPartBundles,
   listParts,
+  loadRevisionOrigin,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partMannequinUrl,
@@ -186,6 +187,47 @@ describe("revisionApi", () => {
 
     await expect(loadRevisionSegmentation("rev_wide", fetcher)).resolves.toMatchObject(
       { source: { armType: "wide" } },
+    );
+  });
+
+  it("loads a revision pixel-origin document from the encoded endpoint", async () => {
+    const recorded = {
+      availability: "recorded" as const,
+      revisionId: "rev_origin",
+      originAssetId: "asset_origin",
+      document: {
+        schemaVersion: "1.0" as const,
+        subject: { kind: "revision" as const, id: "rev_origin" },
+        source: {
+          width: 64 as const,
+          height: 64 as const,
+          armType: "wide" as const,
+          coordinateOrigin: "top-left" as const,
+        },
+        entries: [],
+        copyLineage: [],
+      },
+      summary: {
+        counts: {
+          source_visible: 0,
+          manual_authored: 0,
+          generated_completion: 0,
+          legacy_mixed: 0,
+        },
+        containsGeneratedPixels: false,
+      },
+      componentSummaries: {},
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({ origin: recorded }, 200),
+    );
+
+    await expect(loadRevisionOrigin("rev / origin", fetcher)).resolves.toEqual(
+      recorded,
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/revisions/rev%20%2F%20origin/origin",
+      undefined,
     );
   });
 

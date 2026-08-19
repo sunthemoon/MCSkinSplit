@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { sha256 } from "./hash";
 
-export const PART_FILE_NAMES = [
+export const LEGACY_PART_FILE_NAMES = [
   "texture.png",
   "write-mask.png",
   "manifest.json",
@@ -11,7 +11,19 @@ export const PART_FILE_NAMES = [
   "source.json",
 ] as const;
 
+export const PART_FILE_NAMES = [
+  "texture.png",
+  "write-mask.png",
+  "origin.json",
+  "generated-mask.png",
+  "manifest.json",
+  "preview.png",
+  "source.json",
+] as const;
+
+export type LegacyPartFileName = (typeof LEGACY_PART_FILE_NAMES)[number];
 export type PartFileName = (typeof PART_FILE_NAMES)[number];
+export type PartStorageSchemaVersion = "1.0" | "1.1" | "2.0";
 
 export interface PartStorageInput {
   readonly partId: string;
@@ -27,7 +39,14 @@ export interface StoredPartFile {
 
 export interface VerifiedPartStorage {
   readonly directory: string;
-  readonly files: Readonly<Record<PartFileName, StoredPartFile>>;
+  readonly files: Readonly<Record<LegacyPartFileName, StoredPartFile>> &
+    Readonly<Partial<Record<PartFileName, StoredPartFile>>>;
+}
+
+export function partFileNamesForVersion(
+  schemaVersion: PartStorageSchemaVersion,
+): readonly PartFileName[] {
+  return schemaVersion === "2.0" ? PART_FILE_NAMES : LEGACY_PART_FILE_NAMES;
 }
 
 export class PartStorage {
@@ -62,7 +81,7 @@ export class PartStorage {
       }
       await rename(temporaryDirectory, finalDirectory);
       finalized = true;
-      return await this.readPart(input.partId);
+      return await this.readPart(input.partId, "2.0");
     } catch (error) {
       await rm(temporaryDirectory, { recursive: true, force: true });
       if (finalized) {
@@ -72,10 +91,14 @@ export class PartStorage {
     }
   }
 
-  async readPart(partId: string): Promise<VerifiedPartStorage> {
+  async readPart(
+    partId: string,
+    schemaVersion: PartStorageSchemaVersion,
+  ): Promise<VerifiedPartStorage> {
     const directory = this.partDirectory(partId);
-    const files = {} as Record<PartFileName, StoredPartFile>;
-    for (const fileName of PART_FILE_NAMES) {
+    const files = {} as Record<LegacyPartFileName, StoredPartFile> &
+      Partial<Record<PartFileName, StoredPartFile>>;
+    for (const fileName of partFileNamesForVersion(schemaVersion)) {
       const bytes = new Uint8Array(
         await readFile(resolveWithin(directory, fileName)),
       );
@@ -86,7 +109,7 @@ export class PartStorage {
         sha256: sha256(bytes),
       };
     }
-    return { directory, files };
+    return { directory, files } as VerifiedPartStorage;
   }
 
   async removeNewPart(partId: string): Promise<void> {

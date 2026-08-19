@@ -8,6 +8,107 @@ export interface SemanticPixelSpan {
   readonly x1: number;
 }
 
+export type PixelIntrinsicOrigin =
+  | "source_visible"
+  | "manual_authored"
+  | "generated_completion"
+  | "legacy_mixed";
+
+export interface PixelOriginActor {
+  readonly type: "user" | "ai" | "system";
+  readonly id?: string;
+}
+
+export interface SourceVisiblePixelOriginEvidence {
+  readonly sourceRevisionId: string;
+}
+
+export interface ManualAuthoredPixelOriginEvidence {
+  readonly actor: PixelOriginActor;
+  readonly operationId: string;
+}
+
+export interface GeneratedCompletionPixelOriginEvidence {
+  readonly candidateId: string;
+  readonly evidenceHash: string;
+  readonly decisionId: string;
+  readonly actor: PixelOriginActor;
+}
+
+export interface LegacyMixedPixelOriginEvidence {
+  readonly sourceRevisionId: string;
+}
+
+export type PixelOriginSubject =
+  | { readonly kind: "revision"; readonly id: string }
+  | { readonly kind: "part"; readonly id: string }
+  | { readonly kind: "part_edit_revision"; readonly id: string };
+
+export type PixelOriginEntry =
+  | {
+      readonly intrinsicOrigin: "source_visible";
+      readonly evidence: SourceVisiblePixelOriginEvidence;
+      readonly spans: readonly SemanticPixelSpan[];
+    }
+  | {
+      readonly intrinsicOrigin: "manual_authored";
+      readonly evidence: ManualAuthoredPixelOriginEvidence;
+      readonly spans: readonly SemanticPixelSpan[];
+    }
+  | {
+      readonly intrinsicOrigin: "generated_completion";
+      readonly evidence: GeneratedCompletionPixelOriginEvidence;
+      readonly spans: readonly SemanticPixelSpan[];
+    }
+  | {
+      readonly intrinsicOrigin: "legacy_mixed";
+      readonly evidence: LegacyMixedPixelOriginEvidence;
+      readonly spans: readonly SemanticPixelSpan[];
+    };
+
+export interface PixelCopySource {
+  readonly sourceSubject: PixelOriginSubject;
+  readonly sourceComponentInstanceId: string | null;
+  readonly sourcePixelId: number;
+}
+
+export interface PixelCopyLineageEntry {
+  readonly pixelId: number;
+  readonly derivation: "copied";
+  /** Immediate ancestry; older ancestry is followed through the immutable source document. */
+  readonly copiedFrom: PixelCopySource;
+}
+
+export interface PixelOriginDocument {
+  readonly schemaVersion: "1.0";
+  readonly subject: PixelOriginSubject;
+  readonly source: {
+    readonly width: 64;
+    readonly height: 64;
+    readonly armType: ArmType;
+    readonly coordinateOrigin: "top-left";
+  };
+  readonly entries: readonly PixelOriginEntry[];
+  readonly copyLineage: readonly PixelCopyLineageEntry[];
+}
+
+export type PixelOriginEvidence = PixelOriginEntry["evidence"];
+
+export interface PixelOriginRecord {
+  readonly intrinsicOrigin: PixelIntrinsicOrigin;
+  readonly evidence: PixelOriginEvidence;
+  readonly copyLineage: PixelCopySource | null;
+}
+
+export interface PixelOriginAssignment extends PixelOriginRecord {
+  readonly pixelId: number;
+}
+
+export interface PixelOriginSummary {
+  readonly counts: Readonly<Record<PixelIntrinsicOrigin, number>>;
+  readonly containsGeneratedPixels: boolean;
+}
+
 export interface ComponentRelations {
   readonly attachedTo: string | null;
   readonly pairedWith: readonly string[];
@@ -31,8 +132,10 @@ export interface CompositionRestorationProvenance {
 export interface SemanticComponentProvenance {
   readonly actorType: "user" | "ai" | "system";
   readonly aiRunId?: string;
-  /** True only when at least one owned pixel was authored without a source texel. */
+  /** Compatibility summary: true only when an owned origin is generated_completion. */
   readonly containsGeneratedPixels: boolean;
+  /** Derived per-component pixel counts; absent only on readable legacy snapshots. */
+  readonly originSummary?: PixelOriginSummary;
   readonly restoration?: CompositionRestorationProvenance;
 }
 
@@ -122,6 +225,25 @@ export interface PartRepairDerivation {
   readonly containsGeneratedPixels: false;
 }
 
+export interface PartRepairDerivationV2 {
+  readonly kind: "part_repair";
+  readonly basePartId: string;
+  readonly partEditProjectId: string;
+  readonly partEditRevisionId: string;
+  /** Summary only; origin.json remains authoritative. */
+  readonly containsGeneratedPixels: boolean;
+}
+
+export interface PartOriginArtifacts {
+  readonly schemaVersion: "1.0";
+  readonly file: "origin.json";
+  readonly generatedMaskFile: "generated-mask.png";
+  /** Deterministically derived from origin.json. */
+  readonly summary: PixelOriginSummary;
+  /** Compatibility summary; must equal summary.containsGeneratedPixels. */
+  readonly containsGeneratedPixels: boolean;
+}
+
 interface PartManifestBase {
   readonly id: string;
   readonly name: string;
@@ -161,12 +283,18 @@ export interface PartRepairManifestV1_1 extends PartManifestBase {
   readonly derivation: PartRepairDerivation;
 }
 
+export interface PartManifestV2 extends PartManifestBase {
+  readonly schemaVersion: "2.0";
+  readonly origin: PartOriginArtifacts;
+  readonly derivation?: PartRepairDerivationV2;
+}
+
 /**
- * Immutable reusable-part metadata. Version 1.1 is reserved for deterministic
- * part-repair outputs and therefore requires repair ancestry; ordinary semantic
- * exports remain version 1.0 and cannot claim a derivation.
+ * Immutable reusable-part metadata. Versions 1.0/1.1 remain readable legacy
+ * shapes. New exports use 2.0 with exact origin artifacts; 2.0 repair outputs
+ * retain their immutable repair ancestry.
  */
-export type PartManifest = PartManifestV1 | PartRepairManifestV1_1;
+export type PartManifest = PartManifestV1 | PartRepairManifestV1_1 | PartManifestV2;
 
 export type PartConflictType =
   | "hard_conflict"

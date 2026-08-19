@@ -344,6 +344,31 @@ The follow-up appends bounded public events to the existing Job stream:
 These events contain identifiers, counts, status, and evidence hashes only. They
 do not expose authoritative masks or private pixel lists.
 
+### Per-pixel origin preservation
+
+Origin-bearing Revision snapshots store a canonical `origin.json` independently
+of the model proposal. Semantic analysis may change ownership and category masks,
+but it does not rewrite the intrinsic origin of unchanged RGBA pixels. Component
+source/generated summaries are rebuilt by the host from the stored origin document
+and the committed component masks before persistence.
+
+Historical snapshots without recorded origin remain readable. When a new Revision
+is derived, immutable import/branch/revert ancestry is used only where it proves an
+exact source; otherwise all current visible pixels receive the durable
+`legacy_mixed` origin. They are never silently relabelled as source-visible.
+
+The read API is:
+
+```text
+GET /api/revisions/:revisionId/origin
+```
+
+It returns either verified document/summary/component summaries with
+`availability: recorded`, or the explicit `legacy_unavailable` shape for a
+historical Revision that has not yet produced a new origin-bearing descendant.
+Corrupted origin snapshots fail integrity validation rather than degrading to the
+legacy response.
+
 ## HTTP API
 
 ```text

@@ -12,7 +12,18 @@ import {
 import { getOrientedSize } from "../uv/orientation";
 import { assertSkinImage, buildSurfaceTexels } from "../uv/surface-model";
 import { assertMask } from "./mask";
-import type { SemanticPixelSpan } from "./types";
+import {
+  createCopiedPixelOriginAssignments,
+  createManualPixelOriginAssignment,
+  propagatePixelOriginDocument,
+  validatePixelOriginDocument,
+} from "./origin";
+import type {
+  PixelOriginActor,
+  PixelOriginDocument,
+  PixelOriginSubject,
+  SemanticPixelSpan,
+} from "./types";
 
 export type PartRepairTransform =
   | "identity"
@@ -61,6 +72,36 @@ export interface PartRepairResult extends PartRepairState {
   readonly changedPixelIds: readonly number[];
 }
 
+export interface OriginAwarePartRepairState extends PartRepairState {
+  readonly originDocument: PixelOriginDocument;
+  readonly sourceComponentInstanceId: string | null;
+}
+
+export type OriginAwarePartRepairOperation =
+  | Exclude<PartRepairOperation, { readonly type: "copy_surfaces" }>
+  | {
+      readonly type: "copy_surfaces";
+      readonly source: OriginAwarePartRepairState;
+      readonly mappings: readonly PartRepairCopyMapping[];
+      readonly overwrite?: PartRepairOverwriteMode;
+    };
+
+export interface PartRepairOriginContext {
+  readonly resultSubject: Extract<
+    PixelOriginSubject,
+    { readonly kind: "part_edit_revision" }
+  >;
+  readonly actor: PixelOriginActor;
+  readonly operationId: string;
+}
+
+export interface OriginAwarePartRepairResult extends PartRepairResult {
+  readonly originDocument: PixelOriginDocument;
+  readonly sourceComponentInstanceId: string | null;
+  /** Includes same-RGBA copies that changed lineage without changing texture bytes. */
+  readonly originChangedPixelIds: readonly number[];
+}
+
 /**
  * Applies one exact pixel operation without mutating either input state.
  * The returned mask is always derived from the returned texture alpha.
@@ -68,6 +109,88 @@ export interface PartRepairResult extends PartRepairState {
 export function applyPartRepairOperation(
   state: PartRepairState,
   operation: PartRepairOperation,
+): PartRepairResult {
+  return applyPartRepairOperationInternal(state, operation);
+}
+
+/**
+ * Applies one repair and persists exact origin semantics for the resulting edit
+ * Revision. Manual paint/replace becomes manual-authored, copy keeps intrinsic
+ * origin with immediate ancestry, and erase removes the pixel origin.
+ */
+export function applyPartRepairOperationWithOrigins(
+  state: OriginAwarePartRepairState,
+  operation: OriginAwarePartRepairOperation,
+  context: PartRepairOriginContext,
+): OriginAwarePartRepairResult {
+  validatePixelOriginDocument(state.originDocument, state.texture);
+  if (
+    state.originDocument.subject.kind !== "part_edit_revision" ||
+    state.originDocument.subject.id === context.resultSubject.id
+  ) {
+    throw new RangeError(
+      "Origin-aware repair requires a distinct immutable Part Edit Revision subject",
+    );
+  }
+  const copyMappings: Array<{
+    readonly sourcePixelId: number;
+    readonly targetPixelId: number;
+  }> = [];
+  if (operation.type === "copy_surfaces") {
+    validatePixelOriginDocument(
+      operation.source.originDocument,
+      operation.source.texture,
+    );
+  }
+  const result = applyPartRepairOperationInternal(
+    state,
+    operation,
+    (sourcePixelId, targetPixelId) => {
+      copyMappings.push({ sourcePixelId, targetPixelId });
+    },
+  );
+  const assignments =
+    operation.type === "copy_surfaces"
+      ? createCopiedPixelOriginAssignments({
+          sourceDocument: operation.source.originDocument,
+          mappings: copyMappings,
+          sourceComponentInstanceId:
+            operation.source.sourceComponentInstanceId,
+        })
+      : operation.type === "erase_pixels"
+        ? []
+        : result.changedPixelIds.map((pixelId) =>
+            createManualPixelOriginAssignment({
+              pixelId,
+              actor: context.actor,
+              operationId: context.operationId,
+            }),
+          );
+  const originDocument = propagatePixelOriginDocument({
+    sourceDocument: state.originDocument,
+    sourceImage: state.texture,
+    resultImage: result.texture,
+    resultSubject: context.resultSubject,
+    assignments,
+  });
+  return {
+    ...result,
+    originDocument,
+    sourceComponentInstanceId: state.sourceComponentInstanceId,
+    originChangedPixelIds: [
+      ...new Set(
+        operation.type === "erase_pixels"
+          ? result.changedPixelIds
+          : assignments.map((assignment) => assignment.pixelId),
+      ),
+    ].sort((left, right) => left - right),
+  };
+}
+
+function applyPartRepairOperationInternal(
+  state: PartRepairState,
+  operation: PartRepairOperation,
+  onCopy?: (sourcePixelId: number, targetPixelId: number) => void,
 ): PartRepairResult {
   const checked = normalizeState(state, "Part repair target");
   const layout = getSkinLayout(checked.armType);
@@ -114,6 +237,7 @@ export function applyPartRepairOperation(
         operation.mappings,
         operation.overwrite ?? "all",
         changed,
+        onCopy,
       );
       break;
     }
@@ -174,6 +298,7 @@ function applySurfaceCopies(
   mappings: readonly PartRepairCopyMapping[],
   overwrite: PartRepairOverwriteMode,
   changed: Set<number>,
+  onCopy?: (sourcePixelId: number, targetPixelId: number) => void,
 ): void {
   if (mappings.length === 0) {
     throw new RangeError("Surface copy requires at least one mapping");
@@ -290,6 +415,7 @@ function applySurfaceCopies(
         ) {
           continue;
         }
+        onCopy?.(sourcePixelId, targetPixelId);
         writeIfChanged(targetTexture, targetPixelId, rgbaAt(source.texture, sourcePixelId), changed);
       }
     }

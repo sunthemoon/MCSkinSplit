@@ -1,19 +1,21 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
   decodeSkinPng,
   createRgbaImage,
   encodeSkinPng,
+  getPixelOrigin,
   getSkinLayout,
   getPixel,
   maskToPixelIds,
   pixelIdsToSpans,
   rgbaImageToMask,
   type BodyPart,
+  type PixelOriginDocument,
 } from "@mc-skin-split/skin-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -43,9 +45,14 @@ const EARLY_V11_SEMANTIC_FOLLOWUP_SQL = readFileSync(
   new URL("./fixtures/early-011-semantic-followup.sql", import.meta.url),
   "utf8",
 );
+const SEMANTIC_FOLLOWUP_HARDENING_SQL = readFileSync(
+  new URL("../src/migrations/012_semantic_followup_hardening.sql", import.meta.url),
+  "utf8",
+);
 const IMMUTABLE_HISTORY_TRIGGER_NAMES = [
   "skin_revision_immutable_update",
   "skin_revision_immutable_delete",
+  "skin_revision_origin_required_insert",
   "skin_operation_immutable_update",
   "skin_operation_immutable_delete",
   "skin_asset_revision_binding_guard",
@@ -53,11 +60,14 @@ const IMMUTABLE_HISTORY_TRIGGER_NAMES = [
   "skin_asset_revision_bound_immutable_delete",
   "part_asset_content_immutable_update",
   "part_asset_immutable_delete",
+  "part_asset_origin_required_insert",
+  "part_file_asset_unbound_insert_guard",
   "part_file_asset_binding_guard",
   "part_file_asset_bound_immutable_update",
   "part_file_asset_bound_immutable_delete",
   "part_edit_revision_immutable_update",
   "part_edit_revision_immutable_delete",
+  "part_edit_revision_origin_required_insert",
   "part_bundle_content_immutable_update",
   "part_bundle_immutable_delete",
   "part_bundle_member_immutable_update",
@@ -149,19 +159,34 @@ describe("RevisionStore", () => {
         "checksum.json",
         "components",
         "operation.json",
+        "origin.json",
         "segmentation.json",
         "skin.png",
       ]);
 
       const snapshot = await store.verifyRevisionSnapshot(result.revision.id);
+      expect(snapshot.checksum.schemaVersion).toBe("2.0");
       expect(snapshot.checksum.revisionId).toBe(result.revision.id);
       expect(Object.keys(snapshot.checksum.files).sort()).toEqual([
         "components/unknown.mask.png",
         "operation.json",
+        "origin.json",
         "segmentation.json",
         "skin.png",
       ]);
-      expect(store.getRevisionAssets(result.revision.id)).toHaveLength(4);
+      expect(store.getRevisionAssets(result.revision.id)).toHaveLength(5);
+      expect(result.revision.originAssetId).not.toBeNull();
+      const origin = await store.readRevisionOrigin(result.revision.id);
+      expect(origin).toMatchObject({
+        schemaVersion: "1.0",
+        subject: { kind: "revision", id: result.revision.id },
+        entries: [
+          {
+            intrinsicOrigin: "source_visible",
+            evidence: { sourceRevisionId: result.revision.id },
+          },
+        ],
+      });
 
       const segmentation = await store.readRevisionSegmentation(
         result.revision.id,
@@ -282,6 +307,20 @@ describe("RevisionStore", () => {
           8,
         ),
       ).toEqual([17, 34, 51, 255]);
+      const editedStorage = await store.verifyPartEditStorage(
+        edited.headRevision.id,
+      );
+      const editedOrigin = JSON.parse(
+        Buffer.from(editedStorage.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(getPixelOrigin(editedOrigin, 8 * 64 + 9)).toMatchObject({
+        intrinsicOrigin: "manual_authored",
+        evidence: {
+          actor: { type: "user", id: "tester" },
+          operationId: edited.headRevision.id,
+        },
+        copyLineage: null,
+      });
       expect(await store.readPartEditTexturePng(created.headRevision.id)).toEqual(
         initialTexture,
       );
@@ -306,7 +345,7 @@ describe("RevisionStore", () => {
       });
       expect(committed.part.id).not.toBe(part.id);
       expect(committed.part.manifest).toMatchObject({
-        schemaVersion: "1.1",
+        schemaVersion: "2.0",
         derivation: {
           kind: "part_repair",
           basePartId: part.id,
@@ -317,7 +356,7 @@ describe("RevisionStore", () => {
       });
       expect(committed.part.metadata).toMatchObject({
         ancestry: {
-          schemaVersion: "1.1",
+          schemaVersion: "2.0",
           kind: "part_repair",
           basePartId: part.id,
           partEditProjectId: created.project.id,
@@ -329,6 +368,20 @@ describe("RevisionStore", () => {
       expect(
         getPixel(decodeSkinPng(await store.readPartTexturePng(committed.part.id)), 9, 8),
       ).toEqual([17, 34, 51, 255]);
+      const committedStorage = await store.verifyPartStorage(committed.part.id);
+      const committedOrigin = JSON.parse(
+        Buffer.from(committedStorage.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(getPixelOrigin(committedOrigin, 8 * 64 + 9)).toMatchObject({
+        intrinsicOrigin: "manual_authored",
+        copyLineage: {
+          sourceSubject: {
+            kind: "part_edit_revision",
+            id: edited.headRevision.id,
+          },
+          sourcePixelId: 8 * 64 + 9,
+        },
+      });
       expect(
         await readdir(join(directory, "part-edits", created.project.id, "revisions")),
       ).toHaveLength(2);
@@ -376,6 +429,110 @@ describe("RevisionStore", () => {
       );
     } finally {
       store.close();
+    }
+  });
+
+  it("round-trips same-RGBA PartEdit copy lineage without a visual diff", async () => {
+    const created = await createStore();
+    const { store, directory } = created;
+    try {
+      const image = createRgbaImage(64, 64);
+      const sourcePixelId = 8 * 64 + 8;
+      const targetPixelId = 8 * 64 + 24;
+      image.data.set([44, 55, 66, 255], sourcePixelId * 4);
+      image.data.set([44, 55, 66, 255], targetPixelId * 4);
+      const imported = await store.importProject({
+        name: "Same RGBA copy fixture",
+        skinPng: encodeSkinPng(image),
+        armType: "slim",
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.same_rgba",
+            displayName: "Same RGBA hair",
+            category: "hair",
+          },
+          spans: pixelIdsToSpans(
+            [sourcePixelId, targetPixelId],
+            getSkinLayout("slim"),
+          ),
+        },
+      });
+      const part = await store.exportPart(
+        segmented.revision.id,
+        "hair.same_rgba",
+      );
+      const repair = await store.createPartEditProject({ basePartId: part.id });
+      const beforeTexture = await store.readPartEditTexturePng(
+        repair.headRevision.id,
+      );
+      const copied = await store.applyPartEditOperation(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+        operation: {
+          type: "copy_surfaces",
+          source: { kind: "part", partId: part.id },
+          mappings: [
+            {
+              sourceSurface: "head.base.front",
+              targetSurface: "head.base.back",
+              transform: "identity",
+            },
+          ],
+          overwrite: "all",
+        },
+      });
+      expect(copied.headRevision).toMatchObject({
+        changedPixelCount: 0,
+        authoredProvenance: {
+          changedPixelIds: [],
+          originChangedPixelIds: [targetPixelId],
+        },
+      });
+      expect(await store.readPartEditTexturePng(copied.headRevision.id)).toEqual(
+        beforeTexture,
+      );
+      const stored = await store.verifyPartEditStorage(copied.headRevision.id);
+      const origin = JSON.parse(
+        Buffer.from(stored.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(getPixelOrigin(origin, targetPixelId)).toMatchObject({
+        intrinsicOrigin: "source_visible",
+        copyLineage: {
+          sourceSubject: { kind: "part", id: part.id },
+          sourceComponentInstanceId: part.sourceComponentId,
+          sourcePixelId,
+        },
+      });
+      store.close();
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const persisted = await reopened.verifyPartEditStorage(
+          copied.headRevision.id,
+        );
+        const persistedOrigin = JSON.parse(
+          Buffer.from(persisted.files["origin.json"]!.bytes).toString("utf8"),
+        ) as PixelOriginDocument;
+        expect(getPixelOrigin(persistedOrigin, targetPixelId)?.copyLineage)
+          .toMatchObject({
+            sourceSubject: { kind: "part", id: part.id },
+            sourcePixelId,
+          });
+        expect(reopened.getPartEditRevision(copied.headRevision.id))
+          .toMatchObject({
+            authoredProvenance: { originChangedPixelIds: [targetPixelId] },
+          });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before the persistence reopen.
+      }
     }
   });
 
@@ -531,6 +688,272 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("rejects tampered Revision, Part, and PartEdit origin artifacts", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      const revisionOriginAsset = store
+        .getRevisionAssets(imported.revision.id)
+        .find((asset) => asset.assetType === "origin_json")!;
+      const revisionOriginPath = join(directory, revisionOriginAsset.storagePath);
+      const revisionOriginBytes = await readFile(revisionOriginPath);
+      await writeFile(revisionOriginPath, "{}\n", "utf8");
+      await expect(store.verifyRevisionSnapshot(imported.revision.id)).rejects
+        .toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+      await writeFile(revisionOriginPath, revisionOriginBytes);
+
+      const part = await exportHeadPixelPart(store);
+      const partOriginPath = join(directory, part.origin!.storagePath);
+      const partOriginBytes = await readFile(partOriginPath);
+      await writeFile(partOriginPath, "{}\n", "utf8");
+      await expect(store.verifyPartStorage(part.id)).rejects.toMatchObject({
+        code: "SNAPSHOT_CORRUPT",
+        statusCode: 409,
+      });
+      await writeFile(partOriginPath, partOriginBytes);
+
+      const generatedMaskPath = join(directory, part.generatedMask!.storagePath);
+      const generatedMaskBytes = await readFile(generatedMaskPath);
+      await writeFile(generatedMaskPath, Uint8Array.of(1, 2, 3));
+      await expect(store.verifyPartStorage(part.id)).rejects.toMatchObject({
+        code: "SNAPSHOT_CORRUPT",
+        statusCode: 409,
+      });
+      await writeFile(generatedMaskPath, generatedMaskBytes);
+
+      const edit = await store.createPartEditProject({ basePartId: part.id });
+      const editOriginPath = join(
+        directory,
+        edit.headRevision.origin!.storagePath,
+      );
+      await writeFile(editOriginPath, "{}\n", "utf8");
+      await expect(store.verifyPartEditStorage(edit.headRevision.id)).rejects
+        .toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("maps partial PartEdit origin metadata to snapshot corruption", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const originEdit = await store.createPartEditProject({ basePartId: part.id });
+      const generatedMaskEdit = await store.createPartEditProject({
+        basePartId: part.id,
+      });
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec("DROP TRIGGER part_edit_revision_immutable_update");
+        database.prepare(`
+          UPDATE part_edit_revision SET origin_byte_size = NULL WHERE id = ?
+        `).run(originEdit.headRevision.id);
+        database.prepare(`
+          UPDATE part_edit_revision SET generated_mask_sha256 = NULL WHERE id = ?
+        `).run(generatedMaskEdit.headRevision.id);
+      } finally {
+        database.close();
+      }
+
+      await expect(store.verifyPartEditStorage(originEdit.headRevision.id)).rejects
+        .toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+      await expect(
+        store.verifyPartEditStorage(generatedMaskEdit.headRevision.id),
+      ).rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects rehashed Part and PartEdit origins with a divergent arm model", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const edit = await store.createPartEditProject({ basePartId: part.id });
+      const partOriginPath = join(directory, part.origin!.storagePath);
+      const editOriginPath = join(directory, edit.headRevision.origin!.storagePath);
+      const partOrigin = JSON.parse(
+        await readFile(partOriginPath, "utf8"),
+      ) as PixelOriginDocument;
+      const editOrigin = JSON.parse(
+        await readFile(editOriginPath, "utf8"),
+      ) as PixelOriginDocument;
+      const tamperedPartOrigin = Buffer.from(
+        canonicalJson({
+          ...partOrigin,
+          source: { ...partOrigin.source, armType: "wide" },
+        }),
+        "utf8",
+      );
+      const tamperedEditOrigin = Buffer.from(
+        canonicalJson({
+          ...editOrigin,
+          source: { ...editOrigin.source, armType: "wide" },
+        }),
+        "utf8",
+      );
+      await writeFile(partOriginPath, tamperedPartOrigin);
+      await writeFile(editOriginPath, tamperedEditOrigin);
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec(`
+          DROP TRIGGER part_file_asset_bound_immutable_update;
+          DROP TRIGGER part_edit_revision_immutable_update;
+        `);
+        database.prepare(`
+          UPDATE part_file_asset SET byte_size = ?, sha256 = ? WHERE id = ?
+        `).run(
+          tamperedPartOrigin.byteLength,
+          sha256(tamperedPartOrigin),
+          part.origin!.id,
+        );
+        database.prepare(`
+          UPDATE part_edit_revision
+          SET origin_byte_size = ?, origin_sha256 = ?
+          WHERE id = ?
+        `).run(
+          tamperedEditOrigin.byteLength,
+          sha256(tamperedEditOrigin),
+          edit.headRevision.id,
+        );
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        await expect(reopened.verifyPartStorage(part.id)).rejects.toMatchObject({
+          code: "SNAPSHOT_CORRUPT",
+          statusCode: 409,
+        });
+        await expect(reopened.verifyPartEditStorage(edit.headRevision.id)).rejects
+          .toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
+    }
+  });
+
+  it("rejects tampered Part file-role and owner bindings", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      store.close();
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec("DROP TRIGGER part_file_asset_bound_immutable_update");
+        database.prepare(`
+          UPDATE part_file_asset SET part_id = NULL WHERE id = ?
+        `).run(part.origin!.id);
+        database.prepare(`
+          UPDATE part_file_asset
+          SET part_id = NULL, file_role = 'texture'
+          WHERE id = ?
+        `).run(part.generatedMask!.id);
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        await expect(reopened.verifyPartStorage(part.id)).rejects.toMatchObject({
+          code: "SNAPSHOT_CORRUPT",
+          statusCode: 409,
+        });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
+    }
+  });
+
+  it("rejects a rehashed Revision origin whose provenance no longer matches resultHash", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      const snapshotDirectory = join(
+        directory,
+        "projects",
+        imported.project.id,
+        "revisions",
+        imported.revision.id,
+      );
+      const originPath = join(snapshotDirectory, "origin.json");
+      const checksumPath = join(snapshotDirectory, "checksum.json");
+      const origin = JSON.parse(
+        await readFile(originPath, "utf8"),
+      ) as PixelOriginDocument;
+      const tamperedOrigin = Buffer.from(
+        canonicalJson({
+          ...origin,
+          entries: origin.entries.map((entry) => ({
+            ...entry,
+            evidence: { sourceRevisionId: "revision_tampered_provenance" },
+          })),
+        }),
+        "utf8",
+      );
+      await writeFile(originPath, tamperedOrigin);
+      const checksum = JSON.parse(await readFile(checksumPath, "utf8")) as {
+        schemaVersion: "2.0";
+        revisionId: string;
+        files: Record<string, string>;
+      };
+      checksum.files["origin.json"] = sha256(tamperedOrigin);
+      await writeFile(checksumPath, canonicalJson(checksum), "utf8");
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec("DROP TRIGGER skin_asset_revision_bound_immutable_update");
+        database.prepare(`
+          UPDATE skin_asset SET byte_size = ?, sha256 = ? WHERE id = ?
+        `).run(
+          tamperedOrigin.byteLength,
+          sha256(tamperedOrigin),
+          imported.revision.originAssetId,
+        );
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const error = await reopened
+          .verifyRevisionSnapshot(imported.revision.id)
+          .catch((caught: unknown) => caught);
+        expect(error).toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+        expect(String(error)).toContain("resultHash");
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
+    }
+  });
+
   it("detects database metadata that diverges from immutable repair JSON", async () => {
     const { directory, store } = await createStore();
 
@@ -573,7 +996,7 @@ describe("RevisionStore", () => {
       const committed = await store.commitPartEditProject(repair.project.id, {
         headRevisionId: repair.headRevision.id,
       });
-      expect(committed.part.manifest.schemaVersion).toBe("1.1");
+      expect(committed.part.manifest.schemaVersion).toBe("2.0");
       store.close();
 
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
@@ -610,6 +1033,192 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("rejects a rehashed Part 2.0 repair derivation summary mismatch", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const basePart = await exportHeadPixelPart(store);
+      const repair = await store.createPartEditProject({ basePartId: basePart.id });
+      const committed = await store.commitPartEditProject(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+      });
+      const manifestPath = join(directory, committed.part.manifestFile.storagePath);
+      const manifest = JSON.parse(
+        await readFile(manifestPath, "utf8"),
+      ) as {
+        derivation: { containsGeneratedPixels: boolean };
+      };
+      manifest.derivation.containsGeneratedPixels = true;
+      const manifestBytes = Buffer.from(canonicalJson(manifest), "utf8");
+      await writeFile(manifestPath, manifestBytes);
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec(`
+          DROP TRIGGER part_asset_content_immutable_update;
+          DROP TRIGGER part_file_asset_bound_immutable_update;
+        `);
+        database.prepare(`
+          UPDATE part_asset SET manifest_json = ? WHERE id = ?
+        `).run(canonicalJson(manifest).trim(), committed.part.id);
+        database.prepare(`
+          UPDATE part_file_asset
+          SET byte_size = ?, sha256 = ?
+          WHERE id = ?
+        `).run(
+          manifestBytes.byteLength,
+          sha256(manifestBytes),
+          committed.part.manifestFile.id,
+        );
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        await expect(reopened.verifyPartStorage(committed.part.id)).rejects
+          .toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before direct corruption.
+      }
+    }
+  });
+
+  it("round-trips a valid generated Part origin through repair artifacts", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const originPath = join(directory, part.origin!.storagePath);
+      const generatedMaskPath = join(directory, part.generatedMask!.storagePath);
+      const manifestPath = join(directory, part.manifestFile.storagePath);
+      const origin = JSON.parse(
+        await readFile(originPath, "utf8"),
+      ) as PixelOriginDocument;
+      const generatedOrigin: PixelOriginDocument = {
+        ...origin,
+        entries: origin.entries.map((entry) => ({
+          intrinsicOrigin: "generated_completion" as const,
+          evidence: {
+            candidateId: "candidate_generated_fixture",
+            evidenceHash: `sha256:${"a".repeat(64)}`,
+            decisionId: "decision_generated_fixture",
+            actor: { type: "system" as const },
+          },
+          spans: entry.spans,
+        })),
+        copyLineage: [],
+      };
+      const originBytes = Buffer.from(canonicalJson(generatedOrigin), "utf8");
+      const generatedMaskBytes = await readFile(
+        join(directory, part.writeMask.storagePath),
+      );
+      const manifest = JSON.parse(
+        await readFile(manifestPath, "utf8"),
+      ) as {
+        origin: {
+          summary: {
+            counts: Record<string, number>;
+            containsGeneratedPixels: boolean;
+          };
+          containsGeneratedPixels: boolean;
+        };
+      };
+      manifest.origin.summary = {
+        counts: {
+          source_visible: 0,
+          manual_authored: 0,
+          generated_completion: 1,
+          legacy_mixed: 0,
+        },
+        containsGeneratedPixels: true,
+      };
+      manifest.origin.containsGeneratedPixels = true;
+      const manifestBytes = Buffer.from(canonicalJson(manifest), "utf8");
+      await writeFile(originPath, originBytes);
+      await writeFile(generatedMaskPath, generatedMaskBytes);
+      await writeFile(manifestPath, manifestBytes);
+      store.close();
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        database.exec(`
+          DROP TRIGGER part_asset_content_immutable_update;
+          DROP TRIGGER part_file_asset_bound_immutable_update;
+        `);
+        database.prepare(
+          "UPDATE part_asset SET manifest_json = ? WHERE id = ?",
+        ).run(canonicalJson(manifest).trim(), part.id);
+        const updateFile = database.prepare(`
+          UPDATE part_file_asset SET byte_size = ?, sha256 = ? WHERE id = ?
+        `);
+        updateFile.run(originBytes.byteLength, sha256(originBytes), part.origin!.id);
+        updateFile.run(
+          generatedMaskBytes.byteLength,
+          sha256(generatedMaskBytes),
+          part.generatedMask!.id,
+        );
+        updateFile.run(
+          manifestBytes.byteLength,
+          sha256(manifestBytes),
+          part.manifestFile.id,
+        );
+      } finally {
+        database.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        await expect(reopened.verifyPartStorage(part.id)).resolves
+          .toMatchObject({ files: { "generated-mask.png": expect.any(Object) } });
+        const repair = await reopened.createPartEditProject({ basePartId: part.id });
+        expect(repair.headRevision.authoredProvenance).toMatchObject({
+          containsGeneratedPixels: true,
+          originSummary: {
+            counts: { generated_completion: 1 },
+          },
+        });
+        const editStorage = await reopened.verifyPartEditStorage(
+          repair.headRevision.id,
+        );
+        const editOrigin = JSON.parse(
+          Buffer.from(editStorage.files["origin.json"]!.bytes).toString("utf8"),
+        ) as PixelOriginDocument;
+        expect(getPixelOrigin(editOrigin, 8 * 64 + 8)).toMatchObject({
+          intrinsicOrigin: "generated_completion",
+          copyLineage: {
+            sourceSubject: { kind: "part", id: part.id },
+          },
+        });
+        const committed = await reopened.commitPartEditProject(repair.project.id, {
+          headRevisionId: repair.headRevision.id,
+        });
+        expect(committed.part.manifest).toMatchObject({
+          schemaVersion: "2.0",
+          derivation: { containsGeneratedPixels: true },
+          origin: { containsGeneratedPixels: true },
+        });
+        await expect(reopened.verifyPartStorage(committed.part.id)).resolves
+          .toMatchObject({ files: { "generated-mask.png": expect.any(Object) } });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before constructing the fixture.
+      }
+    }
+  });
+
   it("commits a confirmed semantic edit as a new immutable revision", async () => {
     const { store } = await createStore();
 
@@ -636,7 +1245,7 @@ describe("RevisionStore", () => {
         operationType: "manual_edit",
         summary: "标记头发测试区域",
       });
-      expect(store.getRevisionAssets(edited.revision.id)).toHaveLength(5);
+      expect(store.getRevisionAssets(edited.revision.id)).toHaveLength(6);
       const state = await store.readRevisionSemanticState(edited.revision.id);
       expect(state.document.components).toMatchObject([
         {
@@ -710,7 +1319,9 @@ describe("RevisionStore", () => {
       expect(store.listParts("hair")).toEqual([part]);
       expect(store.listParts("shoe")).toEqual([]);
       expect((await readdir(join(directory, "parts", part.id))).sort()).toEqual([
+        "generated-mask.png",
         "manifest.json",
+        "origin.json",
         "preview.png",
         "source.json",
         "texture.png",
@@ -723,6 +1334,20 @@ describe("RevisionStore", () => {
           (await store.verifyPartStorage(part.id)).files["write-mask.png"].bytes,
         ),
       );
+      const partOrigin = JSON.parse(
+        Buffer.from(
+          (await store.verifyPartStorage(part.id)).files["origin.json"]!.bytes,
+        ).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(partOrigin.subject).toEqual({ kind: "part", id: part.id });
+      expect(getPixelOrigin(partOrigin, 8 * 64 + 8)).toMatchObject({
+        intrinsicOrigin: "source_visible",
+        copyLineage: {
+          sourceSubject: { kind: "revision", id: edited.revision.id },
+          sourceComponentInstanceId: "hair.main",
+          sourcePixelId: 8 * 64 + 8,
+        },
+      });
       const sourceSkin = decodeSkinPng(
         await store.readRevisionSkinPng(edited.revision.id),
       );
@@ -822,6 +1447,62 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("preserves Wide origin ownership for a model-neutral Bundle member and repair", async () => {
+    const { store } = await createStore();
+    try {
+      const image = createRgbaImage(64, 64);
+      image.data.set([45, 67, 89, 255], (8 * 64 + 8) * 4);
+      const imported = await store.importProject({
+        name: "Wide neutral bundle",
+        skinPng: encodeSkinPng(image),
+        armType: "wide",
+      });
+      const segmented = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: {
+            instanceId: "hair.wide_neutral",
+            displayName: "Wide neutral hair",
+            category: "hair",
+          },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      const bundle = await store.exportPartBundle(segmented.revision.id, {
+        kind: "hair",
+        componentIds: ["hair.wide_neutral"],
+      });
+      const part = bundle.members[0]!.part;
+      expect(part).toMatchObject({
+        armType: "wide",
+        manifest: { compatibility: { armTypes: ["wide", "slim"] } },
+      });
+      const storedPart = await store.verifyPartStorage(part.id);
+      const partOrigin = JSON.parse(
+        Buffer.from(storedPart.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(partOrigin.source.armType).toBe("wide");
+
+      const repair = await store.createPartEditProject({ basePartId: part.id });
+      const edited = await store.applyPartEditOperation(repair.project.id, {
+        headRevisionId: repair.headRevision.id,
+        operation: {
+          type: "paint_color",
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+          rgba: [12, 34, 56, 255],
+        },
+      });
+      const committed = await store.commitPartEditProject(repair.project.id, {
+        headRevisionId: edited.headRevision.id,
+      });
+      expect(committed.part.armType).toBe("wide");
+      await expect(store.verifyPartStorage(committed.part.id)).resolves
+        .toMatchObject({ files: { "origin.json": expect.any(Object) } });
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects an invalid aggregate export without leaving atomic parts", async () => {
     const { store } = await createStore();
     try {
@@ -883,7 +1564,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 13 });
+          .toEqual({ version: 14 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -1005,7 +1686,7 @@ describe("RevisionStore", () => {
         const fileRows = database.prepare(
           "SELECT id, part_id FROM part_file_asset WHERE part_id = ? ORDER BY file_role",
         ).all(part.id) as Array<{ readonly id: string; readonly part_id: string }>;
-        expect(fileRows).toHaveLength(5);
+        expect(fileRows).toHaveLength(7);
         expect(fileRows.every((row) => row.part_id === part.id)).toBe(true);
 
         expect(() => database.prepare(
@@ -1053,26 +1734,279 @@ describe("RevisionStore", () => {
     }
   });
 
-  it("upgrades a populated v12 database and restores immutable-history guards on reopen", async () => {
+  it("upgrades populated v13 Revisions and Part 1.0/1.1 rows without inventing origin", async () => {
+    const fixture = await createPopulatedV13Fixture();
+    const store = new RevisionStore({ dataDirectory: fixture.directory });
+
+    try {
+      const database = new Database(store.databasePath);
+      try {
+        expect(database.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 14 });
+        expect(database.prepare(
+          "SELECT origin_asset_id FROM skin_revision WHERE id = ?",
+        ).get(fixture.revisionId)).toEqual({ origin_asset_id: null });
+        expect(database.prepare(`
+          SELECT origin_asset_id, generated_mask_asset_id
+          FROM part_asset WHERE id = ?
+        `).get(fixture.partV1Id)).toEqual({
+          origin_asset_id: null,
+          generated_mask_asset_id: null,
+        });
+        expect(database.pragma("foreign_key_check")).toEqual([]);
+      } finally {
+        database.close();
+      }
+
+      expect(store.getRevision(fixture.revisionId).originAssetId).toBeNull();
+      expect(await store.readRevisionOrigin(fixture.revisionId)).toBeNull();
+      await expect(store.verifyRevisionSnapshot(fixture.revisionId)).resolves
+        .toMatchObject({ checksum: { schemaVersion: "1.0" } });
+      expect(store.getPart(fixture.partV1Id)).toMatchObject({
+        manifest: { schemaVersion: "1.0" },
+        origin: null,
+        generatedMask: null,
+      });
+      expect(store.getPart(fixture.partV1_1Id)).toMatchObject({
+        manifest: { schemaVersion: "1.1" },
+        origin: null,
+        generatedMask: null,
+      });
+      expect((await store.verifyPartStorage(fixture.partV1Id)).files)
+        .not.toHaveProperty("origin.json");
+      expect((await store.verifyPartStorage(fixture.partV1_1Id)).files)
+        .not.toHaveProperty("generated-mask.png");
+      expect(store.getPartEditProject(fixture.partEditProjectId)).toMatchObject({
+        headRevisionId: fixture.partEditRevisionId,
+        basePartId: fixture.partV1Id,
+      });
+      expect(store.getPartEditRevision(fixture.partEditRevisionId)).toMatchObject({
+        origin: null,
+        generatedMask: null,
+      });
+      const migratedLegacyEdit = await store.verifyPartEditStorage(
+        fixture.partEditRevisionId,
+      );
+      expect(Object.keys(migratedLegacyEdit.files).sort()).toEqual([
+        "revision.json",
+        "texture.png",
+        "write-mask.png",
+      ]);
+      const continuedLegacyEdit = await store.applyPartEditOperation(
+        fixture.partEditProjectId,
+        {
+          headRevisionId: fixture.partEditRevisionId,
+          operation: {
+            type: "paint_color",
+            spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+            rgba: [9, 8, 7, 255],
+          },
+        },
+      );
+      expect(continuedLegacyEdit.headRevision.origin).not.toBeNull();
+      expect(continuedLegacyEdit.headRevision.generatedMask).not.toBeNull();
+      expect(Object.keys((await store.verifyPartEditStorage(
+        continuedLegacyEdit.headRevision.id,
+      )).files).sort()).toEqual([
+        "generated-mask.png",
+        "origin.json",
+        "revision.json",
+        "texture.png",
+        "write-mask.png",
+      ]);
+
+      const legacyRepair = await store.createPartEditProject({
+        basePartId: fixture.partV1Id,
+      });
+      const legacyEditStorage = await store.verifyPartEditStorage(
+        legacyRepair.headRevision.id,
+      );
+      const legacyEditOrigin = JSON.parse(
+        Buffer.from(legacyEditStorage.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(getPixelOrigin(legacyEditOrigin, fixture.pixelId)).toMatchObject({
+        intrinsicOrigin: "legacy_mixed",
+        evidence: { sourceRevisionId: fixture.revisionId },
+        copyLineage: {
+          sourceSubject: { kind: "part", id: fixture.partV1Id },
+          sourcePixelId: fixture.pixelId,
+        },
+      });
+
+      const applied = await store.applyPart(fixture.revisionId, {
+        partId: fixture.partV1Id,
+        strategy: "use_part",
+      });
+      expect(applied.revision.originAssetId).not.toBeNull();
+      const appliedOrigin = await store.readRevisionOrigin(applied.revision.id);
+      expect(getPixelOrigin(appliedOrigin!, fixture.pixelId)).toMatchObject({
+        intrinsicOrigin: "legacy_mixed",
+        evidence: { sourceRevisionId: fixture.revisionId },
+        copyLineage: {
+          sourceSubject: { kind: "part", id: fixture.partV1Id },
+          sourcePixelId: fixture.pixelId,
+        },
+      });
+      expect(
+        await store.diffRevisions(fixture.revisionId, applied.revision.id),
+      ).toMatchObject({
+        changedPixelCount: 0,
+        changedPixelIds: [],
+        originChangedPixelCount: 1,
+        originChangedPixelIds: [fixture.pixelId],
+        boundingBox: null,
+      });
+      expect(applied.revision.resultHash).not.toBe(
+        store.getRevision(fixture.revisionId).resultHash,
+      );
+      const reopened = new RevisionStore({ dataDirectory: fixture.directory });
+      try {
+        await expect(reopened.verifyRevisionSnapshot(applied.revision.id)).resolves
+          .toMatchObject({ checksum: { schemaVersion: "2.0" } });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects rogue file bindings added to a migrated legacy Part", async () => {
+    const fixture = await createPopulatedV13Fixture();
+    const store = new RevisionStore({ dataDirectory: fixture.directory });
+    const rogueBytes = Buffer.from("{}", "utf8");
+    const insertRogue = `
+      INSERT INTO part_file_asset (
+        id, part_id, file_role, storage_path, mime_type,
+        byte_size, sha256, created_at
+      ) VALUES (?, ?, 'origin', ?, 'application/json', ?, ?, ?)
+    `;
+
+    try {
+      await expect(store.verifyPartStorage(fixture.partV1Id)).resolves.toBeDefined();
+      const database = new Database(store.databasePath);
+      try {
+        expect(() => database.prepare(insertRogue).run(
+          "asset_legacy_rogue_origin",
+          fixture.partV1Id,
+          `parts/${fixture.partV1Id}/rogue-origin.json`,
+          rogueBytes.byteLength,
+          sha256(rogueBytes),
+          new Date(0).toISOString(),
+        )).toThrow(/part_file_asset must be inserted unbound/u);
+
+        database.exec("DROP TRIGGER part_file_asset_unbound_insert_guard");
+        database.prepare(insertRogue).run(
+          "asset_legacy_rogue_origin",
+          fixture.partV1Id,
+          `parts/${fixture.partV1Id}/rogue-origin.json`,
+          rogueBytes.byteLength,
+          sha256(rogueBytes),
+          new Date(0).toISOString(),
+        );
+      } finally {
+        database.close();
+      }
+
+      await expect(store.verifyPartStorage(fixture.partV1Id)).rejects.toMatchObject({
+        code: "SNAPSHOT_CORRUPT",
+        statusCode: 409,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rolls migration 14 back atomically when legacy foreign keys are corrupt", async () => {
+    const fixture = await createPopulatedV13Fixture();
+    const databasePath = join(fixture.directory, "mcskinsplit.sqlite");
+    const corruptDatabase = new Database(databasePath);
+    try {
+      corruptDatabase.pragma("foreign_keys = OFF");
+      const trigger = corruptDatabase.prepare(`
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'part_asset_content_immutable_update'
+      `).get() as { readonly sql: string };
+      corruptDatabase.exec("DROP TRIGGER part_asset_content_immutable_update");
+      corruptDatabase.prepare(`
+        UPDATE part_asset SET source_revision_id = 'revision_missing'
+        WHERE id = ?
+      `).run(fixture.partV1Id);
+      corruptDatabase.exec(trigger.sql);
+    } finally {
+      corruptDatabase.close();
+    }
+
+    expect(() => new RevisionStore({ dataDirectory: fixture.directory }))
+      .toThrow(/pixel-origin migration produced foreign key violations/u);
+
+    const rolledBack = new Database(databasePath);
+    try {
+      expect(rolledBack.prepare(
+        "SELECT MAX(version) AS version FROM schema_migration",
+      ).get()).toEqual({ version: 13 });
+      expect(rolledBack.prepare(
+        "SELECT source_revision_id FROM part_asset WHERE id = ?",
+      ).get(fixture.partV1Id)).toEqual({ source_revision_id: "revision_missing" });
+      const revisionColumns = rolledBack.prepare(
+        "PRAGMA table_info(skin_revision)",
+      ).all() as Array<{ readonly name: string }>;
+      const partColumns = rolledBack.prepare(
+        "PRAGMA table_info(part_asset)",
+      ).all() as Array<{ readonly name: string }>;
+      expect(revisionColumns.map((column) => column.name)).not.toContain(
+        "origin_asset_id",
+      );
+      expect(partColumns.map((column) => column.name)).not.toContain(
+        "origin_asset_id",
+      );
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('skin_asset_v14', 'part_file_asset_v14')
+      `).all()).toEqual([]);
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'skin_revision_origin_required_insert'
+      `).get()).toBeUndefined();
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'part_asset_content_immutable_update'
+      `).get()).toEqual({ name: "part_asset_content_immutable_update" });
+    } finally {
+      rolledBack.close();
+    }
+  });
+
+  it("requires origin artifacts on every post-v14 immutable row", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        expect(() => database.prepare(
+          "INSERT INTO skin_revision (id) VALUES ('revision_missing_origin')",
+        ).run()).toThrow(/new skin_revision requires origin asset/u);
+        expect(() => database.prepare(
+          "INSERT INTO part_asset (id) VALUES ('part_missing_origin')",
+        ).run()).toThrow(/new part_asset requires Part 2\.0 origin assets/u);
+        expect(() => database.prepare(
+          "INSERT INTO part_edit_revision (id) VALUES ('part_edit_revision_missing_origin')",
+        ).run()).toThrow(/new part_edit_revision requires origin artifacts/u);
+      } finally {
+        database.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("preserves immutable-history guards on a populated v14 reopen", async () => {
     const { directory, store } = await createStore();
 
     try {
       const imported = await importRealSkin(store);
       store.close();
-
-      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
-      try {
-        const downgrade = legacy.transaction(() => {
-          dropImmutableHistoryTriggers(legacy);
-          legacy.prepare("DELETE FROM schema_migration WHERE version = 13").run();
-        });
-        downgrade.immediate();
-        expect(legacy.prepare(
-          "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 12 });
-      } finally {
-        legacy.close();
-      }
 
       const reopened = new RevisionStore({ dataDirectory: directory });
       try {
@@ -1080,7 +2014,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 13 });
+          ).get()).toEqual({ version: 14 });
           const triggers = upgraded.prepare(`
             SELECT name
             FROM sqlite_master
@@ -1104,7 +2038,7 @@ describe("RevisionStore", () => {
       try {
         store.close();
       } catch {
-        // The store is intentionally closed before simulating the v12 database.
+        // The store is intentionally closed before reopening the populated database.
       }
     }
   });
@@ -1173,11 +2107,12 @@ describe("RevisionStore", () => {
         downgradeSemanticFollowupToEarlyV11(legacy);
         expect(legacy.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 11 });
+        ).get()).toEqual({ version: 14 });
         const legacyInsertSql = legacy.prepare(
           "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
         ).get() as { readonly sql: string };
         expect(legacyInsertSql.sql).not.toContain("validating");
+        upgradeSemanticFollowupFromEarlyV11(legacy);
       } finally {
         legacy.close();
       }
@@ -1188,7 +2123,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 13 });
+          ).get()).toEqual({ version: 14 });
           expect(upgraded.prepare(`
             SELECT job_id, result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -1300,6 +2235,14 @@ describe("RevisionStore", () => {
         proposalSummary: "v11 valid applied fixture",
         reviewItems: [],
       });
+      expect(
+        await store.diffRevisions(imported.revision.id, analyzed.revision.id),
+      ).toMatchObject({
+        changedPixelCount: 0,
+        originChangedPixelCount: 0,
+        originChangedPixelIds: [],
+      });
+      expect(analyzed.revision.resultHash).toBe(imported.revision.resultHash);
       insertSucceededSemanticJob(store, {
         jobId: "aijob_v11_valid_applied",
         projectId: imported.project.id,
@@ -1369,6 +2312,7 @@ describe("RevisionStore", () => {
           assessment_json: JSON.stringify(assessment),
           applied_revision_id: applied.revision.id,
         });
+        upgradeSemanticFollowupFromEarlyV11(legacy);
       } finally {
         legacy.close();
       }
@@ -1379,7 +2323,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 13 });
+          ).get()).toEqual({ version: 14 });
           expect(upgraded.prepare(`
             SELECT result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -1443,17 +2387,16 @@ describe("RevisionStore", () => {
             notices: [],
           },
         });
+        expect(() => upgradeSemanticFollowupFromEarlyV11(legacy)).toThrow();
       } finally {
         legacy.close();
       }
-
-      expect(() => new RevisionStore({ dataDirectory: directory })).toThrow();
 
       const afterFailure = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 11 });
+        ).get()).toEqual({ version: 14 });
         expect(afterFailure.prepare(
           "SELECT COUNT(*) AS count FROM semantic_analysis_followup WHERE job_id = ?",
         ).get("aijob_v11_invalid")).toEqual({ count: 1 });
@@ -1533,19 +2476,18 @@ describe("RevisionStore", () => {
           assessment,
           appliedRevisionId: unrelated.revision.id,
         });
+        expect(() => upgradeSemanticFollowupFromEarlyV11(legacy)).toThrow(
+          /invalid semantic analysis applied revision/u,
+        );
       } finally {
         legacy.close();
       }
-
-      expect(() => new RevisionStore({ dataDirectory: directory })).toThrow(
-        /invalid semantic analysis applied revision/u,
-      );
 
       const afterFailure = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 11 });
+        ).get()).toEqual({ version: 14 });
         expect(afterFailure.prepare(`
           SELECT status, applied_revision_id
           FROM semantic_analysis_followup
@@ -2340,6 +3282,17 @@ describe("RevisionStore", () => {
       expect(
         await store.diffRevisions(target.revision.id, applied.revision.id),
       ).toMatchObject({ changedPixelCount: preview.report.hardConflictCount });
+      const appliedOrigin = await store.readRevisionOrigin(applied.revision.id);
+      expect(appliedOrigin).not.toBeNull();
+      expect(getPixelOrigin(appliedOrigin!, 8 * 64 + 8)).toMatchObject({
+        intrinsicOrigin: "source_visible",
+        evidence: { sourceRevisionId: source.revision.id },
+        copyLineage: {
+          sourceSubject: { kind: "part", id: part.id },
+          sourceComponentInstanceId: "hair.main",
+          sourcePixelId: 8 * 64 + 8,
+        },
+      });
       expect(
         decodeSkinPng(await store.readRevisionSkinPng(target.revision.id)),
       ).toEqual(decodeSkinPng(await readFile(TARGET_SKIN_PATH)));
@@ -2531,6 +3484,15 @@ describe("RevisionStore", () => {
       expect(state.document.source.armType).toBe("slim");
       expect(state.document.components).toHaveLength(6);
       expect(state.document.unknown.pixelCount).toBe(0);
+      const compositionOrigin = await store.readRevisionOrigin(
+        committed.revision.id,
+      );
+      expect(compositionOrigin?.copyLineage.length).toBeGreaterThan(0);
+      expect(
+        compositionOrigin?.copyLineage.every(
+          (entry) => entry.copiedFrom.sourceSubject.kind === "part",
+        ),
+      ).toBe(true);
       expect(await store.readRevisionOperation(committed.revision.id)).toMatchObject({
         type: "compose",
         inputRevisionId: base.revision.id,
@@ -2670,13 +3632,28 @@ describe("RevisionStore", () => {
         );
         expect(restored?.provenance).toMatchObject({
           actorType: "user",
-          containsGeneratedPixels: true,
+          containsGeneratedPixels: false,
+          originSummary: {
+            counts: {
+              source_visible: 0,
+              manual_authored: 1,
+              generated_completion: 0,
+              legacy_mixed: 0,
+            },
+          },
           restoration: {
             candidateIds: [manual.id],
             sourceRevisionIds: [],
             sourceComponentIds: [],
           },
         });
+        const origin = await reopened.readRevisionOrigin(committed.revision.id);
+        expect(getPixelOrigin(origin!, basePixelId)).toMatchObject({
+          intrinsicOrigin: "manual_authored",
+          evidence: { actor: { type: "user" }, operationId: committed.revision.id },
+          copyLineage: null,
+        });
+        expect(getPixelOrigin(origin!, outerPixelId)).toBeUndefined();
         expect(await reopened.readRevisionOperation(committed.revision.id)).toMatchObject({
           affectedSpans: pixelIdsToSpans([basePixelId, outerPixelId], layout),
         });
@@ -3227,17 +4204,10 @@ function insertValidatingSemanticJob(
   }
 }
 
-function dropImmutableHistoryTriggers(database: Database.Database): void {
-  for (const triggerName of IMMUTABLE_HISTORY_TRIGGER_NAMES) {
-    database.exec(`DROP TRIGGER IF EXISTS "${triggerName}"`);
-  }
-}
-
 function downgradeSemanticFollowupToEarlyV11(
   database: Database.Database,
 ): void {
   const downgrade = database.transaction(() => {
-    dropImmutableHistoryTriggers(database);
     database.exec(`
       DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_insert_guard;
       DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_update_guard;
@@ -3277,10 +4247,18 @@ function downgradeSemanticFollowupToEarlyV11(
       FROM semantic_analysis_followup_v12;
 
       DROP TABLE semantic_analysis_followup_v12;
-      DELETE FROM schema_migration WHERE version >= 12;
     `);
   });
   downgrade.immediate();
+}
+
+function upgradeSemanticFollowupFromEarlyV11(
+  database: Database.Database,
+): void {
+  const upgrade = database.transaction(() => {
+    database.exec(SEMANTIC_FOLLOWUP_HARDENING_SQL);
+  });
+  upgrade.immediate();
 }
 
 function insertSucceededSemanticJob(
@@ -3420,6 +4398,447 @@ async function exportHeadPixelPart(
     },
   });
   return store.exportPart(segmented.revision.id, componentId);
+}
+
+async function createPopulatedV13Fixture(): Promise<{
+  readonly directory: string;
+  readonly revisionId: string;
+  readonly partV1Id: string;
+  readonly partV1_1Id: string;
+  readonly partEditProjectId: string;
+  readonly partEditRevisionId: string;
+  readonly pixelId: number;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), "mcskinsplit-v13-"));
+  temporaryDirectories.push(directory);
+  const databasePath = join(directory, "mcskinsplit.sqlite");
+  const database = new Database(databasePath);
+  const createdAt = "2026-08-10T00:00:00.000Z";
+  const projectId = "project_legacy_v13";
+  const branchId = "branch_legacy_v13";
+  const revisionId = "revision_legacy_v13";
+  const partV1Id = "part_legacy_v1";
+  const partV1_1Id = "part_legacy_v11";
+  const partEditProjectId = "part_edit_legacy_v13";
+  const partEditRevisionId = "part_edit_revision_legacy_v13";
+  const pixelId = 8 * 64 + 8;
+
+  try {
+    database.pragma("foreign_keys = ON");
+    database.exec(`
+      CREATE TABLE schema_migration (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      ) STRICT;
+    `);
+    const migrationDirectory = fileURLToPath(
+      new URL("../src/migrations/", import.meta.url),
+    );
+    const migrationFiles = (await readdir(migrationDirectory))
+      .filter((fileName) => /^0(?:0[1-9]|1[0-3])_.*\.sql$/u.test(fileName))
+      .sort();
+    expect(migrationFiles).toHaveLength(13);
+    for (const [index, fileName] of migrationFiles.entries()) {
+      const version = index + 1;
+      const migrate = database.transaction(() => {
+        database.exec(readFileSync(join(migrationDirectory, fileName), "utf8"));
+        database.prepare(`
+          INSERT INTO schema_migration (version, name, applied_at)
+          VALUES (?, ?, ?)
+        `).run(version, fileName, createdAt);
+      });
+      migrate.immediate();
+    }
+
+    const image = createRgbaImage(64, 64);
+    image.data.set([32, 48, 64, 255], pixelId * 4);
+    const skinPng = encodeSkinPng(image);
+    const maskImage = createRgbaImage(64, 64);
+    maskImage.data.set([255, 255, 255, 255], pixelId * 4);
+    const maskPng = encodeSkinPng(maskImage);
+    const segmentation = {
+      schemaVersion: "1.0",
+      revisionId,
+      source: {
+        width: 64,
+        height: 64,
+        armType: "slim",
+        coordinateOrigin: "top-left",
+        sourceHash: sha256(skinPng),
+      },
+      components: [],
+      unknown: {
+        maskFile: "components/unknown.mask.png",
+        pixelCount: 1,
+      },
+    } as const;
+    const resultHash = sha256(
+      canonicalJson({
+        skinHash: sha256(skinPng),
+        segmentation: { ...segmentation, revisionId: "revision_state" },
+      }),
+    );
+    const operation = {
+      schemaVersion: "1.0",
+      type: "import",
+      inputRevisionId: null,
+      outputRevisionId: revisionId,
+      actor: { type: "user" },
+      createdAt,
+      summary: "Legacy v13 import",
+      affectedComponents: [],
+      affectedSpans: [],
+      beforeHash: null,
+      afterHash: resultHash,
+      metadata: { armType: "slim" },
+    } as const;
+    const snapshotFiles: Readonly<Record<string, Uint8Array>> = {
+      "skin.png": skinPng,
+      "segmentation.json": Buffer.from(canonicalJson(segmentation), "utf8"),
+      "operation.json": Buffer.from(canonicalJson(operation), "utf8"),
+      "components/unknown.mask.png": maskPng,
+    };
+    const revisionDirectory = join(
+      directory,
+      "projects",
+      projectId,
+      "revisions",
+      revisionId,
+    );
+    for (const [fileName, bytes] of Object.entries(snapshotFiles)) {
+      const path = join(revisionDirectory, fileName);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+    }
+    await writeFile(
+      join(revisionDirectory, "checksum.json"),
+      canonicalJson({
+        schemaVersion: "1.0",
+        revisionId,
+        files: Object.fromEntries(
+          Object.entries(snapshotFiles).map(([fileName, bytes]) => [
+            fileName,
+            sha256(bytes),
+          ]),
+        ),
+      }),
+      "utf8",
+    );
+
+    const partManifests = [
+      {
+        partId: partV1Id,
+        componentId: "hair.legacy",
+        manifest: {
+          schemaVersion: "1.0",
+          id: partV1Id,
+          name: "Legacy Part 1.0",
+          category: "hair",
+          source: {
+            projectId,
+            revisionId,
+            componentInstanceId: "hair.legacy",
+          },
+          compatibility: { resolution: "64x64", armTypes: ["slim"] },
+          placement: {
+            preferredLayers: ["base"],
+            surfaces: ["head.base.front"],
+          },
+          relations: { softConflicts: [], hardConflicts: [] },
+          palette: { dominant: "#203040" },
+          maskMode: "write-colored-pixels-only",
+          createdAt,
+        },
+      },
+      {
+        partId: partV1_1Id,
+        componentId: "hair.legacy_repair",
+        manifest: {
+          schemaVersion: "1.1",
+          id: partV1_1Id,
+          name: "Legacy Part 1.1",
+          category: "hair",
+          source: {
+            projectId,
+            revisionId,
+            componentInstanceId: "hair.legacy_repair",
+          },
+          compatibility: { resolution: "64x64", armTypes: ["slim"] },
+          placement: {
+            preferredLayers: ["base"],
+            surfaces: ["head.base.front"],
+          },
+          relations: { softConflicts: [], hardConflicts: [] },
+          palette: { dominant: "#203040" },
+          maskMode: "write-colored-pixels-only",
+          derivation: {
+            kind: "part_repair",
+            basePartId: partV1Id,
+            partEditProjectId: "part_edit_legacy_v11",
+            partEditRevisionId: "part_edit_revision_legacy_v11",
+            containsGeneratedPixels: false,
+          },
+          createdAt,
+        },
+      },
+    ] as const;
+    const partFilesById = new Map<string, Readonly<Record<string, Uint8Array>>>();
+    for (const item of partManifests) {
+      const files: Readonly<Record<string, Uint8Array>> = {
+        "texture.png": skinPng,
+        "write-mask.png": maskPng,
+        "manifest.json": Buffer.from(canonicalJson(item.manifest), "utf8"),
+        "preview.png": skinPng,
+        "source.json": Buffer.from(canonicalJson({ schemaVersion: "1.0" }), "utf8"),
+      };
+      partFilesById.set(item.partId, files);
+      for (const [fileName, bytes] of Object.entries(files)) {
+        const path = join(directory, "parts", item.partId, fileName);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, bytes);
+      }
+    }
+    const partEditOperation = { type: "init", basePartId: partV1Id } as const;
+    const partEditProvenance = {
+      source: "manual",
+      basePartId: partV1Id,
+      authoredOperations: 0,
+      containsGeneratedPixels: false,
+    } as const;
+    const partEditFiles: Readonly<Record<string, Uint8Array>> = {
+      "texture.png": skinPng,
+      "write-mask.png": maskPng,
+      "revision.json": Buffer.from(canonicalJson({
+        schemaVersion: "1.0",
+        id: partEditRevisionId,
+        projectId: partEditProjectId,
+        parentRevisionId: null,
+        sequence: 1,
+        operation: partEditOperation,
+        summary: "Legacy v13 PartEdit init",
+        actorId: null,
+        changedPixelCount: 0,
+        authoredProvenance: partEditProvenance,
+        createdAt,
+      }), "utf8"),
+    };
+    for (const [fileName, bytes] of Object.entries(partEditFiles)) {
+      const path = join(
+        directory,
+        "part-edits",
+        partEditProjectId,
+        "revisions",
+        partEditRevisionId,
+        fileName,
+      );
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+    }
+
+    const populate = database.transaction(() => {
+      database.prepare(`
+        INSERT INTO skin_project (
+          id, name, created_at, updated_at, default_branch_id,
+          head_revision_id, settings_json
+        ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
+      `).run(
+        projectId,
+        "Legacy v13 fixture",
+        createdAt,
+        createdAt,
+        JSON.stringify({ armType: "slim", coordinateOrigin: "top-left" }),
+      );
+      database.prepare(`
+        INSERT INTO skin_branch (
+          id, project_id, name, base_revision_id, head_revision_id, created_at
+        ) VALUES (?, ?, 'main', NULL, NULL, ?)
+      `).run(branchId, projectId, createdAt);
+      const insertSkinAsset = database.prepare(`
+        INSERT INTO skin_asset (
+          id, project_id, revision_id, asset_type, storage_path,
+          mime_type, byte_size, sha256, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      `);
+      const snapshotAssetRows = [
+        ["asset_legacy_skin", "revision_skin", "skin.png", "image/png"],
+        ["asset_legacy_segmentation", "segmentation_json", "segmentation.json", "application/json"],
+        ["asset_legacy_operation", "operation_json", "operation.json", "application/json"],
+        ["asset_legacy_unknown", "component_mask", "components/unknown.mask.png", "image/png"],
+      ] as const;
+      for (const [assetId, assetType, fileName, mimeType] of snapshotAssetRows) {
+        const bytes = snapshotFiles[fileName]!;
+        insertSkinAsset.run(
+          assetId,
+          projectId,
+          assetType,
+          `projects/${projectId}/revisions/${revisionId}/${fileName}`,
+          mimeType,
+          bytes.byteLength,
+          sha256(bytes),
+          createdAt,
+        );
+      }
+      database.prepare(`
+        INSERT INTO skin_revision (
+          id, project_id, branch_id, parent_revision_id, sequence,
+          operation_type, actor_type, actor_id, ai_run_id, summary,
+          skin_asset_id, segmentation_asset_id, operation_asset_id,
+          source_hash, result_hash, created_at, metadata_json
+        ) VALUES (?, ?, ?, NULL, 1, 'import', 'user', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        revisionId,
+        projectId,
+        branchId,
+        operation.summary,
+        "asset_legacy_skin",
+        "asset_legacy_segmentation",
+        "asset_legacy_operation",
+        sha256(skinPng),
+        resultHash,
+        createdAt,
+        JSON.stringify({ armType: "slim" }),
+      );
+      database.prepare(
+        "UPDATE skin_asset SET revision_id = ? WHERE project_id = ?",
+      ).run(revisionId, projectId);
+      database.prepare(`
+        INSERT INTO skin_operation (
+          id, project_id, revision_id, operation_type,
+          operation_asset_id, summary, created_at
+        ) VALUES (?, ?, ?, 'import', ?, ?, ?)
+      `).run(
+        "operation_legacy_v13",
+        projectId,
+        revisionId,
+        "asset_legacy_operation",
+        operation.summary,
+        createdAt,
+      );
+      database.prepare(`
+        UPDATE skin_project
+        SET default_branch_id = ?, head_revision_id = ? WHERE id = ?
+      `).run(branchId, revisionId, projectId);
+      database.prepare(
+        "UPDATE skin_branch SET head_revision_id = ? WHERE id = ?",
+      ).run(revisionId, branchId);
+
+      const insertPartFile = database.prepare(`
+        INSERT INTO part_file_asset (
+          id, part_id, file_role, storage_path, mime_type,
+          byte_size, sha256, created_at
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const [partIndex, item] of partManifests.entries()) {
+        const files = partFilesById.get(item.partId)!;
+        const fileIds: Record<string, string> = {};
+        const roles = {
+          "texture.png": "texture",
+          "write-mask.png": "write_mask",
+          "manifest.json": "manifest",
+          "preview.png": "preview",
+          "source.json": "source",
+        } as const;
+        for (const [fileName, role] of Object.entries(roles)) {
+          const bytes = files[fileName]!;
+          const fileId = `asset_legacy_part_${partIndex}_${role}`;
+          fileIds[fileName] = fileId;
+          insertPartFile.run(
+            fileId,
+            role,
+            `parts/${item.partId}/${fileName}`,
+            fileName.endsWith(".png") ? "image/png" : "application/json",
+            bytes.byteLength,
+            sha256(bytes),
+            createdAt,
+          );
+        }
+        database.prepare(`
+          INSERT INTO part_asset (
+            id, source_project_id, source_revision_id, source_component_id,
+            name, category, subtype, arm_type, texture_asset_id, mask_asset_id,
+            manifest_asset_id, preview_asset_id, source_asset_id, created_at,
+            manifest_json, metadata_json
+          ) VALUES (?, ?, ?, ?, ?, 'hair', NULL, 'slim', ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          item.partId,
+          projectId,
+          revisionId,
+          item.componentId,
+          item.manifest.name,
+          fileIds["texture.png"],
+          fileIds["write-mask.png"],
+          fileIds["manifest.json"],
+          fileIds["preview.png"],
+          fileIds["source.json"],
+          createdAt,
+          canonicalJson(item.manifest).trim(),
+          JSON.stringify({ maskMode: "write-colored-pixels-only" }),
+        );
+        database.prepare(
+          "UPDATE part_file_asset SET part_id = ? WHERE storage_path LIKE ?",
+        ).run(item.partId, `parts/${item.partId}/%`);
+      }
+      database.prepare(`
+        INSERT INTO part_edit_project (
+          id, base_part_id, name, status, head_revision_id, result_part_id,
+          created_at, updated_at, committed_at
+        ) VALUES (?, ?, ?, 'draft', NULL, NULL, ?, ?, NULL)
+      `).run(
+        partEditProjectId,
+        partV1Id,
+        "Legacy v13 PartEdit",
+        createdAt,
+        createdAt,
+      );
+      database.prepare(`
+        INSERT INTO part_edit_revision (
+          id, project_id, parent_revision_id, sequence, operation_type,
+          operation_json, summary, actor_id,
+          texture_storage_path, texture_byte_size, texture_sha256,
+          mask_storage_path, mask_byte_size, mask_sha256,
+          revision_storage_path, revision_byte_size, revision_sha256,
+          changed_pixel_count, authored_provenance_json, created_at
+        ) VALUES (
+          ?, ?, NULL, 1, 'init', ?, ?, NULL,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?
+        )
+      `).run(
+        partEditRevisionId,
+        partEditProjectId,
+        canonicalJson(partEditOperation).trim(),
+        "Legacy v13 PartEdit init",
+        `part-edits/${partEditProjectId}/revisions/${partEditRevisionId}/texture.png`,
+        skinPng.byteLength,
+        sha256(skinPng),
+        `part-edits/${partEditProjectId}/revisions/${partEditRevisionId}/write-mask.png`,
+        maskPng.byteLength,
+        sha256(maskPng),
+        `part-edits/${partEditProjectId}/revisions/${partEditRevisionId}/revision.json`,
+        partEditFiles["revision.json"]!.byteLength,
+        sha256(partEditFiles["revision.json"]!),
+        canonicalJson(partEditProvenance).trim(),
+        createdAt,
+      );
+      database.prepare(`
+        UPDATE part_edit_project SET head_revision_id = ? WHERE id = ?
+      `).run(partEditRevisionId, partEditProjectId);
+    });
+    populate.immediate();
+    expect(database.pragma("foreign_key_check")).toEqual([]);
+  } finally {
+    database.close();
+  }
+
+  return {
+    directory,
+    revisionId,
+    partV1Id,
+    partV1_1Id,
+    partEditProjectId,
+    partEditRevisionId,
+    pixelId,
+  };
 }
 
 function categoryForBodyPart(bodyPart: BodyPart) {

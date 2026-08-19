@@ -24,6 +24,7 @@ Last updated: 2026-08-19
 | M15 player-first clean analysis and classification repair | Complete | Default clean baseline, six-stage persistent flow, deterministic cross-body review, immutable repaired catalog variant, and real-browser confirmation |
 | M16 bounded semantic transfers and immutable history guards | Complete | Proposal 1.1 ownership rules, provenance-safe reanalysis rejection, and SQLite append-only enforcement |
 | M17 Candidate Evidence Graph and visual grounding | Complete | 344 automated checks, deterministic Wide/Slim graph/grounding coverage, real-provider target run, and Studio browser confirmation |
+| M18 per-pixel origin and Part 2.0 | Complete | Canonical origin propagation, seven-file Part round trip, migration upgrade/tamper tests, full verification, and browser confirmation |
 
 ## M0 baseline
 
@@ -1143,3 +1144,56 @@ Last updated: 2026-08-19
   pixels hidden by hair or accessories and does not introduce another model pass.
 - Per-pixel origin, Part 2.0, hidden-content Completion proposals, player-first
   Completion UX, and the Completion release gate remain M18-M21 work respectively.
+
+## M18 implementation status
+
+- `PixelOriginDocument` records every non-transparent used-UV pixel as
+  `source_visible`, `manual_authored`, `generated_completion`, or
+  `legacy_mixed`. Entries use canonical surface-qualified spans and must cover
+  the current texture exactly without overlap.
+- Copying is a derivation, not an intrinsic source. A copied pixel retains its
+  original intrinsic origin and records only its immediate immutable source
+  subject/component/pixel; earlier ancestry remains available by following the
+  referenced source document.
+- New Revision snapshots add checksummed `origin.json`; semantic component
+  summaries are derived from that document and authoritative component masks.
+  Historical snapshots remain readable and are never retroactively labelled as
+  original pixels without proof from immutable ancestry.
+- New Part 2.0 assets contain seven verified files: texture, write mask,
+  `origin.json`, derived `generated-mask.png`, manifest, preview, and source
+  metadata. Historical Part 1.0/1.1 five-file assets remain readable and receive
+  conservative `legacy_mixed` origins when used in a new origin-bearing result.
+- Part export/application, Bundle export/application, Composition, branch,
+  revert, AI/manual semantic Revision creation, and append-only Part repair use
+  the same verified origin propagation and result-hash contract.
+- The Studio exposes a player-facing source summary for the selected Revision,
+  selected component, and library Parts. Legacy entries report unavailable
+  evidence rather than displaying invented zero counts.
+
+## M18 verification status
+
+- `pnpm verify` passed across all eight packages: 373 tests, every package
+  typecheck, fixture validation, and all builds. The existing Vite large-chunk
+  advisory remains unchanged.
+- `skin-revision` passed 56 tests covering a populated v13-to-v14 migration,
+  legacy Revision/Part/PartEdit reads, origin-bearing round trips, same-RGBA
+  provenance changes, generated-mask derivation, exact five/seven-file DB
+  bindings, arm-model consistency, corruption rejection, and atomic rollback.
+- An isolated real-browser flow imported a skin, created a semantic Revision,
+  exported a Part 2.0 asset, and applied it without changing RGBA. The resulting
+  Revision reported 1,767 `source_visible` pixels, one copied-pixel relation,
+  zero manual/generated/legacy-mixed pixels, a changed origin document and a
+  changed result hash. The Studio and Part card rendered those values after an
+  API restart.
+- The same page had no document-level horizontal overflow at 700, 1,200, and
+  1,904 CSS-pixel viewport widths. Application requests and rendering completed
+  without application-origin console errors.
+
+## M18 boundaries
+
+- M18 records and preserves provenance; it does not infer hidden clothing or hair.
+  The first producer of accepted `generated_completion` pixels belongs to M19.
+- `generated-mask.png` is a derived integrity artifact for Part 2.0 and must be a
+  subset of the Part write mask. `origin.json` remains authoritative.
+- `legacy_mixed` is a durable honest fallback, not a claim that a pixel was
+  generated or sourced from the original import.

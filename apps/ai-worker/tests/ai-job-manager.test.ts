@@ -18,7 +18,12 @@ import {
 } from "@mc-skin-split/ai-provider";
 import { PROMPT_VERSION } from "@mc-skin-split/skin-analysis-pack";
 import {
+  summarizePixelOrigins,
+  summarizePixelOriginsForMask,
+} from "@mc-skin-split/skin-core";
+import {
   RevisionStore,
+  RevisionStoreError,
   type ImportProjectResult,
 } from "@mc-skin-split/skin-revision";
 import Database from "better-sqlite3";
@@ -731,7 +736,7 @@ describe("AiJobManager", () => {
     expect(provider.calls).toBe(0);
   });
 
-  it("rejects generated composition pixels before creating a semantic Job", async () => {
+  it("preserves recorded authored origins across semantic reanalysis", async () => {
     const provider = new ScriptedProvider("generated-source-provider", ({ pack }) =>
       validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions),
     );
@@ -744,37 +749,49 @@ describe("AiJobManager", () => {
       initialCandidates,
     );
     const committed = await store.commitComposition(composition.composition.id);
-    const state = await store.readRevisionSemanticState(committed.revision.id);
-    const generatedComponent = state.document.components.find(
-      (component) => component.provenance.containsGeneratedPixels,
-    );
-    expect(generatedComponent).toBeDefined();
-
-    await expect(
-      manager.startAnalysis(
-        committed.revision.id,
-        semanticAnalysisOptions(provider.providerName),
-      ),
-    ).rejects.toMatchObject({
-      code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
-      statusCode: 409,
-      details: {
-        sourceRevisionId: committed.revision.id,
-        evidenceRevisionId: committed.revision.id,
-        reason: "generated_semantic_pixels",
-        componentIds: expect.arrayContaining([generatedComponent!.instanceId]),
-      },
+    const sourceOrigin = await store.readRevisionOrigin(committed.revision.id);
+    expect(sourceOrigin).not.toBeNull();
+    expect(summarizePixelOrigins(sourceOrigin!).counts).toMatchObject({
+      manual_authored: expect.any(Number),
+      generated_completion: 0,
     });
     expect(
-      manager.listJobs({
-        kind: "semantic_analysis",
-        inputRevisionId: committed.revision.id,
-      }),
-    ).toEqual([]);
-    expect(provider.calls).toBe(0);
+      summarizePixelOrigins(sourceOrigin!).counts.manual_authored,
+    ).toBeGreaterThan(0);
+
+    const queued = await manager.startAnalysis(
+      committed.revision.id,
+      semanticAnalysisOptions(provider.providerName),
+    );
+    const finished = await manager.waitForJob(queued.id);
+
+    expect(finished).toMatchObject({
+      status: "succeeded",
+      inputRevisionId: committed.revision.id,
+      resultRevisionId: expect.any(String),
+    });
+    const resultRevisionId = finished.resultRevisionId!;
+    const resultOrigin = await store.readRevisionOrigin(resultRevisionId);
+    expect(resultOrigin).toEqual({
+      ...sourceOrigin!,
+      subject: { kind: "revision", id: resultRevisionId },
+    });
+
+    const resultState = await store.readRevisionSemanticState(resultRevisionId);
+    for (const component of resultState.document.components) {
+      const originSummary = summarizePixelOriginsForMask(
+        resultOrigin!,
+        resultState.masks[component.instanceId]!,
+      );
+      expect(component.provenance).toMatchObject({
+        containsGeneratedPixels: originSummary.containsGeneratedPixels,
+        originSummary,
+      });
+    }
+    expect(provider.calls).toBe(1);
   });
 
-  it("allows generated composition sources for read-only start and retry", async () => {
+  it("allows authored composition sources for read-only start and retry", async () => {
     const provider = new ScriptedProvider("read-only-generated-provider", ({ pack }) =>
       validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions),
     );
@@ -862,6 +879,9 @@ describe("AiJobManager", () => {
     manager.jobStore.transitionJob(legacy.id, "failed", "legacy failure", {
       error: { code: "LEGACY_FAILURE", message: "legacy failure" },
     });
+    const readOrigin = store.readRevisionOrigin.bind(store);
+    store.readRevisionOrigin = async (revisionId) =>
+      revisionId === semanticChild.revision.id ? null : readOrigin(revisionId);
 
     await expect(manager.retryJob(legacy.id)).rejects.toMatchObject({
       code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
@@ -908,15 +928,15 @@ describe("AiJobManager", () => {
     expect(provider.calls).toBe(1);
   });
 
-  it("rechecks source provenance immediately before provider execution", async () => {
+  it("rechecks the recorded origin immediately before provider execution", async () => {
     const provider = new ScriptedProvider("provider-boundary-guard", ({ pack }) =>
       validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions),
     );
     const { manager, store, imported } = await setup([provider]);
     const segmented = await classifyHeadPixel(store, imported);
-    const readSemanticState = store.readRevisionSemanticState.bind(store);
+    const readOrigin = store.readRevisionOrigin.bind(store);
     const readSkinPng = store.readRevisionSkinPng.bind(store);
-    let exposeGeneratedProvenance = false;
+    let exposeOriginCorruption = false;
     let notifySkinReadStarted!: () => void;
     let releaseSkinRead!: () => void;
     const skinReadStarted = new Promise<void>((resolve) => {
@@ -925,9 +945,16 @@ describe("AiJobManager", () => {
     const skinReadRelease = new Promise<void>((resolve) => {
       releaseSkinRead = resolve;
     });
-    store.readRevisionSemanticState = async (revisionId) => {
-      const state = await readSemanticState(revisionId);
-      return exposeGeneratedProvenance ? markFirstComponentGenerated(state) : state;
+    store.readRevisionOrigin = async (revisionId) => {
+      if (exposeOriginCorruption) {
+        throw new RevisionStoreError(
+          "SNAPSHOT_CORRUPT",
+          `Revision ${revisionId} origin snapshot changed`,
+          409,
+          { revisionId },
+        );
+      }
+      return readOrigin(revisionId);
     };
     store.readRevisionSkinPng = async (revisionId) => {
       notifySkinReadStarted();
@@ -940,7 +967,7 @@ describe("AiJobManager", () => {
       semanticAnalysisOptions(provider.providerName),
     );
     await skinReadStarted;
-    exposeGeneratedProvenance = true;
+    exposeOriginCorruption = true;
     releaseSkinRead();
     const finished = await manager.waitForJob(queued.id);
 
@@ -948,29 +975,33 @@ describe("AiJobManager", () => {
       status: "failed",
       resultRevisionId: null,
       error: {
-        code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
-        details: {
-          sourceRevisionId: segmented.revision.id,
-          reason: "generated_semantic_pixels",
-        },
+        code: "SNAPSHOT_CORRUPT",
+        details: { revisionId: segmented.revision.id },
       },
     });
     expect(provider.calls).toBe(0);
     expect(store.listRevisions(imported.project.id)).toHaveLength(2);
   });
 
-  it("rechecks source provenance immediately before the AI Revision commit", async () => {
-    let exposeGeneratedProvenance = false;
+  it("rechecks the recorded origin immediately before the AI Revision commit", async () => {
+    let exposeOriginCorruption = false;
     const provider = new ScriptedProvider("commit-boundary-guard", ({ pack }) => {
-      exposeGeneratedProvenance = true;
+      exposeOriginCorruption = true;
       return validProposal(pack.job.sourceRevisionId, pack.candidateRegions.regions);
     });
     const { manager, store, imported } = await setup([provider]);
     const segmented = await classifyHeadPixel(store, imported);
-    const readSemanticState = store.readRevisionSemanticState.bind(store);
-    store.readRevisionSemanticState = async (revisionId) => {
-      const state = await readSemanticState(revisionId);
-      return exposeGeneratedProvenance ? markFirstComponentGenerated(state) : state;
+    const readOrigin = store.readRevisionOrigin.bind(store);
+    store.readRevisionOrigin = async (revisionId) => {
+      if (exposeOriginCorruption) {
+        throw new RevisionStoreError(
+          "SNAPSHOT_CORRUPT",
+          `Revision ${revisionId} origin snapshot changed`,
+          409,
+          { revisionId },
+        );
+      }
+      return readOrigin(revisionId);
     };
 
     const queued = await manager.startAnalysis(
@@ -983,11 +1014,8 @@ describe("AiJobManager", () => {
       status: "failed",
       resultRevisionId: null,
       error: {
-        code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
-        details: {
-          sourceRevisionId: segmented.revision.id,
-          reason: "generated_semantic_pixels",
-        },
+        code: "SNAPSHOT_CORRUPT",
+        details: { revisionId: segmented.revision.id },
       },
     });
     expect(provider.calls).toBe(1);
@@ -1508,29 +1536,6 @@ async function classifyHeadPixel(
       spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
     },
   });
-}
-
-function markFirstComponentGenerated(
-  state: Awaited<ReturnType<RevisionStore["readRevisionSemanticState"]>>,
-) {
-  const component = state.document.components[0];
-  if (!component) throw new Error("Provenance guard fixture requires one component");
-  return {
-    ...state,
-    document: {
-      ...state.document,
-      components: [
-        {
-          ...component,
-          provenance: {
-            ...component.provenance,
-            containsGeneratedPixels: true,
-          },
-        },
-        ...state.document.components.slice(1),
-      ],
-    },
-  };
 }
 
 async function createRestorationFixture(

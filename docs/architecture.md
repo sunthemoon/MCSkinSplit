@@ -376,6 +376,34 @@ The detailed contract is in
   hidden-content Completion, player Completion UX, and its release gate remain
   isolated in M18-M21.
 
+## M18 decisions
+
+- Pixel origin is an immutable, versioned document owned by the resulting
+  Revision, Part, or Part Edit Revision. Its canonical surface-qualified spans
+  cover every non-transparent used-UV pixel exactly once.
+- Intrinsic origin and derivation are separate. The four intrinsic values are
+  source-visible, manually authored, generated completion, and legacy mixed.
+  Copy operations retain that intrinsic value while recording one immediate
+  immutable copied-from subject/component/pixel reference.
+- Origin-bearing Revision result hashes include canonical `origin.json` after
+  normalizing only the result subject ID. Evidence IDs and copied-from references
+  remain part of the hash. Legacy Revision hashes keep their historical contract.
+- New Part 2.0 storage has seven files. `generated-mask.png` is deterministically
+  derived from `origin.json`, must be a subset of the write mask, and is verified
+  together with the manifest summary. Part 1.0/1.1 readers retain their original
+  five-file contract.
+- Semantic component `containsGeneratedPixels` and origin counts are compatibility
+  projections derived from authoritative origins plus component masks; model output
+  and client input cannot declare them independently.
+- Revision, Part, and Part Edit asset references are immutable after binding.
+  SQLite migration 014 expands the closed file-role enums while retaining nullable
+  origin references only for rows that predate the migration.
+- The public origin endpoint distinguishes recorded evidence from
+  `legacy_unavailable`. The Studio uses the same distinction and never translates
+  unavailable history into zero-valued source counts.
+- M18 does not generate hidden pixels. Completion candidates and acceptance remain
+  isolated in M19, using `generated_completion` only after an explicit decision.
+
 ## Package boundaries
 
 ```text

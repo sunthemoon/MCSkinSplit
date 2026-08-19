@@ -2523,6 +2523,111 @@ h1 span {
   font-size: 0.58rem;
 }
 
+.pixel-origin-summary {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+  padding: 13px;
+  border: 1px solid rgba(24, 33, 38, 0.36);
+  border-left: 4px solid var(--cyan);
+  background:
+    linear-gradient(120deg, rgba(36, 195, 194, 0.1), transparent 58%),
+    rgba(255, 255, 255, 0.28);
+}
+
+.pixel-origin-summary[data-availability="legacy"] {
+  border-left-color: var(--orange);
+  background:
+    linear-gradient(120deg, rgba(227, 108, 61, 0.1), transparent 58%),
+    rgba(255, 255, 255, 0.24);
+}
+
+.pixel-origin-summary > div:first-child,
+.pixel-origin-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pixel-origin-summary > div:first-child > div,
+.pixel-origin-summary[data-availability="legacy"] > div {
+  display: grid;
+  gap: 2px;
+}
+
+.pixel-origin-summary span,
+.pixel-origin-summary small,
+.pixel-origin-summary p,
+.pixel-origin-counts {
+  font-family: "Cascadia Mono", monospace;
+}
+
+.pixel-origin-summary span {
+  color: var(--cyan-dark);
+  font-size: 0.55rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.pixel-origin-summary strong {
+  font-size: 0.74rem;
+}
+
+.pixel-origin-summary small,
+.pixel-origin-summary p {
+  margin: 0;
+  color: rgba(24, 33, 38, 0.64);
+  font-size: 0.57rem;
+  line-height: 1.55;
+}
+
+.pixel-origin-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid rgba(24, 33, 38, 0.25);
+  background: rgba(24, 33, 38, 0.25);
+}
+
+.pixel-origin-counts > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: rgba(244, 240, 228, 0.94);
+}
+
+.pixel-origin-counts dt {
+  color: rgba(24, 33, 38, 0.52);
+  font-size: 0.52rem;
+}
+
+.pixel-origin-counts dd {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.pixel-origin-counts [data-origin="generated_completion"] dd,
+.pixel-origin-summary[data-availability="legacy"] strong {
+  color: var(--orange);
+}
+
+.pixel-origin-component {
+  padding-top: 8px;
+  border-top: 1px dashed rgba(24, 33, 38, 0.28);
+  font-weight: 800;
+}
+
+.part-origin-chip {
+  color: rgba(24, 33, 38, 0.62);
+}
+
+.part-origin-chip[data-origin-version="2.0"] {
+  color: var(--cyan-dark);
+}
+
 .unknown-row {
   padding: 9px 10px;
   background: repeating-linear-gradient(

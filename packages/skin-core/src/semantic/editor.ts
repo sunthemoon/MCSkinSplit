@@ -8,6 +8,10 @@ import {
   pixelIdsToSpans,
   spansToPixelIds,
 } from "./mask";
+import {
+  summarizePixelOriginsForMask,
+  validatePixelOriginDocument,
+} from "./origin";
 import type {
   ManualSemanticOperation,
   SegmentationDocument,
@@ -16,6 +20,7 @@ import type {
   SemanticComponentProvenance,
   SemanticState,
   ProvenanceSemanticAssignment,
+  PixelOriginDocument,
 } from "./types";
 
 const INSTANCE_ID_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -241,7 +246,7 @@ export function validateSemanticState(
         `Component ${component.instanceId} palette is not deterministic`,
       );
     }
-    validateProvenance(component.provenance);
+    validateProvenance(component.provenance, pixelIds.length);
     for (const pixelId of pixelIds) {
       if (image.data[pixelId * 4 + 3] === 0) {
         throw new SemanticEditError(
@@ -289,6 +294,49 @@ export function validateSemanticState(
       "Unknown pixel count does not match its mask",
     );
   }
+}
+
+/**
+ * Replaces legacy component booleans with summaries derived from authoritative
+ * per-pixel origins. This does not change ownership or origin entries.
+ */
+export function synchronizeSemanticPixelOriginSummaries(
+  state: SemanticState,
+  originDocument: PixelOriginDocument,
+  image: RgbaImage,
+): SemanticState {
+  validatePixelOriginDocument(originDocument, image);
+  if (
+    originDocument.subject.kind !== "revision" ||
+    originDocument.subject.id !== state.document.revisionId ||
+    originDocument.source.armType !== state.document.source.armType
+  ) {
+    throw new SemanticEditError(
+      "INVALID_COMPONENT",
+      "Pixel origin document does not match the semantic Revision",
+    );
+  }
+  return {
+    document: {
+      ...state.document,
+      components: state.document.components.map((component) => {
+        const originSummary = summarizePixelOriginsForMask(
+          originDocument,
+          state.masks[component.instanceId]!,
+        );
+        return {
+          ...component,
+          provenance: {
+            ...component.provenance,
+            containsGeneratedPixels: originSummary.containsGeneratedPixels,
+            originSummary,
+          },
+        };
+      }),
+    },
+    masks: state.masks,
+    unknownMask: state.unknownMask,
+  };
 }
 
 export function componentMaskFile(instanceId: string): string {
@@ -627,16 +675,28 @@ function refreshComponent(
   override?: SemanticComponentInput,
   provenance?: SemanticComponentProvenance,
 ): SemanticComponent {
+  const canonicalSpans = pixelIdsToSpans(maskToPixelIds(mask), layout);
+  const selectedProvenance = provenance ?? source.provenance;
+  const refreshedProvenance = spansEqual(source.spans, canonicalSpans)
+    ? selectedProvenance
+    : withoutOriginSummary(selectedProvenance);
   return {
     ...source,
     ...(override ?? {}),
     confidence: 1,
     reviewState: "confirmed",
     maskFile: componentMaskFile(override?.instanceId ?? source.instanceId),
-    spans: pixelIdsToSpans(maskToPixelIds(mask), layout),
+    spans: canonicalSpans,
     palette: paletteForMask(image, mask),
-    provenance: provenance ?? source.provenance,
+    provenance: refreshedProvenance,
   };
+}
+
+function withoutOriginSummary(
+  provenance: SemanticComponentProvenance,
+): SemanticComponentProvenance {
+  const { originSummary: _originSummary, ...legacySummary } = provenance;
+  return legacySummary;
 }
 
 function userProvenance(): SemanticComponentProvenance {
@@ -679,12 +739,47 @@ function sortedUniqueEvidenceIds(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
-function validateProvenance(provenance: SemanticComponentProvenance): void {
+function validateProvenance(
+  provenance: SemanticComponentProvenance,
+  expectedPixelCount?: number,
+): void {
   if (
     !["user", "ai", "system"].includes(provenance.actorType) ||
     typeof provenance.containsGeneratedPixels !== "boolean"
   ) {
     throw new SemanticEditError("INVALID_COMPONENT", "Component provenance is invalid");
+  }
+  const originSummary = provenance.originSummary;
+  if (originSummary) {
+    const counts = originSummary.counts;
+    const countValues = [
+      counts.source_visible,
+      counts.manual_authored,
+      counts.generated_completion,
+      counts.legacy_mixed,
+    ];
+    if (
+      Object.keys(originSummary).sort().join(",") !==
+        "containsGeneratedPixels,counts" ||
+      Object.keys(counts).sort().join(",") !==
+        "generated_completion,legacy_mixed,manual_authored,source_visible" ||
+      countValues.some(
+        (value) =>
+          !Number.isInteger(value) || value < 0 || value > 64 * 64,
+      ) ||
+      originSummary.containsGeneratedPixels !==
+        (counts.generated_completion > 0) ||
+      provenance.containsGeneratedPixels !==
+        originSummary.containsGeneratedPixels ||
+      (expectedPixelCount !== undefined &&
+        countValues.reduce((total, value) => total + value, 0) !==
+          expectedPixelCount)
+    ) {
+      throw new SemanticEditError(
+        "INVALID_COMPONENT",
+        "Component pixel origin summary is invalid",
+      );
+    }
   }
   if (
     provenance.aiRunId !== undefined &&

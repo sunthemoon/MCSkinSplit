@@ -12,6 +12,7 @@ import type {
   ReplacementPlanProposal,
   SkinSemanticAiProvider,
 } from "@mc-skin-split/ai-provider";
+import { RevisionStore } from "@mc-skin-split/skin-revision";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApi } from "../src/app";
@@ -32,11 +33,13 @@ const TARGET_SKIN_PATH = fileURLToPath(
 const resources: Array<{
   readonly app: FastifyInstance;
   readonly directory: string;
+  readonly store: RevisionStore;
 }> = [];
 
 afterEach(async () => {
   const createdResources = resources.splice(0);
   await Promise.all(createdResources.map(({ app }) => app.close()));
+  for (const { store } of createdResources) store.close();
   await Promise.all(
     createdResources.map(({ directory }) =>
       rm(directory, { force: true, recursive: true }),
@@ -108,8 +111,9 @@ describe("revision API", () => {
         id: importResult.revisionId,
         sequence: 1,
         operationType: "import",
+        originAssetId: expect.any(String),
       },
-      assets: [{}, {}, {}, {}],
+      assets: [{}, {}, {}, {}, {}],
     });
 
     const skin = await app.inject({
@@ -131,6 +135,64 @@ describe("revision API", () => {
         revisionId: importResult.revisionId,
         source: { armType: "slim", width: 64, height: 64 },
       },
+    });
+
+    const origin = await app.inject({
+      method: "GET",
+      url: `/api/revisions/${importResult.revisionId}/origin`,
+    });
+    expect(origin.statusCode).toBe(200);
+    const originBody = origin.json<{
+      origin: {
+        availability: string;
+        revisionId: string;
+        originAssetId: string | null;
+        document: {
+          subject: { kind: string; id: string };
+          entries: readonly unknown[];
+        } | null;
+        summary: {
+          counts: Record<string, number>;
+          containsGeneratedPixels: boolean;
+        } | null;
+        componentSummaries: Record<string, unknown>;
+      };
+    }>().origin;
+    expect(Object.keys(originBody).sort()).toEqual([
+      "availability",
+      "componentSummaries",
+      "document",
+      "originAssetId",
+      "revisionId",
+      "summary",
+    ]);
+    expect(originBody).toMatchObject({
+      availability: "recorded",
+      revisionId: importResult.revisionId,
+      originAssetId: expect.any(String),
+      document: {
+        subject: { kind: "revision", id: importResult.revisionId },
+        entries: expect.any(Array),
+      },
+      summary: {
+        counts: {
+          manual_authored: 0,
+          generated_completion: 0,
+          legacy_mixed: 0,
+        },
+        containsGeneratedPixels: false,
+      },
+      componentSummaries: {},
+    });
+    expect(originBody.summary!.counts.source_visible).toBeGreaterThan(0);
+
+    const missingOrigin = await app.inject({
+      method: "GET",
+      url: "/api/revisions/revision_missing/origin",
+    });
+    expect(missingOrigin.statusCode).toBe(404);
+    expect(missingOrigin.json()).toMatchObject({
+      error: { code: "NOT_FOUND" },
     });
 
     const branch = await app.inject({
@@ -209,6 +271,38 @@ describe("revision API", () => {
       branch: {
         name: "project-route-branch",
         baseRevisionId: imported.revisionId,
+      },
+    });
+  });
+
+  it("serializes the legacy-unavailable revision-origin contract", async () => {
+    const { app, store } = await createApi();
+    const project = await createProject(app, "Legacy origin API");
+    const imported = await importSkin(app, project.projectId);
+    const getRevision = store.getRevision.bind(store);
+    const readOrigin = store.readRevisionOrigin.bind(store);
+    store.getRevision = (revisionId) => {
+      const revision = getRevision(revisionId);
+      return revisionId === imported.revisionId
+        ? { ...revision, originAssetId: null }
+        : revision;
+    };
+    store.readRevisionOrigin = async (revisionId) =>
+      revisionId === imported.revisionId ? null : readOrigin(revisionId);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/revisions/${imported.revisionId}/origin`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      origin: {
+        availability: "legacy_unavailable",
+        revisionId: imported.revisionId,
+        originAssetId: null,
+        document: null,
+        summary: null,
+        componentSummaries: {},
       },
     });
   });
@@ -557,6 +651,45 @@ describe("revision API", () => {
     });
     expect(committedBody.part.id).not.toBe(basePart.id);
 
+    const appliedPart = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/apply-part`,
+      payload: {
+        partId: committedBody.part.id,
+        strategy: "use_part",
+      },
+    });
+    expect(appliedPart.statusCode).toBe(201);
+    const appliedRevisionId = appliedPart.json<MutationResponse>().revision.id;
+    const authoredOrigin = await app.inject({
+      method: "GET",
+      url: `/api/revisions/${appliedRevisionId}/origin`,
+    });
+    expect(authoredOrigin.statusCode).toBe(200);
+    const authored = authoredOrigin.json<{
+      origin: {
+        availability: string;
+        summary: { counts: Record<string, number> };
+        componentSummaries: Record<
+          string,
+          { counts: Record<string, number>; containsGeneratedPixels: boolean }
+        >;
+      };
+    }>().origin;
+    expect(authored.availability).toBe("recorded");
+    expect(authored.summary.counts.manual_authored).toBeGreaterThan(0);
+    expect(authored.summary.counts.generated_completion).toBe(0);
+    expect(
+      authored.componentSummaries[`applied.${committedBody.part.id}`],
+    ).toMatchObject({
+      counts: { manual_authored: expect.any(Number) },
+      containsGeneratedPixels: false,
+    });
+    expect(
+      authored.componentSummaries[`applied.${committedBody.part.id}`]!.counts
+        .manual_authored,
+    ).toBeGreaterThan(0);
+
     const originalAfterCommit = await app.inject({
       method: "GET",
       url: `/api/parts/${encodeURIComponent(basePart.id)}/texture.png`,
@@ -759,7 +892,7 @@ describe("revision API", () => {
       composition: { status: "committed" },
     });
 
-    const unsafeAnalysis = await app.inject({
+    const reanalysis = await app.inject({
       method: "POST",
       url: `/api/revisions/${committedBody.revision.id}/ai-analysis`,
       payload: {
@@ -773,23 +906,24 @@ describe("revision API", () => {
         createRevisionOnSuccess: true,
       },
     });
-    expect(unsafeAnalysis.statusCode).toBe(409);
-    expect(unsafeAnalysis.json()).toMatchObject({
-      error: {
-        code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
-        details: {
-          sourceRevisionId: committedBody.revision.id,
-          operationType: "compose",
-        },
-      },
+    expect(reanalysis.statusCode).toBe(202);
+    const reanalysisJob = await waitForAiJob(
+      app,
+      reanalysis.json<{ job: { id: string } }>().job.id,
+    );
+    expect(reanalysisJob.job).toMatchObject({
+      status: "succeeded",
+      resultRevisionId: expect.any(String),
     });
 
-    const blockedJobs = await app.inject({
+    const recordedJobs = await app.inject({
       method: "GET",
       url: `/api/ai-jobs?revisionId=${encodeURIComponent(committedBody.revision.id)}`,
     });
-    expect(blockedJobs.statusCode).toBe(200);
-    expect(blockedJobs.json()).toMatchObject({ jobs: [] });
+    expect(recordedJobs.statusCode).toBe(200);
+    expect(recordedJobs.json()).toMatchObject({
+      jobs: [{ id: reanalysisJob.job.id, status: "succeeded" }],
+    });
 
     const invalid = await app.inject({
       method: "POST",
@@ -1435,7 +1569,7 @@ describe("revision API", () => {
     expect(duplicate.json()).toMatchObject({ error: { code: "CONFLICT" } });
   });
 
-  it("rejects API reads after checksum corruption", async () => {
+  it("maps corrupted revision-origin snapshots to a stable 409", async () => {
     const { app, directory } = await createApi();
     const project = await createProject(app, "Corrupt API snapshot");
     const imported = await importSkin(app, project.projectId);
@@ -1446,7 +1580,7 @@ describe("revision API", () => {
         project.projectId,
         "revisions",
         imported.revisionId,
-        "checksum.json",
+        "origin.json",
       ),
       "{}\n",
       "utf8",
@@ -1454,7 +1588,7 @@ describe("revision API", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/api/revisions/${imported.revisionId}/skin.png`,
+      url: `/api/revisions/${imported.revisionId}/origin`,
     });
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({
@@ -1835,12 +1969,14 @@ interface MutationResponse {
 
 async function createApi(aiProviders?: readonly SkinSemanticAiProvider[]) {
   const directory = await mkdtemp(join(tmpdir(), "mcskinsplit-api-"));
+  const store = new RevisionStore({ dataDirectory: directory });
   const app = buildApi({
     dataDirectory: directory,
+    revisionStore: store,
     ...(aiProviders ? { aiProviders } : {}),
   });
-  resources.push({ app, directory });
-  return { app, directory };
+  resources.push({ app, directory, store });
+  return { app, directory, store };
 }
 
 interface AiJobApiDetail {

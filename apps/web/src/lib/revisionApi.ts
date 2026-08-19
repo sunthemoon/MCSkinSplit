@@ -6,6 +6,8 @@ import type {
   PartRepairOverwriteMode,
   PartApplicationReport,
   PartManifest,
+  PixelOriginDocument,
+  PixelOriginSummary,
   Rgba,
   SemanticComponent,
   SemanticCategory,
@@ -76,6 +78,24 @@ export interface ApiSegmentation {
     readonly pixelCount: number;
   };
 }
+
+export type ApiRevisionOrigin =
+  | {
+      readonly availability: "recorded";
+      readonly revisionId: string;
+      readonly originAssetId: string;
+      readonly document: PixelOriginDocument;
+      readonly summary: PixelOriginSummary;
+      readonly componentSummaries: Readonly<Record<string, PixelOriginSummary>>;
+    }
+  | {
+      readonly availability: "legacy_unavailable";
+      readonly revisionId: string;
+      readonly originAssetId: null;
+      readonly document: null;
+      readonly summary: null;
+      readonly componentSummaries: Readonly<Record<string, never>>;
+    };
 
 export interface ApiPart {
   readonly id: string;
@@ -727,6 +747,18 @@ export async function loadRevisionSegmentation(
     fetcher,
   );
   return body.segmentation;
+}
+
+export async function loadRevisionOrigin(
+  revisionId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiRevisionOrigin> {
+  const body = await requestJson<{ origin: ApiRevisionOrigin }>(
+    `/api/revisions/${encodeURIComponent(revisionId)}/origin`,
+    undefined,
+    fetcher,
+  );
+  return body.origin;
 }
 
 export async function revertRevision(

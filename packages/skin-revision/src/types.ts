@@ -67,6 +67,8 @@ export interface SkinRevision {
   readonly skinAssetId: string;
   readonly segmentationAssetId: string;
   readonly operationAssetId: string;
+  /** NULL only for immutable snapshots created before migration 014. */
+  readonly originAssetId: string | null;
   readonly sourceHash: string;
   readonly resultHash: string;
   readonly metadata: Readonly<Record<string, unknown>>;
@@ -80,6 +82,7 @@ export interface SkinAsset {
   readonly assetType:
     | "revision_skin"
     | "segmentation_json"
+    | "origin_json"
     | "component_mask"
     | "operation_json";
   readonly storagePath: string;
@@ -124,11 +127,19 @@ export interface OperationSnapshot {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
-export interface SnapshotChecksum {
+export interface LegacySnapshotChecksum {
   readonly schemaVersion: "1.0";
   readonly revisionId: string;
   readonly files: Readonly<Record<string, string>>;
 }
+
+export interface OriginSnapshotChecksum {
+  readonly schemaVersion: "2.0";
+  readonly revisionId: string;
+  readonly files: Readonly<Record<string, string>>;
+}
+
+export type SnapshotChecksum = LegacySnapshotChecksum | OriginSnapshotChecksum;
 
 export interface CreateProjectInput {
   readonly name: string;
@@ -268,6 +279,10 @@ export interface SkinPart {
   readonly manifest: PartManifest;
   readonly texture: PartFileAsset;
   readonly writeMask: PartFileAsset;
+  /** NULL only for immutable Manifest 1.0/1.1 parts. */
+  readonly origin: PartFileAsset | null;
+  /** NULL only for immutable Manifest 1.0/1.1 parts. */
+  readonly generatedMask: PartFileAsset | null;
   readonly manifestFile: PartFileAsset;
   readonly preview: PartFileAsset;
   readonly source: PartFileAsset;
@@ -317,6 +332,10 @@ export interface PartEditRevision {
   readonly actorId?: string;
   readonly texture: PartFileAsset;
   readonly writeMask: PartFileAsset;
+  /** NULL only for immutable repair revisions created before migration 014. */
+  readonly origin: PartFileAsset | null;
+  /** NULL only for immutable repair revisions created before migration 014. */
+  readonly generatedMask: PartFileAsset | null;
   readonly revisionFile: PartFileAsset;
   readonly changedPixelCount: number;
   readonly authoredProvenance: Readonly<Record<string, unknown>>;
@@ -677,6 +696,8 @@ export interface RevisionDiff {
   readonly toRevisionId: string;
   readonly changedPixelCount: number;
   readonly changedPixelIds: readonly number[];
+  readonly originChangedPixelCount: number;
+  readonly originChangedPixelIds: readonly number[];
   readonly boundingBox: {
     readonly x: number;
     readonly y: number;

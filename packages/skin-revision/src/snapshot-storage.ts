@@ -11,19 +11,28 @@ import { canonicalJson, sha256 } from "./hash";
 import { RevisionStoreError, snapshotCorrupt } from "./errors";
 import type { SnapshotChecksum } from "./types";
 
-const CORE_SNAPSHOT_FILES = [
+const LEGACY_CORE_SNAPSHOT_FILES = [
   "skin.png",
   "segmentation.json",
   "operation.json",
 ] as const;
 
-type CoreSnapshotFileName = (typeof CORE_SNAPSHOT_FILES)[number];
+const ORIGIN_CORE_SNAPSHOT_FILES = [
+  "skin.png",
+  "segmentation.json",
+  "origin.json",
+  "operation.json",
+] as const;
+
+type LegacyCoreSnapshotFileName = (typeof LEGACY_CORE_SNAPSHOT_FILES)[number];
+type OriginCoreSnapshotFileName = (typeof ORIGIN_CORE_SNAPSHOT_FILES)[number];
 
 export interface SnapshotInput {
   readonly projectId: string;
   readonly revisionId: string;
   readonly skinPng: Uint8Array;
   readonly segmentationJson: string;
+  readonly originJson: string;
   readonly operationJson: string;
   readonly additionalFiles?: Readonly<Record<string, Uint8Array>>;
 }
@@ -36,7 +45,8 @@ export interface SnapshotFile {
 }
 
 export type SnapshotFiles = Readonly<Record<string, SnapshotFile>> &
-  Readonly<Record<CoreSnapshotFileName, SnapshotFile>>;
+  Readonly<Record<LegacyCoreSnapshotFileName, SnapshotFile>> &
+  Readonly<Partial<Record<"origin.json", SnapshotFile>>>;
 
 export interface VerifiedSnapshot {
   readonly directory: string;
@@ -84,6 +94,7 @@ export class SnapshotStorage {
       const fileInputs: Record<string, Uint8Array> = {
         "skin.png": input.skinPng,
         "segmentation.json": Buffer.from(input.segmentationJson, "utf8"),
+        "origin.json": Buffer.from(input.originJson, "utf8"),
         "operation.json": Buffer.from(input.operationJson, "utf8"),
       };
       for (const [fileName, bytes] of Object.entries(input.additionalFiles ?? {})) {
@@ -94,7 +105,7 @@ export class SnapshotStorage {
         fileInputs[fileName] = bytes;
       }
       const fileNames = [
-        ...CORE_SNAPSHOT_FILES,
+        ...ORIGIN_CORE_SNAPSHOT_FILES,
         ...Object.keys(input.additionalFiles ?? {}).sort(),
       ];
       const fileHashes: Record<string, string> = {};
@@ -111,7 +122,7 @@ export class SnapshotStorage {
       }
 
       const checksum: SnapshotChecksum = {
-        schemaVersion: "1.0",
+        schemaVersion: "2.0",
         revisionId: input.revisionId,
         files: fileHashes,
       };
@@ -184,7 +195,7 @@ export class SnapshotStorage {
 function parseChecksum(bytes: Uint8Array, revisionId: string): SnapshotChecksum {
   const parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as Partial<SnapshotChecksum>;
   if (
-    parsed.schemaVersion !== "1.0" ||
+    (parsed.schemaVersion !== "1.0" && parsed.schemaVersion !== "2.0") ||
     parsed.revisionId !== revisionId ||
     parsed.files === undefined ||
     parsed.files === null ||
@@ -194,14 +205,20 @@ function parseChecksum(bytes: Uint8Array, revisionId: string): SnapshotChecksum 
   }
 
   const fileNames = Object.keys(parsed.files).sort();
-  for (const coreFile of CORE_SNAPSHOT_FILES) {
+  const coreFiles = parsed.schemaVersion === "2.0"
+    ? ORIGIN_CORE_SNAPSHOT_FILES
+    : LEGACY_CORE_SNAPSHOT_FILES;
+  for (const coreFile of coreFiles) {
     if (!fileNames.includes(coreFile)) {
       throw snapshotCorrupt(revisionId, `checksum.json 缺少 ${coreFile}`);
     }
   }
+  if (parsed.schemaVersion === "1.0" && fileNames.includes("origin.json")) {
+    throw snapshotCorrupt(revisionId, "checksum.json 1.0 不能声明 origin.json");
+  }
 
   for (const fileName of fileNames) {
-    if (!CORE_SNAPSHOT_FILES.includes(fileName as CoreSnapshotFileName)) {
+    if (!ORIGIN_CORE_SNAPSHOT_FILES.includes(fileName as OriginCoreSnapshotFileName)) {
       try {
         assertAdditionalSnapshotFile(fileName);
       } catch (error) {

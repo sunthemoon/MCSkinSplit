@@ -13,14 +13,19 @@ import {
   aggregateKindForCategory,
   analyzePartApplication,
   applyManualSemanticOperation,
-  applyPartRepairOperation,
-  applyPartPixels,
+  applyPartRepairOperationWithOrigins,
+  applyPartPixelsWithOrigins,
   assignSemanticPixelsWithProvenance,
   assessArmType,
   createPartMannequinTexture,
-  derivePartWriteMask,
+  createCopiedPixelOriginAssignments,
   createInitialSemanticState,
+  createLegacyMixedPixelOriginDocument,
+  createManualPixelOriginAssignment,
+  createSourceVisiblePixelOriginDocument,
   decodeSkinPng,
+  deriveGeneratedPixelMask,
+  derivePartWriteMask,
   encodeSkinPng,
   exportSemanticPart,
   getSkinLayout,
@@ -32,6 +37,12 @@ import {
   pixelIdsToSpans,
   rgbaImageToMask,
   rebaseSemanticStateImage,
+  propagatePixelOriginDocument,
+  summarizePixelOrigins,
+  summarizePixelOriginsForMask,
+  spansToPixelIds,
+  synchronizeSemanticPixelOriginSummaries,
+  validatePixelOriginDocument,
   validateSemanticState,
   canonicalRestorationJson,
   generateRestorationCandidates as generateCoreRestorationCandidates,
@@ -39,8 +50,10 @@ import {
   type ManualSemanticOperation,
   type AggregateKind,
   type PartManifest,
-  type PartRepairOperation,
-  type PartRepairState,
+  type PixelOriginAssignment,
+  type PixelOriginDocument,
+  type OriginAwarePartRepairOperation,
+  type OriginAwarePartRepairState,
   type SegmentationDocument,
   type SemanticState,
   type RestorationCandidatePlan as CoreRestorationCandidatePlan,
@@ -60,6 +73,7 @@ import { canonicalJson, sha256 } from "./hash";
 import {
   PART_FILE_NAMES,
   PartStorage,
+  partFileNamesForVersion,
   type PartFileName,
   type VerifiedPartStorage,
 } from "./part-storage";
@@ -175,6 +189,7 @@ interface RevisionRow {
   readonly skin_asset_id: string;
   readonly segmentation_asset_id: string;
   readonly operation_asset_id: string;
+  readonly origin_asset_id: string | null;
   readonly source_hash: string;
   readonly result_hash: string;
   readonly created_at: string;
@@ -198,6 +213,7 @@ interface RevisionIds {
   readonly skinAssetId: string;
   readonly segmentationAssetId: string;
   readonly operationAssetId: string;
+  readonly originAssetId: string;
   readonly operationId: string;
 }
 
@@ -229,6 +245,16 @@ interface PartRow {
   readonly mask_mime_type: string;
   readonly mask_byte_size: number;
   readonly mask_sha256: string;
+  readonly origin_id: string | null;
+  readonly origin_storage_path: string | null;
+  readonly origin_mime_type: string | null;
+  readonly origin_byte_size: number | null;
+  readonly origin_sha256: string | null;
+  readonly generated_mask_id: string | null;
+  readonly generated_mask_storage_path: string | null;
+  readonly generated_mask_mime_type: string | null;
+  readonly generated_mask_byte_size: number | null;
+  readonly generated_mask_sha256: string | null;
   readonly manifest_id: string;
   readonly manifest_storage_path: string;
   readonly manifest_mime_type: string;
@@ -298,6 +324,12 @@ interface PartEditRevisionRow {
   readonly mask_storage_path: string;
   readonly mask_byte_size: number;
   readonly mask_sha256: string;
+  readonly origin_storage_path: string | null;
+  readonly origin_byte_size: number | null;
+  readonly origin_sha256: string | null;
+  readonly generated_mask_storage_path: string | null;
+  readonly generated_mask_byte_size: number | null;
+  readonly generated_mask_sha256: string | null;
   readonly revision_storage_path: string;
   readonly revision_byte_size: number;
   readonly revision_sha256: string;
@@ -387,6 +419,16 @@ const PART_SELECT = `
     mask.mime_type AS mask_mime_type,
     mask.byte_size AS mask_byte_size,
     mask.sha256 AS mask_sha256,
+    origin.id AS origin_id,
+    origin.storage_path AS origin_storage_path,
+    origin.mime_type AS origin_mime_type,
+    origin.byte_size AS origin_byte_size,
+    origin.sha256 AS origin_sha256,
+    generated_mask.id AS generated_mask_id,
+    generated_mask.storage_path AS generated_mask_storage_path,
+    generated_mask.mime_type AS generated_mask_mime_type,
+    generated_mask.byte_size AS generated_mask_byte_size,
+    generated_mask.sha256 AS generated_mask_sha256,
     manifest.id AS manifest_id,
     manifest.storage_path AS manifest_storage_path,
     manifest.mime_type AS manifest_mime_type,
@@ -408,6 +450,9 @@ const PART_SELECT = `
   JOIN skin_branch AS source_branch ON source_branch.id = source_revision.branch_id
   JOIN part_file_asset AS texture ON texture.id = part.texture_asset_id
   JOIN part_file_asset AS mask ON mask.id = part.mask_asset_id
+  LEFT JOIN part_file_asset AS origin ON origin.id = part.origin_asset_id
+  LEFT JOIN part_file_asset AS generated_mask
+    ON generated_mask.id = part.generated_mask_asset_id
   JOIN part_file_asset AS manifest ON manifest.id = part.manifest_asset_id
   JOIN part_file_asset AS preview ON preview.id = part.preview_asset_id
   JOIN part_file_asset AS source ON source.id = part.source_asset_id
@@ -1431,23 +1476,83 @@ export class RevisionStore {
 
   async verifyPartStorage(partId: string): Promise<VerifiedPartStorage> {
     const part = this.getPart(partId);
+    const expectedBindings = [
+      [part.texture.id, "texture"],
+      [part.writeMask.id, "write_mask"],
+      ...(part.origin ? [[part.origin.id, "origin"]] : []),
+      ...(part.generatedMask
+        ? [[part.generatedMask.id, "generated_mask"]]
+        : []),
+      [part.manifestFile.id, "manifest"],
+      [part.preview.id, "preview"],
+      [part.source.id, "source"],
+    ] as const;
+    const bindingRows = this.database.prepare(`
+      SELECT id, part_id, file_role
+      FROM part_file_asset
+      WHERE id IN (${expectedBindings.map(() => "?").join(", ")})
+    `).all(...expectedBindings.map(([id]) => id)) as Array<{
+      readonly id: string;
+      readonly part_id: string | null;
+      readonly file_role: string;
+    }>;
+    const bindingsById = new Map(bindingRows.map((row) => [row.id, row]));
+    for (const [assetId, fileRole] of expectedBindings) {
+      const binding = bindingsById.get(assetId);
+      if (
+        binding?.part_id !== part.id ||
+        binding.file_role !== fileRole
+      ) {
+        throw partCorrupt(
+          part.id,
+          `文件资产 ${assetId} 的 part_id/file_role 绑定无效`,
+        );
+      }
+    }
+    const boundRows = this.database.prepare(`
+      SELECT id, file_role
+      FROM part_file_asset
+      WHERE part_id = ?
+    `).all(part.id) as Array<{
+      readonly id: string;
+      readonly file_role: string;
+    }>;
+    const expectedRolesById = new Map<string, string>();
+    for (const [assetId, fileRole] of expectedBindings) {
+      expectedRolesById.set(assetId, fileRole);
+    }
+    if (
+      boundRows.length !== expectedBindings.length ||
+      boundRows.some((row) => expectedRolesById.get(row.id) !== row.file_role)
+    ) {
+      throw partCorrupt(
+        part.id,
+        "part_file_asset 绑定集合与 Part 文件清单不一致",
+      );
+    }
     let stored: VerifiedPartStorage;
     try {
-      stored = await this.partStorage.readPart(part.id);
+      stored = await this.partStorage.readPart(part.id, part.manifest.schemaVersion);
     } catch (error) {
       throw partCorrupt(part.id, "文件缺失", error);
     }
-    const expected: Readonly<Record<PartFileName, PartFileAsset>> = {
+    const expected: Readonly<Partial<Record<PartFileName, PartFileAsset>>> = {
       "texture.png": part.texture,
       "write-mask.png": part.writeMask,
+      ...(part.origin ? { "origin.json": part.origin } : {}),
+      ...(part.generatedMask
+        ? { "generated-mask.png": part.generatedMask }
+        : {}),
       "manifest.json": part.manifestFile,
       "preview.png": part.preview,
       "source.json": part.source,
     };
-    for (const fileName of PART_FILE_NAMES) {
+    for (const fileName of partFileNamesForVersion(part.manifest.schemaVersion)) {
       const file = stored.files[fileName];
       const asset = expected[fileName];
       if (
+        !file ||
+        !asset ||
         file.storagePath !== asset.storagePath ||
         file.sha256 !== asset.sha256 ||
         file.bytes.byteLength !== asset.byteSize
@@ -1462,7 +1567,74 @@ export class RevisionStore {
     if (canonicalJson(storedManifest) !== canonicalJson(part.manifest)) {
       throw partCorrupt(part.id, "manifest.json 与数据库不一致");
     }
+    try {
+      const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+      const writeMask = rgbaImageToMask(
+        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      );
+      const derivedWriteMask = derivePartWriteMask(texture, part.armType);
+      if (!masksEqual(derivedWriteMask, writeMask)) {
+        throw new RangeError("write-mask.png 与 texture.png alpha 不一致");
+      }
+      this.partOriginFromStorage(part, stored, texture, writeMask);
+    } catch (error) {
+      if (error instanceof RevisionStoreError) throw error;
+      throw partCorrupt(part.id, "texture/write mask/origin 资产无效", error);
+    }
     return stored;
+  }
+
+  private partOriginFromStorage(
+    part: SkinPart,
+    stored: VerifiedPartStorage,
+    texture: ReturnType<typeof decodeSkinPng>,
+    writeMask: Uint8Array,
+  ): PixelOriginDocument {
+    if (part.manifest.schemaVersion !== "2.0") {
+      return createLegacyMixedPixelOriginDocument({
+        subject: { kind: "part", id: part.id },
+        sourceRevisionId: part.sourceRevisionId,
+        armType: part.armType,
+        image: texture,
+      });
+    }
+    const originFile = stored.files["origin.json"];
+    const generatedMaskFile = stored.files["generated-mask.png"];
+    if (!originFile || !generatedMaskFile) {
+      throw partCorrupt(part.id, "Part 2.0 缺少 origin artifacts");
+    }
+    const origin = parsePixelOriginDocument(
+      originFile.bytes,
+      { kind: "part", id: part.id },
+      texture,
+    );
+    if (origin.source.armType !== part.armType) {
+      throw partCorrupt(part.id, "origin.json armType 与 Part 不一致");
+    }
+    const actualGeneratedMask = rgbaImageToMask(
+      decodeSkinPng(generatedMaskFile.bytes),
+    );
+    const expectedGeneratedMask = deriveGeneratedPixelMask(origin);
+    if (!masksEqual(actualGeneratedMask, expectedGeneratedMask)) {
+      throw partCorrupt(part.id, "generated-mask.png 与 origin.json 不一致");
+    }
+    for (let pixelId = 0; pixelId < actualGeneratedMask.length; pixelId += 1) {
+      if (actualGeneratedMask[pixelId] !== 0 && writeMask[pixelId] === 0) {
+        throw partCorrupt(part.id, "generated mask 不是 write mask 子集");
+      }
+    }
+    const summary = summarizePixelOrigins(origin);
+    if (
+      canonicalJson(part.manifest.origin.summary) !== canonicalJson(summary) ||
+      part.manifest.origin.containsGeneratedPixels !==
+        summary.containsGeneratedPixels ||
+      (part.manifest.derivation !== undefined &&
+        part.manifest.derivation.containsGeneratedPixels !==
+          summary.containsGeneratedPixels)
+    ) {
+      throw partCorrupt(part.id, "manifest origin summary 与 origin.json 不一致");
+    }
+    return origin;
   }
 
   async readPartTexturePng(partId: string): Promise<Uint8Array> {
@@ -1506,19 +1678,29 @@ export class RevisionStore {
       stored = await this.partEditStorage.readRevision(
         revision.projectId,
         revision.id,
+        revision.origin !== null,
       );
     } catch (error) {
       throw partEditCorrupt(revision.id, "文件缺失", error);
     }
-    const expected: Readonly<Record<PartEditFileName, PartFileAsset>> = {
+    const expected: Readonly<Partial<Record<PartEditFileName, PartFileAsset>>> = {
       "texture.png": revision.texture,
       "write-mask.png": revision.writeMask,
+      ...(revision.origin ? { "origin.json": revision.origin } : {}),
+      ...(revision.generatedMask
+        ? { "generated-mask.png": revision.generatedMask }
+        : {}),
       "revision.json": revision.revisionFile,
     };
-    for (const fileName of PART_EDIT_FILE_NAMES) {
+    const expectedFileNames = revision.origin === null
+      ? ["texture.png", "write-mask.png", "revision.json"] as const
+      : PART_EDIT_FILE_NAMES;
+    for (const fileName of expectedFileNames) {
       const file = stored.files[fileName];
       const asset = expected[fileName];
       if (
+        !file ||
+        !asset ||
         file.storagePath !== asset.storagePath ||
         file.sha256 !== asset.sha256 ||
         file.bytes.byteLength !== asset.byteSize
@@ -1581,10 +1763,73 @@ export class RevisionStore {
       if (!derived.every((value, index) => value === writeMask[index])) {
         throw new RangeError("写入遮罩与纹理 alpha 不一致");
       }
+      this.partEditOriginFromStorage(
+        revision,
+        basePart,
+        stored,
+        texture,
+        writeMask,
+      );
     } catch (error) {
       throw partEditCorrupt(revision.id, "纹理或遮罩无效", error);
     }
     return stored;
+  }
+
+  private partEditOriginFromStorage(
+    revision: PartEditRevision,
+    basePart: SkinPart,
+    stored: VerifiedPartEditStorage,
+    texture: ReturnType<typeof decodeSkinPng>,
+    writeMask: Uint8Array,
+  ): PixelOriginDocument {
+    if (revision.origin === null) {
+      return createLegacyMixedPixelOriginDocument({
+        subject: { kind: "part_edit_revision", id: revision.id },
+        sourceRevisionId: basePart.sourceRevisionId,
+        armType: basePart.armType,
+        image: texture,
+      });
+    }
+    const originFile = stored.files["origin.json"];
+    const generatedMaskFile = stored.files["generated-mask.png"];
+    if (!originFile || !generatedMaskFile || revision.generatedMask === null) {
+      throw partEditCorrupt(revision.id, "缺少 origin artifacts");
+    }
+    const origin = parsePixelOriginDocument(
+      originFile.bytes,
+      { kind: "part_edit_revision", id: revision.id },
+      texture,
+    );
+    if (origin.source.armType !== basePart.armType) {
+      throw partEditCorrupt(
+        revision.id,
+        "origin.json armType 与修补 Part 不一致",
+      );
+    }
+    const actualGeneratedMask = rgbaImageToMask(
+      decodeSkinPng(generatedMaskFile.bytes),
+    );
+    const expectedGeneratedMask = deriveGeneratedPixelMask(origin);
+    if (!masksEqual(actualGeneratedMask, expectedGeneratedMask)) {
+      throw partEditCorrupt(
+        revision.id,
+        "generated-mask.png 与 origin.json 不一致",
+      );
+    }
+    for (let pixelId = 0; pixelId < actualGeneratedMask.length; pixelId += 1) {
+      if (actualGeneratedMask[pixelId] !== 0 && writeMask[pixelId] === 0) {
+        throw partEditCorrupt(revision.id, "generated mask 不是 write mask 子集");
+      }
+    }
+    const persistedSummary = revision.authoredProvenance.originSummary;
+    if (
+      persistedSummary !== undefined &&
+      canonicalJson(persistedSummary) !== canonicalJson(summarizePixelOrigins(origin))
+    ) {
+      throw partEditCorrupt(revision.id, "origin summary 与 origin.json 不一致");
+    }
+    return origin;
   }
 
   async readPartEditTexturePng(revisionId: string): Promise<Uint8Array> {
@@ -1732,6 +1977,13 @@ export class RevisionStore {
       revision.id,
     );
     const assets = this.getRevisionAssets(revision.id);
+    const originFile = snapshot.files["origin.json"];
+    if ((revision.originAssetId === null) !== (originFile === undefined)) {
+      throw snapshotCorrupt(
+        revision.id,
+        "origin_asset_id 与 origin.json 快照状态不一致",
+      );
+    }
     const expectedAssets = Object.values(snapshot.files).map((file) => {
       if (file.name === "skin.png") {
         return {
@@ -1754,6 +2006,14 @@ export class RevisionStore {
           file,
           id: revision.operationAssetId,
           assetType: "operation_json" as const,
+          mimeType: "application/json",
+        };
+      }
+      if (file.name === "origin.json") {
+        return {
+          file,
+          id: revision.originAssetId,
+          assetType: "origin_json" as const,
           mimeType: "application/json",
         };
       }
@@ -1799,6 +2059,8 @@ export class RevisionStore {
     ) {
       throw snapshotCorrupt(revision.id, "segmentation sourceHash 与皮肤不一致");
     }
+    const image = decodeSkinPng(snapshot.files["skin.png"].bytes);
+    const origin = this.revisionOriginFromSnapshot(revision, snapshot, image);
     const operation = parseOperation(
       snapshot.files["operation.json"].bytes,
       revision.id,
@@ -1814,11 +2076,22 @@ export class RevisionStore {
     ) {
       throw snapshotCorrupt(revision.id, "operation.json 与 Revision 元数据不一致");
     }
-    const resultHash = computeResultHash(snapshot.files["skin.png"].bytes, segmentation);
+    const resultHash = computeResultHash(
+      snapshot.files["skin.png"].bytes,
+      segmentation,
+      origin,
+    );
     if (resultHash !== revision.resultHash) {
       throw snapshotCorrupt(revision.id, "resultHash 与快照状态不一致");
     }
-    semanticStateFromSnapshot(snapshot, segmentation, revision.id);
+    const semanticState = semanticStateFromSnapshot(
+      snapshot,
+      segmentation,
+      revision.id,
+    );
+    if (origin) {
+      assertComponentOriginSummaries(semanticState, origin, revision.id);
+    }
 
     return snapshot;
   }
@@ -1835,6 +2108,18 @@ export class RevisionStore {
     return parseSegmentation(snapshot.files["segmentation.json"].bytes, revisionId);
   }
 
+  async readRevisionOrigin(
+    revisionId: string,
+  ): Promise<PixelOriginDocument | null> {
+    const revision = this.getRevision(revisionId);
+    const snapshot = await this.verifyRevisionSnapshot(revision.id);
+    return this.revisionOriginFromSnapshot(
+      revision,
+      snapshot,
+      decodeSkinPng(snapshot.files["skin.png"].bytes),
+    );
+  }
+
   async readRevisionSemanticState(revisionId: string): Promise<SemanticState> {
     const snapshot = await this.verifyRevisionSnapshot(revisionId);
     const segmentation = parseSegmentation(
@@ -1849,6 +2134,97 @@ export class RevisionStore {
     return parseOperation(snapshot.files["operation.json"].bytes, revisionId);
   }
 
+  private revisionOriginFromSnapshot(
+    revision: SkinRevision,
+    snapshot: VerifiedSnapshot,
+    image: ReturnType<typeof decodeSkinPng>,
+  ): PixelOriginDocument | null {
+    const file = snapshot.files["origin.json"];
+    if (revision.originAssetId === null) {
+      if (file !== undefined) {
+        throw snapshotCorrupt(revision.id, "legacy Revision 包含未引用的 origin.json");
+      }
+      return null;
+    }
+    if (!file) {
+      throw snapshotCorrupt(revision.id, "缺少 origin.json");
+    }
+    try {
+      return parsePixelOriginDocument(file.bytes, {
+        kind: "revision",
+        id: revision.id,
+      }, image);
+    } catch (error) {
+      if (error instanceof RevisionStoreError) throw error;
+      throw snapshotCorrupt(revision.id, "origin.json 无效", { cause: error });
+    }
+  }
+
+  private async originForDerivation(
+    revision: SkinRevision,
+    snapshot?: VerifiedSnapshot,
+    visited: ReadonlySet<string> = new Set(),
+  ): Promise<PixelOriginDocument> {
+    if (visited.has(revision.id)) {
+      throw snapshotCorrupt(revision.id, "legacy origin 派生形成循环");
+    }
+    const nextVisited = new Set(visited).add(revision.id);
+    const verified = snapshot ?? await this.verifyRevisionSnapshot(revision.id);
+    const image = decodeSkinPng(verified.files["skin.png"].bytes);
+    const stored = this.revisionOriginFromSnapshot(revision, verified, image);
+    if (stored) return stored;
+
+    const segmentation = parseSegmentation(
+      verified.files["segmentation.json"].bytes,
+      revision.id,
+    );
+    if (revision.operationType === "import") {
+      return createSourceVisiblePixelOriginDocument({
+        subject: { kind: "revision", id: revision.id },
+        armType: segmentation.source.armType,
+        image,
+      });
+    }
+
+    const provenAncestorId = legacyProvenOriginAncestorId(revision);
+    if (provenAncestorId) {
+      const ancestor = this.getRevision(provenAncestorId);
+      if (ancestor.projectId !== revision.projectId) {
+        throw snapshotCorrupt(revision.id, "legacy origin 祖先不属于同一 Project");
+      }
+      const ancestorSnapshot = await this.verifyRevisionSnapshot(ancestor.id);
+      const ancestorImage = decodeSkinPng(
+        ancestorSnapshot.files["skin.png"].bytes,
+      );
+      const ancestorOrigin = await this.originForDerivation(
+        ancestor,
+        ancestorSnapshot,
+        nextVisited,
+      );
+      try {
+        return propagatePixelOriginDocument({
+          sourceDocument: ancestorOrigin,
+          sourceImage: ancestorImage,
+          resultImage: image,
+          resultSubject: { kind: "revision", id: revision.id },
+        });
+      } catch (error) {
+        throw snapshotCorrupt(
+          revision.id,
+          "legacy 语义/分支操作不能由不可变祖先完整证明",
+          { cause: error },
+        );
+      }
+    }
+
+    return createLegacyMixedPixelOriginDocument({
+      subject: { kind: "revision", id: revision.id },
+      sourceRevisionId: revision.id,
+      armType: segmentation.source.armType,
+      image,
+    });
+  }
+
   async diffRevisions(
     fromRevisionId: string,
     toRevisionId: string,
@@ -1859,13 +2235,22 @@ export class RevisionStore {
       throw invalidInput("只能比较同一 Project 内的 Revision");
     }
 
-    const [fromPng, toPng] = await Promise.all([
-      this.readRevisionSkinPng(fromRevisionId),
-      this.readRevisionSkinPng(toRevisionId),
+    const [fromSnapshot, toSnapshot] = await Promise.all([
+      this.verifyRevisionSnapshot(fromRevisionId),
+      this.verifyRevisionSnapshot(toRevisionId),
     ]);
+    const fromPng = fromSnapshot.files["skin.png"].bytes;
+    const toPng = toSnapshot.files["skin.png"].bytes;
     const fromImage = decodeSkinPng(fromPng);
     const toImage = decodeSkinPng(toPng);
+    const [fromOrigin, toOrigin] = await Promise.all([
+      this.originForDerivation(fromRevision, fromSnapshot),
+      this.originForDerivation(toRevision, toSnapshot),
+    ]);
+    const fromOriginByPixel = originRecordFingerprints(fromOrigin);
+    const toOriginByPixel = originRecordFingerprints(toOrigin);
     const changedPixelIds: number[] = [];
+    const originChangedPixelIds: number[] = [];
     let minX = 64;
     let minY = 64;
     let maxX = -1;
@@ -1887,6 +2272,9 @@ export class RevisionStore {
         maxX = Math.max(maxX, x);
         maxY = Math.max(maxY, y);
       }
+      if (fromOriginByPixel.get(pixelId) !== toOriginByPixel.get(pixelId)) {
+        originChangedPixelIds.push(pixelId);
+      }
     }
 
     return {
@@ -1894,6 +2282,8 @@ export class RevisionStore {
       toRevisionId,
       changedPixelCount: changedPixelIds.length,
       changedPixelIds,
+      originChangedPixelCount: originChangedPixelIds.length,
+      originChangedPixelIds,
       boundingBox:
         changedPixelIds.length === 0
           ? null
@@ -1985,7 +2375,12 @@ export class RevisionStore {
       image,
     });
     const segmentation = semanticState.document;
-    const resultHash = computeResultHash(canonicalSkinPng, segmentation);
+    const origin = createSourceVisiblePixelOriginDocument({
+      subject: { kind: "revision", id: ids.revisionId },
+      armType,
+      image,
+    });
+    const resultHash = computeResultHash(canonicalSkinPng, segmentation, origin);
     const metadata = {
       armType,
       armTypeInference: assessment,
@@ -2003,12 +2398,13 @@ export class RevisionStore {
       afterHash: resultHash,
       metadata: { fileName, sourceHash },
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng: canonicalSkinPng,
-      segmentationJson: canonicalJson(segmentation),
-      operationJson: canonicalJson(operation),
+      segmentation,
+      origin,
+      operation,
       additionalFiles: semanticMaskFiles(semanticState),
     });
 
@@ -2102,7 +2498,12 @@ export class RevisionStore {
       image,
     });
     const segmentation = semanticState.document;
-    const resultHash = computeResultHash(canonicalSkinPng, segmentation);
+    const origin = createSourceVisiblePixelOriginDocument({
+      subject: { kind: "revision", id: ids.revisionId },
+      armType,
+      image,
+    });
+    const resultHash = computeResultHash(canonicalSkinPng, segmentation, origin);
     const metadata = {
       armType,
       armTypeInference: assessment,
@@ -2121,12 +2522,13 @@ export class RevisionStore {
       metadata: { fileName, sourceHash },
     });
 
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId,
       revisionId: ids.revisionId,
       skinPng: canonicalSkinPng,
-      segmentationJson: canonicalJson(segmentation),
-      operationJson: canonicalJson(operation),
+      segmentation,
+      origin,
+      operation,
       additionalFiles: semanticMaskFiles(semanticState),
     });
 
@@ -2735,6 +3137,18 @@ export class RevisionStore {
       sourceRevision.id,
     );
     const sourceImage = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    const sourceOrigin = await this.originForDerivation(
+      sourceRevision,
+      sourceSnapshot,
+    );
+    const ids = this.revisionIds();
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const summary = validateText(
+      "Revision 摘要",
+      input.summary ?? `提交混搭 ${composition.name}`,
+      300,
+    );
     const skinPng = encodeSkinPng(evaluated.image);
     let state = rebaseSemanticStateImage({
       state: sourceState,
@@ -2743,6 +3157,26 @@ export class RevisionStore {
       sourceHash: sha256(skinPng),
     });
     const persistedPlan = this.readPersistedCompositionRestorationPlan(composition.id);
+    const restoredCandidates = persistedPlan
+      ? await this.regeneratePersistedRestorationCandidates(
+          composition,
+          persistedPlan,
+        )
+      : new Map<string, CoreRestorationCandidateSet["candidates"][number]>();
+    const originAssignments = new Map<number, PixelOriginAssignment>();
+    const addOriginAssignments = (
+      assignments: readonly PixelOriginAssignment[],
+    ): void => {
+      for (const assignment of assignments) {
+        if (originAssignments.has(assignment.pixelId)) {
+          throw snapshotCorrupt(
+            composition.id,
+            `混搭像素 ${assignment.pixelId} 存在重复 origin 来源`,
+          );
+        }
+        originAssignments.set(assignment.pixelId, assignment);
+      }
+    };
     const affectedComponents: string[] = [];
     const affectedPixelIds = new Set<number>();
     const winningPartPixelIds = new Set(
@@ -2759,6 +3193,114 @@ export class RevisionStore {
             evaluated.image.data[pixelId * 4 + 3] !== 0,
         );
         if (restoredPixelIds.length === 0) continue;
+        const regenerated = restoredCandidates.get(candidate.candidateId);
+        if (!regenerated) {
+          throw snapshotCorrupt(
+            composition.id,
+            `无法重建还原候选 ${candidate.candidateId} 的 origin 证据`,
+          );
+        }
+        if (candidate.kind === "manual_rgba") {
+          addOriginAssignments(
+            restoredPixelIds.map((pixelId) =>
+              createManualPixelOriginAssignment({
+                pixelId,
+                actor: {
+                  type: "user",
+                  ...(actorId ? { id: actorId } : {}),
+                },
+                operationId: ids.revisionId,
+              }),
+            ),
+          );
+        } else if (candidate.kind !== "outer_transparent") {
+          const sampleRevisionId = regenerated.sampleRevisionId;
+          if (!sampleRevisionId) {
+            throw snapshotCorrupt(
+              composition.id,
+              `还原候选 ${candidate.candidateId} 缺少样本 Revision`,
+            );
+          }
+          const sampleRevision = this.getRevision(sampleRevisionId);
+          const sampleSnapshot = sampleRevision.id === sourceRevision.id
+            ? sourceSnapshot
+            : await this.verifyRevisionSnapshot(sampleRevision.id);
+          const sampleImage = sampleRevision.id === sourceRevision.id
+            ? sourceImage
+            : decodeSkinPng(sampleSnapshot.files["skin.png"].bytes);
+          const sampleSegmentation = sampleRevision.id === sourceRevision.id
+            ? segmentation
+            : parseSegmentation(
+                sampleSnapshot.files["segmentation.json"].bytes,
+                sampleRevision.id,
+              );
+          const sampleState = sampleRevision.id === sourceRevision.id
+            ? sourceState
+            : semanticStateFromSnapshot(
+                sampleSnapshot,
+                sampleSegmentation,
+                sampleRevision.id,
+              );
+          const sampleOrigin = sampleRevision.id === sourceRevision.id
+            ? sourceOrigin
+            : await this.originForDerivation(sampleRevision, sampleSnapshot);
+          const evidenceByTarget = new Map(
+            regenerated.evidence.assignments.map((assignment) => [
+              assignment.targetPixelId,
+              assignment,
+            ]),
+          );
+          const mappingsByComponent = new Map<
+            string,
+            Array<{ sourcePixelId: number; targetPixelId: number }>
+          >();
+          for (const targetPixelId of restoredPixelIds) {
+            const evidence = evidenceByTarget.get(targetPixelId);
+            if (
+              evidence?.samplePixelId === null ||
+              evidence?.samplePixelId === undefined ||
+              !pixelRgbaMatches(
+                sampleImage,
+                evidence.samplePixelId,
+                evidence.rgba,
+              ) ||
+              !pixelRgbaMatches(evaluated.image, targetPixelId, evidence.rgba)
+            ) {
+              throw snapshotCorrupt(
+                composition.id,
+                `还原像素 ${targetPixelId} 不能由候选证据完整证明`,
+              );
+            }
+            const sourceComponentId = semanticComponentAtPixel(
+              sampleState,
+              evidence.samplePixelId,
+            );
+            if (
+              sourceComponentId === null ||
+              !regenerated.sourceComponentIds.includes(sourceComponentId)
+            ) {
+              throw snapshotCorrupt(
+                composition.id,
+                `还原像素 ${targetPixelId} 缺少精确来源组件`,
+              );
+            }
+            const mappings = mappingsByComponent.get(sourceComponentId) ?? [];
+            mappings.push({
+              sourcePixelId: evidence.samplePixelId,
+              targetPixelId,
+            });
+            mappingsByComponent.set(sourceComponentId, mappings);
+          }
+          for (const [sourceComponentInstanceId, mappings] of mappingsByComponent) {
+            addOriginAssignments(
+              createCopiedPixelOriginAssignments({
+                sourceDocument: sampleOrigin,
+                mappings,
+                sourceComponentInstanceId,
+              }),
+            );
+          }
+        }
         const componentId = restoredCandidateComponentId(candidate.candidateId);
         state = assignSemanticPixelsWithProvenance(
           state,
@@ -2774,7 +3316,7 @@ export class RevisionStore {
             ),
             provenance: {
               actorType: candidate.kind === "manual_rgba" ? "user" : "system",
-              containsGeneratedPixels: candidate.kind === "manual_rgba",
+              containsGeneratedPixels: false,
               restoration: {
                 kind: "composition_restoration",
                 planHash: persistedPlan.summary.planHash,
@@ -2797,6 +3339,35 @@ export class RevisionStore {
     for (const layer of layers) {
       const pixelIds = evaluated.winningPixelIdsByLayer[layer.id] ?? [];
       if (pixelIds.length === 0) continue;
+      const storedPart = await this.verifyPartStorage(layer.part.id);
+      const partTexture = decodeSkinPng(storedPart.files["texture.png"].bytes);
+      const partWriteMask = rgbaImageToMask(
+        decodeSkinPng(storedPart.files["write-mask.png"].bytes),
+      );
+      const partOrigin = this.partOriginFromStorage(
+        layer.part,
+        storedPart,
+        partTexture,
+        partWriteMask,
+      );
+      for (const pixelId of pixelIds) {
+        if (!pixelsRgbaEqual(partTexture, pixelId, evaluated.image, pixelId)) {
+          throw snapshotCorrupt(
+            composition.id,
+            `获胜 Part 图层像素 ${pixelId} 与结果不一致`,
+          );
+        }
+      }
+      addOriginAssignments(
+        createCopiedPixelOriginAssignments({
+          sourceDocument: partOrigin,
+          mappings: pixelIds.map((pixelId) => ({
+            sourcePixelId: pixelId,
+            targetPixelId: pixelId,
+          })),
+          sourceComponentInstanceId: layer.part.sourceComponentId,
+        }),
+      );
       const componentId = composedPartComponentId(layer.id);
       state = applyManualSemanticOperation(
         state,
@@ -2816,19 +3387,31 @@ export class RevisionStore {
       for (const pixelId of pixelIds) affectedPixelIds.add(pixelId);
     }
 
-    const ids = this.revisionIds();
     state = {
       ...state,
       document: { ...state.document, revisionId: ids.revisionId },
     };
-    const createdAt = this.now();
-    const actorId = validateOptionalText("actorId", input.actorId, 120);
-    const summary = validateText(
-      "Revision 摘要",
-      input.summary ?? `提交混搭 ${composition.name}`,
-      300,
-    );
-    const resultHash = computeResultHash(skinPng, state.document);
+    let origin: PixelOriginDocument;
+    try {
+      origin = propagatePixelOriginDocument({
+        sourceDocument: sourceOrigin,
+        sourceImage,
+        resultImage: evaluated.image,
+        resultSubject: { kind: "revision", id: ids.revisionId },
+        assignments: [...originAssignments.values()],
+      });
+      state = synchronizeSemanticPixelOriginSummaries(
+        state,
+        origin,
+        evaluated.image,
+      );
+    } catch (error) {
+      if (error instanceof RevisionStoreError) throw error;
+      throw snapshotCorrupt(composition.id, "混搭 pixel origin 无法完整传播", {
+        cause: error,
+      });
+    }
+    const resultHash = computeResultHash(skinPng, state.document, origin);
     const metadata = {
       compositionId: composition.id,
       resolutionMode: composition.resolutionMode,
@@ -2869,12 +3452,13 @@ export class RevisionStore {
       ),
       metadata,
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(state.document),
-      operationJson: canonicalJson(operation),
+      segmentation: state.document,
+      origin,
+      operation,
       additionalFiles: semanticMaskFiles(state),
     });
 
@@ -3038,6 +3622,113 @@ export class RevisionStore {
         cause: error,
       });
     }
+  }
+
+  private async regeneratePersistedRestorationCandidates(
+    composition: CompositionProject,
+    plan: PersistedCompositionRestorationPlan,
+  ): Promise<
+    ReadonlyMap<string, CoreRestorationCandidateSet["candidates"][number]>
+  > {
+    const donorRevisionIds = [
+      ...new Set(
+        plan.selectedCandidates
+          .filter((candidate) => candidate.kind === "donor_revision")
+          .map((candidate) => candidate.sampleRevisionId)
+          .filter((value): value is string => value !== null),
+      ),
+    ];
+    if (donorRevisionIds.length > 1) {
+      throw snapshotCorrupt(
+        composition.id,
+        "持久化还原方案引用了多个 donor Revision",
+      );
+    }
+    const manualCandidates = plan.selectedCandidates.filter(
+      (candidate) => candidate.kind === "manual_rgba",
+    );
+    const manualColors = new Map<string, readonly [number, number, number, number]>();
+    for (const candidate of manualCandidates) {
+      const pixelId = candidate.coveredPixelIds[0];
+      const operation = plan.operations.find(
+        (item) =>
+          item.mode === "fill_base" &&
+          pixelId !== undefined &&
+          item.pixelIds.includes(pixelId),
+      );
+      if (!operation || operation.mode !== "fill_base") {
+        throw snapshotCorrupt(
+          composition.id,
+          `手工还原候选 ${candidate.candidateId} 缺少 RGBA 证据`,
+        );
+      }
+      const rgba = [...operation.rgba] as [number, number, number, number];
+      manualColors.set(compactCanonicalJson(rgba), rgba);
+    }
+    if (manualColors.size > 1) {
+      throw snapshotCorrupt(
+        composition.id,
+        "持久化手工还原候选包含不一致的 RGBA",
+      );
+    }
+    const manualRgba = [...manualColors.values()][0];
+    let regenerated: CoreRestorationCandidateSet;
+    try {
+      regenerated = await this.buildCompositionRestorationCandidateSet(
+        composition,
+        {
+          targetComponentIds: plan.summary.targetComponentIds,
+          ...(donorRevisionIds[0]
+            ? { donorRevisionId: donorRevisionIds[0] }
+            : {}),
+          ...(manualRgba ? { manualRgba } : {}),
+        },
+      );
+    } catch (error) {
+      if (error instanceof RevisionStoreError && error.code === "SNAPSHOT_CORRUPT") {
+        throw error;
+      }
+      throw snapshotCorrupt(
+        composition.id,
+        "持久化还原候选不能从不可变来源重建",
+        { cause: error },
+      );
+    }
+    if (regenerated.candidateSetHash !== plan.summary.candidateSetHash) {
+      throw snapshotCorrupt(
+        composition.id,
+        "持久化还原候选集哈希不能从不可变来源重建",
+      );
+    }
+    const regeneratedById = new Map(
+      regenerated.candidates.map((candidate) => [candidate.candidateId, candidate]),
+    );
+    const selected = new Map<
+      string,
+      CoreRestorationCandidateSet["candidates"][number]
+    >();
+    for (const persisted of plan.selectedCandidates) {
+      const candidate = regeneratedById.get(persisted.candidateId);
+      if (
+        !candidate ||
+        candidate.kind !== persisted.kind ||
+        candidate.sampleRevisionId !== persisted.sampleRevisionId ||
+        candidate.evidenceHash !== persisted.evidenceHash ||
+        compactCanonicalJson(candidate.targetGroupIds) !==
+          compactCanonicalJson(persisted.targetGroupIds) ||
+        compactCanonicalJson(candidate.sourceComponentIds) !==
+          compactCanonicalJson(persisted.sourceComponentIds) ||
+        compactCanonicalJson(candidate.coveredPixelIds) !==
+          compactCanonicalJson(persisted.coveredPixelIds)
+      ) {
+        throw snapshotCorrupt(
+          composition.id,
+          `还原候选 ${persisted.candidateId} 与不可变来源不一致`,
+        );
+      }
+      selected.set(candidate.candidateId, candidate);
+    }
+    return selected;
   }
 
   private readPersistedCompositionRestorationPlan(
@@ -3271,6 +3962,13 @@ export class RevisionStore {
     const writeMask = rgbaImageToMask(
       decodeSkinPng(storedPart.files["write-mask.png"].bytes),
     );
+    const sourceOrigin = await this.originForDerivation(sourceRevision, snapshot);
+    const partOrigin = this.partOriginFromStorage(
+      part,
+      storedPart,
+      partTexture,
+      writeMask,
+    );
     const report = analyzePartApplication(
       sourceImage,
       partTexture,
@@ -3286,24 +3984,33 @@ export class RevisionStore {
       });
     }
 
-    const appliedPixelIds = maskToPixelIds(writeMask).filter((pixelId) => {
-      if (input.strategy === "use_part") {
-        return true;
-      }
-      return sourceImage.data[pixelId * 4 + 3] === 0;
-    });
+    const ids = this.revisionIds();
+    let applied: ReturnType<typeof applyPartPixelsWithOrigins>;
+    try {
+      applied = applyPartPixelsWithOrigins({
+        base: sourceImage,
+        baseOriginDocument: sourceOrigin,
+        partTexture,
+        writeMask,
+        partOriginDocument: partOrigin,
+        manifest: part.manifest,
+        targetSubject: { kind: "revision", id: ids.revisionId },
+        strategy: input.strategy,
+      });
+    } catch (error) {
+      throw invalidInput(
+        error instanceof Error ? error.message : "部件来源传播失败",
+        { partId: part.id },
+      );
+    }
+    const appliedPixelIds = applied.appliedPixelIds;
     if (appliedPixelIds.length === 0) {
       throw invalidInput("所选冲突策略没有可写入像素", {
         partId: part.id,
         strategy: input.strategy,
       });
     }
-    const resultImage = applyPartPixels(
-      sourceImage,
-      partTexture,
-      writeMask,
-      input.strategy,
-    );
+    const resultImage = applied.image;
     const skinPng = encodeSkinPng(resultImage);
     const rebasedState = rebaseSemanticStateImage({
       state: sourceState,
@@ -3330,7 +4037,6 @@ export class RevisionStore {
       },
       resultImage,
     );
-    const ids = this.revisionIds();
     const createdAt = this.now();
     const actorId = validateOptionalText("actorId", input.actorId, 120);
     const summary = validateText(
@@ -3338,11 +4044,20 @@ export class RevisionStore {
       input.summary ?? `应用部件 ${part.name}`,
       300,
     );
-    const state: SemanticState = {
+    const revisionState: SemanticState = {
       ...assignedState,
       document: { ...assignedState.document, revisionId: ids.revisionId },
     };
-    const resultHash = computeResultHash(skinPng, state.document);
+    const state = synchronizeSemanticPixelOriginSummaries(
+      revisionState,
+      applied.originDocument,
+      resultImage,
+    );
+    const resultHash = computeResultHash(
+      skinPng,
+      state.document,
+      applied.originDocument,
+    );
     const metadata = {
       partId: part.id,
       strategy: input.strategy,
@@ -3367,12 +4082,13 @@ export class RevisionStore {
       affectedSpans,
       metadata,
     });
-    const newSnapshot = await this.storage.writeSnapshot({
+    const newSnapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(state.document),
-      operationJson: canonicalJson(operation),
+      segmentation: state.document,
+      origin: applied.originDocument,
+      operation,
       additionalFiles: semanticMaskFiles(state),
     });
 
@@ -3453,6 +4169,7 @@ export class RevisionStore {
       revision.id,
     );
     const state = semanticStateFromSnapshot(snapshot, segmentation, revision.id);
+    const origin = await this.originForDerivation(revision, snapshot);
     const component = state.document.components.find(
       (candidate) => candidate.instanceId === componentId,
     );
@@ -3476,6 +4193,7 @@ export class RevisionStore {
       image,
       component,
       componentMask: state.masks[component.instanceId]!,
+      originDocument: origin,
     });
     const manifestJson = canonicalJson(exported.manifest);
     const sourceJson = canonicalJson({
@@ -3490,6 +4208,13 @@ export class RevisionStore {
       files: {
         "texture.png": encodeSkinPng(exported.texture),
         "write-mask.png": encodeSkinPng(maskToRgbaImage(exported.writeMask)),
+        "origin.json": Buffer.from(
+          canonicalJson(exported.originDocument),
+          "utf8",
+        ),
+        "generated-mask.png": encodeSkinPng(
+          maskToRgbaImage(exported.generatedMask),
+        ),
         "manifest.json": Buffer.from(manifestJson, "utf8"),
         "preview.png": encodeSkinPng(exported.preview),
         "source.json": Buffer.from(sourceJson, "utf8"),
@@ -3510,12 +4235,14 @@ export class RevisionStore {
         const roles: Readonly<Record<PartFileName, string>> = {
           "texture.png": "texture",
           "write-mask.png": "write_mask",
+          "origin.json": "origin",
+          "generated-mask.png": "generated_mask",
           "manifest.json": "manifest",
           "preview.png": "preview",
           "source.json": "source",
         };
         for (const fileName of PART_FILE_NAMES) {
-          const file = stored.files[fileName];
+          const file = requirePartFile(stored, fileName);
           insertFile.run(
             fileIds[fileName],
             roles[fileName],
@@ -3532,8 +4259,9 @@ export class RevisionStore {
               id, source_project_id, source_revision_id, source_component_id,
               name, category, subtype, arm_type, texture_asset_id,
               mask_asset_id, manifest_asset_id, preview_asset_id,
-              source_asset_id, created_at, manifest_json, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              origin_asset_id, generated_mask_asset_id, source_asset_id,
+              created_at, manifest_json, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             partId,
@@ -3548,6 +4276,8 @@ export class RevisionStore {
             fileIds["write-mask.png"],
             fileIds["manifest.json"],
             fileIds["preview.png"],
+            fileIds["origin.json"],
+            fileIds["generated-mask.png"],
             fileIds["source.json"],
             createdAt,
             manifestJson.trim(),
@@ -3584,6 +4314,29 @@ export class RevisionStore {
     const storedPart = await this.verifyPartStorage(basePart.id);
     const texturePng = storedPart.files["texture.png"].bytes.slice();
     const maskPng = storedPart.files["write-mask.png"].bytes.slice();
+    const texture = decodeSkinPng(texturePng);
+    const writeMask = rgbaImageToMask(decodeSkinPng(maskPng));
+    const baseOrigin = this.partOriginFromStorage(
+      basePart,
+      storedPart,
+      texture,
+      writeMask,
+    );
+    const initialOrigin = propagatePixelOriginDocument({
+      sourceDocument: baseOrigin,
+      sourceImage: texture,
+      resultImage: texture,
+      resultSubject: { kind: "part_edit_revision", id: revisionId },
+      assignments: createCopiedPixelOriginAssignments({
+        sourceDocument: baseOrigin,
+        mappings: maskToPixelIds(writeMask).map((pixelId) => ({
+          sourcePixelId: pixelId,
+          targetPixelId: pixelId,
+        })),
+        sourceComponentInstanceId: basePart.sourceComponentId,
+      }),
+    });
+    const originSummary = summarizePixelOrigins(initialOrigin);
     const operation = {
       type: "init",
       basePartId: basePart.id,
@@ -3592,7 +4345,8 @@ export class RevisionStore {
       source: "manual",
       basePartId: basePart.id,
       authoredOperations: 0,
-      containsGeneratedPixels: false,
+      containsGeneratedPixels: originSummary.containsGeneratedPixels,
+      originSummary,
     } as const;
     const stored = await this.writePartEditRevisionFiles({
       projectId,
@@ -3607,6 +4361,7 @@ export class RevisionStore {
       createdAt,
       texturePng,
       maskPng,
+      origin: initialOrigin,
     });
     try {
       const commit = this.database.transaction(() => {
@@ -3668,19 +4423,26 @@ export class RevisionStore {
       project.id,
       input.operation,
     );
-    let result: ReturnType<typeof applyPartRepairOperation>;
+    const revisionId = this.id("part_edit_revision");
+    const sequence = head.sequence + 1;
+    const createdAt = this.now();
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    let result: ReturnType<typeof applyPartRepairOperationWithOrigins>;
     try {
-      result = applyPartRepairOperation(state, operation);
+      result = applyPartRepairOperationWithOrigins(state, operation, {
+        resultSubject: { kind: "part_edit_revision", id: revisionId },
+        actor: {
+          type: "user",
+          ...(actorId ? { id: actorId } : {}),
+        },
+        operationId: revisionId,
+      });
     } catch (error) {
       if (error instanceof RangeError || error instanceof TypeError) {
         throw invalidInput(error.message);
       }
       throw error;
     }
-    const revisionId = this.id("part_edit_revision");
-    const sequence = head.sequence + 1;
-    const createdAt = this.now();
-    const actorId = validateOptionalText("actorId", input.actorId, 120);
     const summary = validateText(
       "修补 Revision 摘要",
       input.summary ?? partEditOperationSummary(input.operation.type),
@@ -3691,8 +4453,11 @@ export class RevisionStore {
       basePartId: basePart.id,
       parentRevisionId: head.id,
       authoredOperations: sequence - 1,
-      containsGeneratedPixels: false,
+      containsGeneratedPixels:
+        summarizePixelOrigins(result.originDocument).containsGeneratedPixels,
+      originSummary: summarizePixelOrigins(result.originDocument),
       changedPixelIds: result.changedPixelIds,
+      originChangedPixelIds: result.originChangedPixelIds,
       operation: input.operation,
     } as const;
     const stored = await this.writePartEditRevisionFiles({
@@ -3708,6 +4473,7 @@ export class RevisionStore {
       createdAt,
       texturePng: encodeSkinPng(result.texture),
       maskPng: encodeSkinPng(maskToRgbaImage(result.writeMask)),
+      origin: result.originDocument,
     });
     try {
       const commit = this.database.transaction(() => {
@@ -3794,25 +4560,47 @@ export class RevisionStore {
       300,
     );
     const partId = this.id("part");
+    const partOrigin = propagatePixelOriginDocument({
+      sourceDocument: state.originDocument,
+      sourceImage: state.texture,
+      resultImage: state.texture,
+      resultSubject: { kind: "part", id: partId },
+      assignments: createCopiedPixelOriginAssignments({
+        sourceDocument: state.originDocument,
+        mappings: maskToPixelIds(state.writeMask).map((pixelId) => ({
+          sourcePixelId: pixelId,
+          targetPixelId: pixelId,
+        })),
+        sourceComponentInstanceId: state.sourceComponentInstanceId,
+      }),
+    });
+    const originSummary = summarizePixelOrigins(partOrigin);
     const derivation = {
       kind: "part_repair",
       basePartId: basePart.id,
       partEditProjectId: project.id,
       partEditRevisionId: head.id,
-      containsGeneratedPixels: false,
+      containsGeneratedPixels: originSummary.containsGeneratedPixels,
     } as const;
     const manifest: PartManifest = {
       ...basePart.manifest,
-      schemaVersion: "1.1",
+      schemaVersion: "2.0",
       id: partId,
       name,
       palette: { dominant: dominantHex(state.texture, state.writeMask) },
       derivation,
+      origin: {
+        schemaVersion: "1.0",
+        file: "origin.json",
+        generatedMaskFile: "generated-mask.png",
+        summary: originSummary,
+        containsGeneratedPixels: originSummary.containsGeneratedPixels,
+      },
       createdAt,
     };
     const manifestJson = canonicalJson(manifest);
     const provenance = {
-      schemaVersion: "1.1",
+      schemaVersion: "2.0",
       ...derivation,
       actorId: actorId ?? null,
       summary,
@@ -3823,6 +4611,10 @@ export class RevisionStore {
       files: {
         "texture.png": storedEdit.files["texture.png"].bytes.slice(),
         "write-mask.png": storedEdit.files["write-mask.png"].bytes.slice(),
+        "origin.json": Buffer.from(canonicalJson(partOrigin), "utf8"),
+        "generated-mask.png": encodeSkinPng(
+          maskToRgbaImage(deriveGeneratedPixelMask(partOrigin)),
+        ),
         "manifest.json": Buffer.from(manifestJson, "utf8"),
         "preview.png": encodeSkinPng(state.texture),
         "source.json": Buffer.from(sourceJson, "utf8"),
@@ -3877,19 +4669,28 @@ export class RevisionStore {
   private async resolvePartRepairOperation(
     targetProjectId: string,
     operation: SerializedPartRepairOperation,
-  ): Promise<PartRepairOperation> {
+  ): Promise<OriginAwarePartRepairOperation> {
     if (operation.type !== "copy_surfaces") return operation;
-    let source: PartRepairState;
+    let source: OriginAwarePartRepairState;
     if (operation.source.kind === "part") {
       const part = this.getPart(operation.source.partId);
       this.assertActivePart(part, "复制部件表面");
       const stored = await this.verifyPartStorage(part.id);
+      const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+      const writeMask = rgbaImageToMask(
+        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      );
       source = {
         armType: part.armType,
-        texture: decodeSkinPng(stored.files["texture.png"].bytes),
-        writeMask: rgbaImageToMask(
-          decodeSkinPng(stored.files["write-mask.png"].bytes),
+        texture,
+        writeMask,
+        originDocument: this.partOriginFromStorage(
+          part,
+          stored,
+          texture,
+          writeMask,
         ),
+        sourceComponentInstanceId: part.sourceComponentId,
       };
     } else {
       const sourceRevision = this.getPartEditRevision(
@@ -3917,17 +4718,27 @@ export class RevisionStore {
 
   private async readPartEditState(
     revisionId: string,
-  ): Promise<PartRepairState> {
+  ): Promise<OriginAwarePartRepairState> {
     const revision = this.getPartEditRevision(revisionId);
     const project = this.getPartEditProject(revision.projectId);
     const basePart = this.getPart(project.basePartId);
     const stored = await this.verifyPartEditStorage(revision.id);
+    const texture = decodeSkinPng(stored.files["texture.png"].bytes);
+    const writeMask = rgbaImageToMask(
+      decodeSkinPng(stored.files["write-mask.png"].bytes),
+    );
     return {
       armType: basePart.armType,
-      texture: decodeSkinPng(stored.files["texture.png"].bytes),
-      writeMask: rgbaImageToMask(
-        decodeSkinPng(stored.files["write-mask.png"].bytes),
+      texture,
+      writeMask,
+      originDocument: this.partEditOriginFromStorage(
+        revision,
+        basePart,
+        stored,
+        texture,
+        writeMask,
       ),
+      sourceComponentInstanceId: basePart.sourceComponentId,
     };
   }
 
@@ -3944,6 +4755,7 @@ export class RevisionStore {
     readonly createdAt: string;
     readonly texturePng: Uint8Array;
     readonly maskPng: Uint8Array;
+    readonly origin: PixelOriginDocument;
   }): Promise<VerifiedPartEditStorage> {
     const document = {
       schemaVersion: "1.0",
@@ -3964,6 +4776,10 @@ export class RevisionStore {
       files: {
         "texture.png": input.texturePng,
         "write-mask.png": input.maskPng,
+        "origin.json": Buffer.from(canonicalJson(input.origin), "utf8"),
+        "generated-mask.png": encodeSkinPng(
+          maskToRgbaImage(deriveGeneratedPixelMask(input.origin)),
+        ),
         "revision.json": Buffer.from(canonicalJson(document), "utf8"),
       },
     });
@@ -3984,6 +4800,11 @@ export class RevisionStore {
   }): void {
     const texture = input.stored.files["texture.png"];
     const mask = input.stored.files["write-mask.png"];
+    const origin = requirePartEditFile(input.stored, "origin.json");
+    const generatedMask = requirePartEditFile(
+      input.stored,
+      "generated-mask.png",
+    );
     const revisionFile = input.stored.files["revision.json"];
     const operationType = input.operation.type;
     if (!isPartEditOperationType(operationType)) {
@@ -3996,9 +4817,12 @@ export class RevisionStore {
           operation_json, summary, actor_id,
           texture_storage_path, texture_byte_size, texture_sha256,
           mask_storage_path, mask_byte_size, mask_sha256,
+          origin_storage_path, origin_byte_size, origin_sha256,
+          generated_mask_storage_path, generated_mask_byte_size,
+          generated_mask_sha256,
           revision_storage_path, revision_byte_size, revision_sha256,
           changed_pixel_count, authored_provenance_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.revisionId,
@@ -4015,6 +4839,12 @@ export class RevisionStore {
         mask.storagePath,
         mask.bytes.byteLength,
         mask.sha256,
+        origin.storagePath,
+        origin.bytes.byteLength,
+        origin.sha256,
+        generatedMask.storagePath,
+        generatedMask.bytes.byteLength,
+        generatedMask.sha256,
         revisionFile.storagePath,
         revisionFile.bytes.byteLength,
         revisionFile.sha256,
@@ -4036,6 +4866,8 @@ export class RevisionStore {
     const roles: Readonly<Record<PartFileName, string>> = {
       "texture.png": "texture",
       "write-mask.png": "write_mask",
+      "origin.json": "origin",
+      "generated-mask.png": "generated_mask",
       "manifest.json": "manifest",
       "preview.png": "preview",
       "source.json": "source",
@@ -4046,7 +4878,7 @@ export class RevisionStore {
       ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
     `);
     for (const fileName of PART_FILE_NAMES) {
-      const file = input.stored.files[fileName];
+      const file = requirePartFile(input.stored, fileName);
       insertFile.run(
         input.fileIds[fileName],
         roles[fileName],
@@ -4062,9 +4894,10 @@ export class RevisionStore {
         INSERT INTO part_asset (
           id, source_project_id, source_revision_id, source_component_id,
           name, category, subtype, arm_type, texture_asset_id, mask_asset_id,
-          manifest_asset_id, preview_asset_id, source_asset_id, created_at,
-          manifest_json, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          manifest_asset_id, preview_asset_id, origin_asset_id,
+          generated_mask_asset_id, source_asset_id, created_at, manifest_json,
+          metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.partId,
@@ -4079,6 +4912,8 @@ export class RevisionStore {
         input.fileIds["write-mask.png"],
         input.fileIds["manifest.json"],
         input.fileIds["preview.png"],
+        input.fileIds["origin.json"],
+        input.fileIds["generated-mask.png"],
         input.fileIds["source.json"],
         input.createdAt,
         canonicalJson(input.manifest).trim(),
@@ -4113,6 +4948,7 @@ export class RevisionStore {
       revision.id,
     );
     const state = semanticStateFromSnapshot(snapshot, segmentation, revision.id);
+    const origin = await this.originForDerivation(revision, snapshot);
     const components = componentIds.map((componentId) => {
       const component = state.document.components.find(
         (candidate) => candidate.instanceId === componentId,
@@ -4160,6 +4996,7 @@ export class RevisionStore {
         image,
         component,
         componentMask: state.masks[component.instanceId]!,
+        originDocument: origin,
       });
       return { component, position, partId, exported };
     });
@@ -4183,6 +5020,13 @@ export class RevisionStore {
           files: {
             "texture.png": encodeSkinPng(exported.texture),
             "write-mask.png": encodeSkinPng(maskToRgbaImage(exported.writeMask)),
+            "origin.json": Buffer.from(
+              canonicalJson(exported.originDocument),
+              "utf8",
+            ),
+            "generated-mask.png": encodeSkinPng(
+              maskToRgbaImage(exported.generatedMask),
+            ),
             "manifest.json": Buffer.from(canonicalJson(exported.manifest), "utf8"),
             "preview.png": encodeSkinPng(exported.preview),
             "source.json": Buffer.from(sourceJson, "utf8"),
@@ -4364,12 +5208,14 @@ export class RevisionStore {
     const roles: Readonly<Record<PartFileName, string>> = {
       "texture.png": "texture",
       "write-mask.png": "write_mask",
+      "origin.json": "origin",
+      "generated-mask.png": "generated_mask",
       "manifest.json": "manifest",
       "preview.png": "preview",
       "source.json": "source",
     };
     for (const fileName of PART_FILE_NAMES) {
-      const file = item.stored.files[fileName];
+      const file = requirePartFile(item.stored, fileName);
       insertFile.run(
         item.fileIds[fileName],
         roles[fileName],
@@ -4386,9 +5232,10 @@ export class RevisionStore {
         INSERT INTO part_asset (
           id, source_project_id, source_revision_id, source_component_id,
           name, category, subtype, arm_type, texture_asset_id, mask_asset_id,
-          manifest_asset_id, preview_asset_id, source_asset_id, created_at,
-          manifest_json, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          manifest_asset_id, preview_asset_id, origin_asset_id,
+          generated_mask_asset_id, source_asset_id, created_at, manifest_json,
+          metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         item.prepared.partId,
@@ -4398,13 +5245,13 @@ export class RevisionStore {
         manifest.name,
         manifest.category,
         manifest.subtype ?? null,
-        manifest.compatibility.armTypes.length === 1
-          ? manifest.compatibility.armTypes[0]
-          : "slim",
+        item.prepared.exported.originDocument.source.armType,
         item.fileIds["texture.png"],
         item.fileIds["write-mask.png"],
         item.fileIds["manifest.json"],
         item.fileIds["preview.png"],
+        item.fileIds["origin.json"],
+        item.fileIds["generated-mask.png"],
         item.fileIds["source.json"],
         createdAt,
         canonicalJson(manifest).trim(),
@@ -4465,6 +5312,10 @@ export class RevisionStore {
       sourceRevision.id,
     );
     const image = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    const sourceOrigin = await this.originForDerivation(
+      sourceRevision,
+      sourceSnapshot,
+    );
     let editedState: SemanticState;
     try {
       editedState = applyManualSemanticOperation(
@@ -4491,13 +5342,24 @@ export class RevisionStore {
       input.summary ?? manualOperationSummary(input.operation.type),
       300,
     );
-    const state: SemanticState = {
+    const revisionState: SemanticState = {
       ...editedState,
       document: { ...editedState.document, revisionId: ids.revisionId },
     };
+    const origin = propagatePixelOriginDocument({
+      sourceDocument: sourceOrigin,
+      sourceImage: image,
+      resultImage: image,
+      resultSubject: { kind: "revision", id: ids.revisionId },
+    });
+    const state = synchronizeSemanticPixelOriginSummaries(
+      revisionState,
+      origin,
+      image,
+    );
     const segmentation = state.document;
     const skinPng = sourceSnapshot.files["skin.png"].bytes;
-    const resultHash = computeResultHash(skinPng, segmentation);
+    const resultHash = computeResultHash(skinPng, segmentation, origin);
     const affectedComponents = manualAffectedComponents(input.operation);
     const affectedSpans =
       "spans" in input.operation ? input.operation.spans : [];
@@ -4519,12 +5381,13 @@ export class RevisionStore {
       affectedSpans,
       metadata,
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(segmentation),
-      operationJson: canonicalJson(operation),
+      segmentation,
+      origin,
+      operation,
       additionalFiles: semanticMaskFiles(state),
     });
 
@@ -4644,6 +5507,10 @@ export class RevisionStore {
       sourceRevision.id,
     );
     const image = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
+    const sourceOrigin = await this.originForDerivation(
+      sourceRevision,
+      sourceSnapshot,
+    );
     const proposed = input.state;
     if (
       proposed.document.revisionId !== sourceRevision.id ||
@@ -4657,8 +5524,7 @@ export class RevisionStore {
     for (const component of proposed.document.components) {
       if (
         component.provenance.actorType !== "ai" ||
-        component.provenance.aiRunId !== input.aiRunId ||
-        component.provenance.containsGeneratedPixels
+        component.provenance.aiRunId !== input.aiRunId
       ) {
         throw invalidInput(`AI 组件来源信息无效：${component.instanceId}`);
       }
@@ -4683,12 +5549,23 @@ export class RevisionStore {
         `AI 语义拆分 · ${proposed.document.components.length} 个组件`,
       300,
     );
-    const state: SemanticState = {
+    const proposedState: SemanticState = {
       ...proposed,
       document: { ...proposed.document, revisionId: ids.revisionId },
     };
+    const origin = propagatePixelOriginDocument({
+      sourceDocument: sourceOrigin,
+      sourceImage: image,
+      resultImage: image,
+      resultSubject: { kind: "revision", id: ids.revisionId },
+    });
+    const state = synchronizeSemanticPixelOriginSummaries(
+      proposedState,
+      origin,
+      image,
+    );
     const skinPng = sourceSnapshot.files["skin.png"].bytes;
-    const resultHash = computeResultHash(skinPng, state.document);
+    const resultHash = computeResultHash(skinPng, state.document, origin);
     const metadata = {
       aiJobId: input.aiJobId,
       aiRunId: input.aiRunId,
@@ -4712,12 +5589,13 @@ export class RevisionStore {
       ),
       metadata,
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(state.document),
-      operationJson: canonicalJson(operation),
+      segmentation: state.document,
+      origin,
+      operation,
       additionalFiles: semanticMaskFiles(state),
     });
 
@@ -4806,6 +5684,13 @@ export class RevisionStore {
       targetSnapshot.files["segmentation.json"].bytes,
       target.id,
     );
+    const targetState = semanticStateFromSnapshot(
+      targetSnapshot,
+      targetSegmentation,
+      target.id,
+    );
+    const targetImage = decodeSkinPng(targetSnapshot.files["skin.png"].bytes);
+    const targetOrigin = await this.originForDerivation(target, targetSnapshot);
     const ids = this.revisionIds();
     const createdAt = this.now();
     const actorId = validateOptionalText("actorId", input.actorId, 120);
@@ -4814,13 +5699,24 @@ export class RevisionStore {
       input.summary ?? `恢复到 ${target.branchName} #${target.sequence}`,
       300,
     );
-    const segmentation: SegmentationSnapshot = {
-      ...structuredClone(targetSegmentation),
-      revisionId: ids.revisionId,
-    };
+    const origin = propagatePixelOriginDocument({
+      sourceDocument: targetOrigin,
+      sourceImage: targetImage,
+      resultImage: targetImage,
+      resultSubject: { kind: "revision", id: ids.revisionId },
+    });
+    const state = synchronizeSemanticPixelOriginSummaries(
+      {
+        ...targetState,
+        document: { ...targetState.document, revisionId: ids.revisionId },
+      },
+      origin,
+      targetImage,
+    );
+    const segmentation = state.document;
     const skinPng = targetSnapshot.files["skin.png"].bytes;
-    const resultHash = computeResultHash(skinPng, segmentation);
-    if (resultHash !== target.resultHash) {
+    const resultHash = computeResultHash(skinPng, segmentation, origin);
+    if (target.originAssetId !== null && resultHash !== target.resultHash) {
       throw snapshotCorrupt(target.id, "目标状态哈希无法稳定复用");
     }
     const operation = createOperation({
@@ -4835,13 +5731,14 @@ export class RevisionStore {
       afterHash: resultHash,
       metadata: { targetRevisionId: target.id },
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(segmentation),
-      operationJson: canonicalJson(operation),
-      additionalFiles: snapshotAdditionalFiles(targetSnapshot),
+      segmentation,
+      origin,
+      operation,
+      additionalFiles: semanticMaskFiles(state),
     });
 
     try {
@@ -4916,6 +5813,13 @@ export class RevisionStore {
       targetSnapshot.files["segmentation.json"].bytes,
       target.id,
     );
+    const targetState = semanticStateFromSnapshot(
+      targetSnapshot,
+      targetSegmentation,
+      target.id,
+    );
+    const targetImage = decodeSkinPng(targetSnapshot.files["skin.png"].bytes);
+    const targetOrigin = await this.originForDerivation(target, targetSnapshot);
     const branchId = this.id("branch");
     const ids = this.revisionIds();
     const createdAt = this.now();
@@ -4925,13 +5829,24 @@ export class RevisionStore {
       input.summary ?? `从 ${target.branchName} #${target.sequence} 创建分支 ${branchName}`,
       300,
     );
-    const segmentation: SegmentationSnapshot = {
-      ...structuredClone(targetSegmentation),
-      revisionId: ids.revisionId,
-    };
+    const origin = propagatePixelOriginDocument({
+      sourceDocument: targetOrigin,
+      sourceImage: targetImage,
+      resultImage: targetImage,
+      resultSubject: { kind: "revision", id: ids.revisionId },
+    });
+    const state = synchronizeSemanticPixelOriginSummaries(
+      {
+        ...targetState,
+        document: { ...targetState.document, revisionId: ids.revisionId },
+      },
+      origin,
+      targetImage,
+    );
+    const segmentation = state.document;
     const skinPng = targetSnapshot.files["skin.png"].bytes;
-    const resultHash = computeResultHash(skinPng, segmentation);
-    if (resultHash !== target.resultHash) {
+    const resultHash = computeResultHash(skinPng, segmentation, origin);
+    if (target.originAssetId !== null && resultHash !== target.resultHash) {
       throw snapshotCorrupt(target.id, "目标状态哈希无法稳定复用");
     }
     const operation = createOperation({
@@ -4946,13 +5861,14 @@ export class RevisionStore {
       afterHash: resultHash,
       metadata: { baseRevisionId: target.id, branchName },
     });
-    const snapshot = await this.storage.writeSnapshot({
+    const snapshot = await this.writeRevisionSnapshot({
       projectId: project.id,
       revisionId: ids.revisionId,
       skinPng,
-      segmentationJson: canonicalJson(segmentation),
-      operationJson: canonicalJson(operation),
-      additionalFiles: snapshotAdditionalFiles(targetSnapshot),
+      segmentation,
+      origin,
+      operation,
+      additionalFiles: semanticMaskFiles(state),
     });
 
     try {
@@ -5041,6 +5957,12 @@ export class RevisionStore {
         mimeType: "application/json",
         file: snapshot.files["operation.json"],
       },
+      {
+        id: ids.originAssetId,
+        type: "origin_json",
+        mimeType: "application/json",
+        file: requireSnapshotFile(snapshot, "origin.json"),
+      },
     ];
     for (const file of Object.values(snapshot.files)) {
       if (file.name.startsWith("components/")) {
@@ -5068,6 +5990,58 @@ export class RevisionStore {
     return assets.map((asset) => asset.id);
   }
 
+  private async writeRevisionSnapshot(input: {
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly skinPng: Uint8Array;
+    readonly segmentation: SegmentationSnapshot;
+    readonly origin: PixelOriginDocument;
+    readonly operation: OperationSnapshot;
+    readonly additionalFiles: Readonly<Record<string, Uint8Array>>;
+  }): Promise<VerifiedSnapshot> {
+    const image = decodeSkinPng(input.skinPng);
+    try {
+      validatePixelOriginDocument(input.origin, image);
+    } catch (error) {
+      throw invalidInput("Revision pixel origin 无效", {
+        revisionId: input.revisionId,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (
+      input.origin.subject.kind !== "revision" ||
+      input.origin.subject.id !== input.revisionId ||
+      input.segmentation.revisionId !== input.revisionId ||
+      input.origin.source.armType !== input.segmentation.source.armType
+    ) {
+      throw invalidInput("Revision origin/segmentation 主体不一致", {
+        revisionId: input.revisionId,
+      });
+    }
+    const resultHash = computeResultHash(
+      input.skinPng,
+      input.segmentation,
+      input.origin,
+    );
+    if (
+      input.operation.outputRevisionId !== input.revisionId ||
+      input.operation.afterHash !== resultHash
+    ) {
+      throw invalidInput("Revision operation resultHash 与 origin 状态不一致", {
+        revisionId: input.revisionId,
+      });
+    }
+    return this.storage.writeSnapshot({
+      projectId: input.projectId,
+      revisionId: input.revisionId,
+      skinPng: input.skinPng,
+      segmentationJson: canonicalJson(input.segmentation),
+      originJson: canonicalJson(input.origin),
+      operationJson: canonicalJson(input.operation),
+      additionalFiles: input.additionalFiles,
+    });
+  }
+
   private insertRevision(input: {
     readonly ids: RevisionIds;
     readonly projectId: string;
@@ -5090,8 +6064,8 @@ export class RevisionStore {
           id, project_id, branch_id, parent_revision_id, sequence,
           operation_type, actor_type, actor_id, ai_run_id, summary,
           skin_asset_id, segmentation_asset_id, operation_asset_id,
-          source_hash, result_hash, created_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          origin_asset_id, source_hash, result_hash, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.ids.revisionId,
@@ -5107,6 +6081,7 @@ export class RevisionStore {
         input.ids.skinAssetId,
         input.ids.segmentationAssetId,
         input.ids.operationAssetId,
+        input.ids.originAssetId,
         input.sourceHash,
         input.resultHash,
         input.createdAt,
@@ -5157,6 +6132,7 @@ export class RevisionStore {
       skinAssetId: this.id("asset"),
       segmentationAssetId: this.id("asset"),
       operationAssetId: this.id("asset"),
+      originAssetId: this.id("asset"),
       operationId: this.id("operation"),
     };
   }
@@ -5215,6 +6191,14 @@ function mapPart(row: PartRow): SkinPart {
     throw partCorrupt(row.id, "数据库枚举值无效");
   }
   const manifest = parsePartManifest(row.manifest_json, row.id);
+  const hasOriginAssets = row.origin_id !== null && row.generated_mask_id !== null;
+  if (
+    (manifest.schemaVersion === "2.0" && !hasOriginAssets) ||
+    (manifest.schemaVersion !== "2.0" &&
+      (row.origin_id !== null || row.generated_mask_id !== null))
+  ) {
+    throw partCorrupt(row.id, "manifest 版本与 origin 资产不一致");
+  }
   if (
     manifest.source.projectId !== row.source_project_id ||
     manifest.source.revisionId !== row.source_revision_id ||
@@ -5250,6 +6234,20 @@ function mapPart(row: PartRow): SkinPart {
       row.mask_mime_type,
       row.mask_byte_size,
       row.mask_sha256,
+    ),
+    origin: mapOptionalPartFile(
+      row.origin_id,
+      row.origin_storage_path,
+      row.origin_mime_type,
+      row.origin_byte_size,
+      row.origin_sha256,
+    ),
+    generatedMask: mapOptionalPartFile(
+      row.generated_mask_id,
+      row.generated_mask_storage_path,
+      row.generated_mask_mime_type,
+      row.generated_mask_byte_size,
+      row.generated_mask_sha256,
     ),
     manifestFile: mapPartFile(
       row.manifest_id,
@@ -5326,6 +6324,31 @@ function mapPartEditRevision(row: PartEditRevisionRow): PartEditRevision {
   if (operation.type !== row.operation_type) {
     throw partEditCorrupt(row.id, "operation type 与 JSON 不一致");
   }
+  const originMetadata = [
+    row.origin_storage_path,
+    row.origin_byte_size,
+    row.origin_sha256,
+  ];
+  const generatedMaskMetadata = [
+    row.generated_mask_storage_path,
+    row.generated_mask_byte_size,
+    row.generated_mask_sha256,
+  ];
+  const originIsNull = originMetadata.every((value) => value === null);
+  const originIsComplete = originMetadata.every((value) => value !== null);
+  const generatedMaskIsNull = generatedMaskMetadata.every(
+    (value) => value === null,
+  );
+  const generatedMaskIsComplete = generatedMaskMetadata.every(
+    (value) => value !== null,
+  );
+  if (
+    (!originIsNull && !originIsComplete) ||
+    (!generatedMaskIsNull && !generatedMaskIsComplete) ||
+    originIsNull !== generatedMaskIsNull
+  ) {
+    throw partEditCorrupt(row.id, "origin artifact 元数据不完整");
+  }
   return {
     id: row.id,
     projectId: row.project_id,
@@ -5348,6 +6371,22 @@ function mapPartEditRevision(row: PartEditRevisionRow): PartEditRevision {
       "image/png",
       row.mask_byte_size,
       row.mask_sha256,
+    ),
+    origin: mapOptionalPartFile(
+      row.origin_storage_path === null ? null : `${row.id}_origin`,
+      row.origin_storage_path,
+      row.origin_storage_path === null ? null : "application/json",
+      row.origin_byte_size,
+      row.origin_sha256,
+    ),
+    generatedMask: mapOptionalPartFile(
+      row.generated_mask_storage_path === null
+        ? null
+        : `${row.id}_generated_mask`,
+      row.generated_mask_storage_path,
+      row.generated_mask_storage_path === null ? null : "image/png",
+      row.generated_mask_byte_size,
+      row.generated_mask_sha256,
     ),
     revisionFile: mapPartFile(
       `${row.id}_revision`,
@@ -6428,15 +7467,44 @@ function mapPartFile(
   return { id, storagePath, mimeType, byteSize, sha256: hash };
 }
 
+function mapOptionalPartFile(
+  id: string | null,
+  storagePath: string | null,
+  mimeType: string | null,
+  byteSize: number | null,
+  hash: string | null,
+): PartFileAsset | null {
+  if (
+    id === null &&
+    storagePath === null &&
+    mimeType === null &&
+    byteSize === null &&
+    hash === null
+  ) {
+    return null;
+  }
+  if (
+    id === null ||
+    storagePath === null ||
+    mimeType === null ||
+    byteSize === null ||
+    hash === null
+  ) {
+    throw new TypeError("Part optional asset metadata is incomplete");
+  }
+  return mapPartFile(id, storagePath, mimeType, byteSize, hash);
+}
+
 function parsePartManifest(source: string, partId: string): PartManifest {
   try {
-    const value = JSON.parse(source) as Partial<PartManifest>;
+    const parsed = JSON.parse(source) as Record<string, unknown>;
+    const value = parsed as unknown as Partial<PartManifest>;
     const compatibility = value.compatibility;
     const placement = value.placement;
     const relations = value.relations;
     const palette = value.palette;
     if (
-      (value.schemaVersion !== "1.0" && value.schemaVersion !== "1.1") ||
+      !["1.0", "1.1", "2.0"].includes(value.schemaVersion ?? "") ||
       value.id !== partId ||
       typeof value.name !== "string" ||
       value.name.length === 0 ||
@@ -6480,30 +7548,96 @@ function parsePartManifest(source: string, partId: string): PartManifest {
       throw new TypeError("manifest 结构无效");
     }
     if (value.schemaVersion === "1.0") {
-      if ("derivation" in value) {
-        throw new TypeError("manifest 1.0 不能声明 derivation");
+      if ("derivation" in parsed || "origin" in parsed) {
+        throw new TypeError("manifest 1.0 不能声明 derivation/origin");
       }
-    } else {
-      const derivation = value.derivation;
+    } else if (value.schemaVersion === "1.1") {
       if (
-        derivation === null ||
-        Array.isArray(derivation) ||
-        typeof derivation !== "object" ||
-        Object.keys(derivation).sort().join(",") !==
-          "basePartId,containsGeneratedPixels,kind,partEditProjectId,partEditRevisionId" ||
-        derivation?.kind !== "part_repair" ||
-        !isSafeReferenceId(derivation.basePartId) ||
-        !isSafeReferenceId(derivation.partEditProjectId) ||
-        !isSafeReferenceId(derivation.partEditRevisionId) ||
-        derivation.containsGeneratedPixels !== false
+        "origin" in parsed ||
+        !isPartRepairDerivation(parsed.derivation, true)
       ) {
         throw new TypeError("manifest 1.1 缺少有效的 part_repair derivation");
+      }
+    } else {
+      const origin = parsed.origin;
+      if (!isPartOriginArtifacts(origin)) {
+        throw new TypeError("manifest 2.0 缺少有效的 origin artifacts");
+      }
+      if (
+        parsed.derivation !== undefined &&
+        !isPartRepairDerivation(parsed.derivation, false)
+      ) {
+        throw new TypeError("manifest 2.0 包含无效的 part_repair derivation");
       }
     }
     return value as PartManifest;
   } catch (error) {
     throw partCorrupt(partId, "manifest.json 无效", error);
   }
+}
+
+function isPartRepairDerivation(
+  value: unknown,
+  requireNoGeneratedPixels: boolean,
+): boolean {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    return false;
+  }
+  const derivation = value as Record<string, unknown>;
+  return Object.keys(derivation).sort().join(",") ===
+      "basePartId,containsGeneratedPixels,kind,partEditProjectId,partEditRevisionId" &&
+    derivation.kind === "part_repair" &&
+    isSafeReferenceId(derivation.basePartId) &&
+    isSafeReferenceId(derivation.partEditProjectId) &&
+    isSafeReferenceId(derivation.partEditRevisionId) &&
+    typeof derivation.containsGeneratedPixels === "boolean" &&
+    (!requireNoGeneratedPixels || derivation.containsGeneratedPixels === false);
+}
+
+function isPartOriginArtifacts(value: unknown): boolean {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    return false;
+  }
+  const origin = value as Record<string, unknown>;
+  const summary = origin.summary;
+  return Object.keys(origin).sort().join(",") ===
+      "containsGeneratedPixels,file,generatedMaskFile,schemaVersion,summary" &&
+    origin.schemaVersion === "1.0" &&
+    origin.file === "origin.json" &&
+    origin.generatedMaskFile === "generated-mask.png" &&
+    typeof origin.containsGeneratedPixels === "boolean" &&
+    isPixelOriginSummary(summary) &&
+    origin.containsGeneratedPixels === summary.containsGeneratedPixels;
+}
+
+function isPixelOriginSummary(
+  value: unknown,
+): value is {
+  readonly counts: Readonly<Record<
+    "source_visible" | "manual_authored" | "generated_completion" | "legacy_mixed",
+    number
+  >>;
+  readonly containsGeneratedPixels: boolean;
+} {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    return false;
+  }
+  const summary = value as Record<string, unknown>;
+  const counts = summary.counts;
+  if (counts === null || Array.isArray(counts) || typeof counts !== "object") {
+    return false;
+  }
+  const countRecord = counts as Record<string, unknown>;
+  return Object.keys(summary).sort().join(",") ===
+      "containsGeneratedPixels,counts" &&
+    Object.keys(countRecord).sort().join(",") ===
+      "generated_completion,legacy_mixed,manual_authored,source_visible" &&
+    isNonNegativeInteger(countRecord.source_visible) &&
+    isNonNegativeInteger(countRecord.manual_authored) &&
+    isNonNegativeInteger(countRecord.generated_completion) &&
+    isNonNegativeInteger(countRecord.legacy_mixed) &&
+    typeof summary.containsGeneratedPixels === "boolean" &&
+    summary.containsGeneratedPixels === (countRecord.generated_completion > 0);
 }
 
 function isUniqueNonEmptyEnumArray<T extends string>(
@@ -6621,6 +7755,7 @@ function mapRevision(row: RevisionRow): SkinRevision {
     skinAssetId: row.skin_asset_id,
     segmentationAssetId: row.segmentation_asset_id,
     operationAssetId: row.operation_asset_id,
+    originAssetId: row.origin_asset_id,
     sourceHash: row.source_hash,
     resultHash: row.result_hash,
     metadata: parseObjectJson(row.metadata_json, `Revision ${row.id} metadata`),
@@ -6634,6 +7769,7 @@ function mapAsset(row: AssetRow): SkinAsset {
     ![
       "revision_skin",
       "segmentation_json",
+      "origin_json",
       "component_mask",
       "operation_json",
     ].includes(
@@ -6671,14 +7807,76 @@ function semanticMaskFiles(
   return files;
 }
 
-function snapshotAdditionalFiles(
+function requireSnapshotFile(
   snapshot: VerifiedSnapshot,
-): Readonly<Record<string, Uint8Array>> {
-  return Object.fromEntries(
-    Object.values(snapshot.files)
-      .filter((file) => file.name.startsWith("components/"))
-      .map((file) => [file.name, file.bytes]),
-  );
+  fileName: string,
+): VerifiedSnapshot["files"][string] {
+  const file = snapshot.files[fileName];
+  if (!file) {
+    throw new TypeError(`Snapshot file is missing: ${fileName}`);
+  }
+  return file;
+}
+
+function requirePartFile(
+  stored: VerifiedPartStorage,
+  fileName: PartFileName,
+): NonNullable<VerifiedPartStorage["files"][PartFileName]> {
+  const file = stored.files[fileName];
+  if (!file) throw new TypeError(`Part file is missing: ${fileName}`);
+  return file;
+}
+
+function requirePartEditFile(
+  stored: VerifiedPartEditStorage,
+  fileName: PartEditFileName,
+): NonNullable<VerifiedPartEditStorage["files"][PartEditFileName]> {
+  const file = stored.files[fileName];
+  if (!file) throw new TypeError(`Part edit file is missing: ${fileName}`);
+  return file;
+}
+
+function masksEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length &&
+    left.every((value, index) => value === right[index]);
+}
+
+function pixelRgbaMatches(
+  image: ReturnType<typeof decodeSkinPng>,
+  pixelId: number,
+  rgba: readonly [number, number, number, number],
+): boolean {
+  const offset = pixelId * 4;
+  return image.data[offset] === rgba[0] &&
+    image.data[offset + 1] === rgba[1] &&
+    image.data[offset + 2] === rgba[2] &&
+    image.data[offset + 3] === rgba[3];
+}
+
+function pixelsRgbaEqual(
+  left: ReturnType<typeof decodeSkinPng>,
+  leftPixelId: number,
+  right: ReturnType<typeof decodeSkinPng>,
+  rightPixelId: number,
+): boolean {
+  const leftOffset = leftPixelId * 4;
+  const rightOffset = rightPixelId * 4;
+  return left.data[leftOffset] === right.data[rightOffset] &&
+    left.data[leftOffset + 1] === right.data[rightOffset + 1] &&
+    left.data[leftOffset + 2] === right.data[rightOffset + 2] &&
+    left.data[leftOffset + 3] === right.data[rightOffset + 3];
+}
+
+function semanticComponentAtPixel(
+  state: SemanticState,
+  pixelId: number,
+): string | null {
+  for (const component of state.document.components) {
+    if (state.masks[component.instanceId]?.[pixelId] !== 0) {
+      return component.instanceId;
+    }
+  }
+  return null;
 }
 
 function semanticStateFromSnapshot(
@@ -6800,6 +7998,27 @@ function manualRevisionOperationType(
   }
 }
 
+function legacyProvenOriginAncestorId(revision: SkinRevision): string | null {
+  switch (revision.operationType) {
+    case "ai_segment":
+    case "manual_edit":
+    case "merge_components":
+    case "split_component":
+    case "reclassify_component":
+    case "branch":
+      return revision.parentRevisionId;
+    case "revert": {
+      const targetRevisionId = revision.metadata.targetRevisionId;
+      return typeof targetRevisionId === "string" &&
+        isSafeReferenceId(targetRevisionId)
+        ? targetRevisionId
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
 function manualOperationSummary(
   operationType: ManualSemanticOperation["type"],
 ): string {
@@ -6852,20 +8071,95 @@ function restorationComponentDisplayName(
   return `${restorationCandidateLabel(kind)} · 还原`;
 }
 
+function originRecordFingerprints(
+  document: PixelOriginDocument,
+): ReadonlyMap<number, string> {
+  validatePixelOriginDocument(document);
+  const layout = getSkinLayout(document.source.armType);
+  const copiedFromByPixel = new Map(
+    document.copyLineage.map((entry) => [entry.pixelId, entry.copiedFrom]),
+  );
+  const fingerprints = new Map<number, string>();
+  for (const entry of document.entries) {
+    for (const pixelId of spansToPixelIds(entry.spans, layout)) {
+      fingerprints.set(
+        pixelId,
+        compactCanonicalJson({
+          intrinsicOrigin: entry.intrinsicOrigin,
+          evidence: entry.evidence,
+          copyLineage: copiedFromByPixel.get(pixelId) ?? null,
+        }),
+      );
+    }
+  }
+  return fingerprints;
+}
+
 function computeResultHash(
   skinPng: Uint8Array,
   segmentation: SegmentationSnapshot,
+  origin: PixelOriginDocument | null = null,
 ): string {
   const normalizedSegmentation = {
     ...segmentation,
     revisionId: "revision_state",
   };
+  const normalizedOrigin = origin
+    ? {
+        ...origin,
+        subject: { ...origin.subject, id: "revision_state" },
+      }
+    : null;
   return sha256(
     canonicalJson({
       skinHash: sha256(skinPng),
       segmentation: normalizedSegmentation,
+      ...(normalizedOrigin ? { origin: normalizedOrigin } : {}),
     }),
   );
+}
+
+function parsePixelOriginDocument(
+  bytes: Uint8Array,
+  expectedSubject: PixelOriginDocument["subject"],
+  image: ReturnType<typeof decodeSkinPng>,
+): PixelOriginDocument {
+  const source = Buffer.from(bytes).toString("utf8");
+  const value = JSON.parse(source) as PixelOriginDocument;
+  validatePixelOriginDocument(value, image);
+  if (
+    value.subject.kind !== expectedSubject.kind ||
+    value.subject.id !== expectedSubject.id
+  ) {
+    throw new TypeError("pixel origin subject 与存储主体不一致");
+  }
+  if (canonicalJson(value) !== source) {
+    throw new TypeError("pixel origin 文档不是 canonical JSON");
+  }
+  return value;
+}
+
+function assertComponentOriginSummaries(
+  state: SemanticState,
+  origin: PixelOriginDocument,
+  revisionId: string,
+): void {
+  const mismatch = state.document.components.find((component) => {
+    const summary = summarizePixelOriginsForMask(
+      origin,
+      state.masks[component.instanceId]!,
+    );
+    return component.provenance.containsGeneratedPixels !==
+        summary.containsGeneratedPixels ||
+      compactCanonicalJson(component.provenance.originSummary ?? null) !==
+        compactCanonicalJson(summary);
+  });
+  if (mismatch) {
+    throw snapshotCorrupt(
+      revisionId,
+      `组件 ${mismatch.instanceId} pixel origin 摘要不一致`,
+    );
+  }
 }
 
 function parseSegmentation(

@@ -28,6 +28,11 @@ import { CompositionRestorationPanel } from "./components/CompositionRestoration
 import { LibraryLifecycleControls } from "./components/LibraryLifecycleControls";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PartBundleShelf } from "./components/PartBundleShelf";
+import {
+  PixelOriginSummaryPanel,
+  partOriginDetailLabel,
+  partOriginStatusLabel,
+} from "./components/PixelOriginSummaryPanel";
 import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
 import { SemanticFollowupReview } from "./components/SemanticFollowupReview";
@@ -78,6 +83,7 @@ import {
   loadAiJobDetail,
   loadComposition,
   loadRevisionSegmentation,
+  loadRevisionOrigin,
   loadRevisionSkin,
   partMannequinUrl,
   partPreviewUrl,
@@ -109,6 +115,7 @@ import {
   type ApiPartBundle,
   type ApiPartPreview,
   type ApiRevision,
+  type ApiRevisionOrigin,
   type ApiSegmentation,
 } from "./lib/revisionApi";
 import {
@@ -278,6 +285,7 @@ export function App() {
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [segmentation, setSegmentation] = useState<ApiSegmentation | null>(null);
+  const [revisionOrigin, setRevisionOrigin] = useState<ApiRevisionOrigin | null>(null);
   const [draftPixelIds, setDraftPixelIds] = useState<readonly number[]>([]);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [checkedComponentIds, setCheckedComponentIds] = useState<readonly string[]>([]);
@@ -448,6 +456,7 @@ export function App() {
         });
         setSelectedRevisionId(null);
         setSegmentation(null);
+        setRevisionOrigin(null);
         setDraftPixelIds([]);
         setActiveComponentId(null);
         setCheckedComponentIds([]);
@@ -487,12 +496,14 @@ export function App() {
       setIsLoadingSkin(true);
       setHistoryBusy(true);
       setHistoryError(null);
+      setRevisionOrigin(null);
       setNotice(`正在校验并载入 ${revision.branchName} #${revision.sequence}`);
 
       try {
-        const [skinBytes, segmentation] = await Promise.all([
+        const [skinBytes, segmentation, origin] = await Promise.all([
           loadRevisionSkin(revision.id),
           loadRevisionSegmentation(revision.id),
+          loadRevisionOrigin(revision.id),
         ]);
         const decoded = decodeMinecraftSkinBytes(skinBytes);
         if (requestId !== requestIdRef.current) {
@@ -515,6 +526,7 @@ export function App() {
           url: nextUrl,
         });
         setSegmentation(segmentation);
+        setRevisionOrigin(origin);
         setDraftPixelIds([]);
         setActiveComponentId((current) =>
           segmentation.components.some(
@@ -592,6 +604,7 @@ export function App() {
         if (!canApply()) return false;
       } else {
         setSelectedRevisionId(null);
+        setRevisionOrigin(null);
         setBranchFilter(project.defaultBranchId);
       }
       return true;
@@ -1019,6 +1032,7 @@ export function App() {
       aiJobDetailRequestRef.current += 1;
       const requestId = ++requestIdRef.current;
       setIsLoadingSkin(true);
+      setRevisionOrigin(null);
       setNotice(`正在解码 ${file.name}`);
 
       try {
@@ -2030,7 +2044,9 @@ export function App() {
       setSelectedPartId(part.id);
       setCompositionPartId(part.id);
       setPartPreview(null);
-      setNotice(`已保存部件 ${part.name} · 64×64 texture + write mask`);
+      setNotice(
+        `已保存部件 ${part.name} · texture + write mask + 逐像素来源记录`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setHistoryError(message);
@@ -3221,6 +3237,11 @@ export function App() {
             ))}
           </div>
 
+          <PixelOriginSummaryPanel
+            origin={revisionOrigin}
+            activeComponentId={activeComponentId}
+          />
+
           <div className="semantic-form">
             <label>
               <span>INSTANCE ID</span>
@@ -3368,6 +3389,9 @@ export function App() {
                     <small className="library-source-chip">
                       {librarySourceLabel(part, libraryProjectOptions)}
                     </small>
+                    <small className="part-origin-chip" data-origin-version={part.manifest.schemaVersion}>
+                      {partOriginStatusLabel(part.manifest)}
+                    </small>
                   </span>
                 </button>
               ))
@@ -3380,6 +3404,9 @@ export function App() {
                 <strong>{selectedPart.name}</strong>
                 <span>{selectedPart.manifest.placement.surfaces.length} surfaces</span>
                 <span>{librarySourceLabel(selectedPart, libraryProjectOptions)}</span>
+                <span>
+                  {partOriginDetailLabel(selectedPart.manifest)}
+                </span>
               </div>
               <button
                 type="button"

@@ -19,9 +19,13 @@ import {
   AGGREGATE_KINDS,
   SEMANTIC_CATEGORIES,
   SkinPngError,
+  summarizePixelOrigins,
+  summarizePixelOriginsForMask,
   type AggregateKind,
   type ArmType,
   type ManualSemanticOperation,
+  type PixelOriginDocument,
+  type PixelOriginSummary,
   type SemanticCategory,
 } from "@mc-skin-split/skin-core";
 import {
@@ -58,6 +62,24 @@ interface ProjectParams {
 interface RevisionParams {
   readonly revisionId: string;
 }
+
+type RevisionOriginResponse =
+  | {
+      readonly availability: "recorded";
+      readonly revisionId: string;
+      readonly originAssetId: string;
+      readonly document: PixelOriginDocument;
+      readonly summary: PixelOriginSummary;
+      readonly componentSummaries: Readonly<Record<string, PixelOriginSummary>>;
+    }
+  | {
+      readonly availability: "legacy_unavailable";
+      readonly revisionId: string;
+      readonly originAssetId: null;
+      readonly document: null;
+      readonly summary: null;
+      readonly componentSummaries: Readonly<Record<string, never>>;
+    };
 
 interface DiffParams extends RevisionParams {
   readonly otherRevisionId: string;
@@ -564,6 +586,71 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
         request.params.revisionId,
       ),
     }),
+  );
+
+  app.get<{ Params: RevisionParams }>(
+    "/api/revisions/:revisionId/origin",
+    async (request): Promise<{ readonly origin: RevisionOriginResponse }> => {
+      const revision = store.getRevision(request.params.revisionId);
+      const document = await store.readRevisionOrigin(revision.id);
+      if (!document) {
+        if (revision.originAssetId !== null) {
+          throw new RevisionStoreError(
+            "SNAPSHOT_CORRUPT",
+            `Revision ${revision.id} 快照损坏：origin asset 缺少可读文档`,
+            409,
+            { revisionId: revision.id },
+          );
+        }
+        return {
+          origin: {
+            availability: "legacy_unavailable",
+            revisionId: revision.id,
+            originAssetId: null,
+            document: null,
+            summary: null,
+            componentSummaries: {},
+          },
+        };
+      }
+      if (revision.originAssetId === null) {
+        throw new RevisionStoreError(
+          "SNAPSHOT_CORRUPT",
+          `Revision ${revision.id} 快照损坏：origin 文档缺少 asset 引用`,
+          409,
+          { revisionId: revision.id },
+        );
+      }
+
+      const state = await store.readRevisionSemanticState(revision.id);
+      const componentSummaries = Object.fromEntries(
+        [...state.document.components]
+          .sort((left, right) =>
+            left.instanceId < right.instanceId
+              ? -1
+              : left.instanceId > right.instanceId
+                ? 1
+                : 0,
+          )
+          .map((component) => [
+            component.instanceId,
+            summarizePixelOriginsForMask(
+              document,
+              state.masks[component.instanceId]!,
+            ),
+          ]),
+      );
+      return {
+        origin: {
+          availability: "recorded",
+          revisionId: revision.id,
+          originAssetId: revision.originAssetId,
+          document,
+          summary: summarizePixelOrigins(document),
+          componentSummaries,
+        },
+      };
+    },
   );
 
   app.get<{ Params: DiffParams }>(

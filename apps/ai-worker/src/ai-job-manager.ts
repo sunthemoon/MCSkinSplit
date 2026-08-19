@@ -1465,6 +1465,12 @@ export class AiJobManager {
     sourceRevisionId: string,
   ): Promise<void> {
     const sourceRevision = this.revisionStore.getRevision(sourceRevisionId);
+    // M18 snapshots carry authoritative per-pixel origin evidence. Reading it
+    // also verifies the immutable snapshot, so a recorded document can be
+    // preserved by commitAiSegmentation without relying on provider summaries.
+    // Only pre-M18 snapshots need the conservative M16 ancestry fallback.
+    if (await this.revisionStore.readRevisionOrigin(sourceRevision.id)) return;
+
     const sourceState = await this.revisionStore.readRevisionSemanticState(
       sourceRevision.id,
     );

@@ -7,12 +7,17 @@ import {
   applyManualSemanticOperation,
   assignSemanticPixelsWithProvenance,
   applyPartPixels,
+  applyPartPixelsWithOrigins,
   componentMaskFile,
   createInitialSemanticState,
+  createGeneratedPixelOriginAssignment,
+  createPixelOriginDocument,
   createPartMannequinTexture,
   createRgbaImage,
+  createSourceVisiblePixelOriginDocument,
   exportSemanticPart,
   getPixel,
+  getPixelOrigin,
   getSkinLayout,
   maskToPixelIds,
   maskToRgbaImage,
@@ -20,9 +25,12 @@ import {
   pixelIdsToSpans,
   rgbaImageToMask,
   rebaseSemanticStateImage,
+  propagatePixelOriginDocument,
   setPixel,
   spansToPixelIds,
   validateSemanticState,
+  summarizePixelOrigins,
+  synchronizeSemanticPixelOriginSummaries,
   type ArmType,
   type Rgba,
   type RgbaImage,
@@ -483,6 +491,51 @@ describe("manual semantic transactions", () => {
 });
 
 describe("reusable semantic parts", () => {
+  it("derives component generated summaries without treating manual pixels as generated", () => {
+    const image = createRgbaImage(64, 64);
+    setPixel(image, 8, 8, [1, 2, 3, 255]);
+    const state = applyManualSemanticOperation(
+      initialState(image),
+      {
+        type: "assign_pixels",
+        target: component("hair.main", "Hair", "hair"),
+        spans: [headSpan(8, 8)],
+      },
+      image,
+    );
+    const origins = createPixelOriginDocument({
+      subject: { kind: "revision", id: "revision_test" },
+      armType: "slim",
+      image,
+      intrinsicOrigin: "manual_authored",
+      evidence: {
+        actor: { type: "user", id: "Player One" },
+        operationId: "op_paint",
+      },
+    });
+    const synchronized = synchronizeSemanticPixelOriginSummaries(
+      state,
+      origins,
+      image,
+    );
+
+    expect(synchronized.document.components[0]!.provenance).toMatchObject({
+      containsGeneratedPixels: false,
+      originSummary: {
+        containsGeneratedPixels: false,
+        counts: { manual_authored: 1, generated_completion: 0 },
+      },
+    });
+    expect(() => validateSemanticState(synchronized, image)).not.toThrow();
+    expect(() =>
+      synchronizeSemanticPixelOriginSummaries(
+        state,
+        { ...origins, entries: [] },
+        image,
+      ),
+    ).toThrow("cover every non-transparent used UV pixel exactly");
+  });
+
   it("exports exact 64x64 texture/mask assets and model compatibility", () => {
     const image = semanticFixture();
     const state = applyManualSemanticOperation(
@@ -503,6 +556,11 @@ describe("reusable semantic parts", () => {
       image,
       component: state.document.components[0]!,
       componentMask: state.masks["hair.main"]!,
+      originDocument: createSourceVisiblePixelOriginDocument({
+        subject: { kind: "revision", id: "revision_test" },
+        armType: "slim",
+        image,
+      }),
     });
 
     expect(part.texture).toMatchObject({ width: 64, height: 64 });
@@ -510,7 +568,14 @@ describe("reusable semantic parts", () => {
     expect(maskToPixelIds(part.writeMask)).toEqual([8 * 64 + 8, 8 * 64 + 9]);
     expect(getPixel(part.texture, 8, 8)).toEqual(getPixel(image, 8, 8));
     expect(getPixel(part.texture, 10, 8)).toEqual([0, 0, 0, 0]);
-    expect(part.manifest).toMatchObject({ schemaVersion: "1.0" });
+    expect(part.manifest).toMatchObject({
+      schemaVersion: "2.0",
+      origin: {
+        file: "origin.json",
+        generatedMaskFile: "generated-mask.png",
+        containsGeneratedPixels: false,
+      },
+    });
     expect("derivation" in part.manifest).toBe(false);
     expect(part.manifest.compatibility.armTypes).toEqual(["wide", "slim"]);
     expect(part.manifest.placement.surfaces).toEqual(["head.base.front"]);
@@ -548,6 +613,11 @@ describe("reusable semantic parts", () => {
       image,
       component: state.document.components[0]!,
       componentMask: state.masks["glove.right"]!,
+      originDocument: createSourceVisiblePixelOriginDocument({
+        subject: { kind: "revision", id: "revision_test" },
+        armType: "slim",
+        image,
+      }),
     });
 
     expect(part.manifest.compatibility.armTypes).toEqual(["slim"]);
@@ -582,6 +652,11 @@ describe("reusable semantic parts", () => {
       image,
       component: state.document.components[0]!,
       componentMask: state.masks["hair.main"]!,
+      originDocument: createSourceVisiblePixelOriginDocument({
+        subject: { kind: "revision", id: "revision_test" },
+        armType: "slim",
+        image,
+      }),
     });
     const sameBase = createRgbaImage(64, 64);
     setPixel(sameBase, 8, 8, getPixel(image, 8, 8));
@@ -619,6 +694,95 @@ describe("reusable semantic parts", () => {
     expect(getPixel(applyPartPixels(differentBase, part.texture, part.writeMask, "use_part"), 8, 8)).toEqual(
       getPixel(image, 8, 8),
     );
+  });
+
+  it("round-trips generated origin through Part 2.0 and part application", () => {
+    const image = semanticFixture();
+    const state = applyManualSemanticOperation(
+      initialState(image),
+      {
+        type: "assign_pixels",
+        target: component("hair.main", "Hair", "hair"),
+        spans: [headSpan(8, 8)],
+      },
+      image,
+    );
+    const sourceOrigins = createSourceVisiblePixelOriginDocument({
+      subject: { kind: "revision", id: "revision_test" },
+      armType: "slim",
+      image,
+    });
+    const generatedOrigins = propagatePixelOriginDocument({
+      sourceDocument: sourceOrigins,
+      sourceImage: image,
+      resultImage: image,
+      resultSubject: { kind: "revision", id: "revision_generated" },
+      assignments: [
+        createGeneratedPixelOriginAssignment({
+          pixelId: 8 * 64 + 8,
+          evidence: {
+            candidateId: "candidate_test",
+            evidenceHash: `sha256:${"c".repeat(64)}`,
+            decisionId: "decision_test",
+            actor: { type: "user", id: "Player One" },
+          },
+        }),
+      ],
+    });
+    const generatedState: SemanticState = {
+      ...state,
+      document: { ...state.document, revisionId: "revision_generated" },
+    };
+    const part = exportSemanticPart({
+      id: "part_generated",
+      projectId: "project_test",
+      revisionId: "revision_generated",
+      armType: "slim",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      image,
+      component: generatedState.document.components[0]!,
+      componentMask: generatedState.masks["hair.main"]!,
+      originDocument: generatedOrigins,
+    });
+
+    expect(part.generatedMask[8 * 64 + 8]).toBe(1);
+    expect(part.manifest.origin).toMatchObject({
+      containsGeneratedPixels: true,
+      summary: {
+        containsGeneratedPixels: true,
+        counts: { generated_completion: 1 },
+      },
+    });
+    const base = createRgbaImage(64, 64);
+    const baseOrigins = createSourceVisiblePixelOriginDocument({
+      subject: { kind: "revision", id: "revision_target" },
+      armType: "slim",
+      image: base,
+    });
+    const applied = applyPartPixelsWithOrigins({
+      base,
+      baseOriginDocument: baseOrigins,
+      partTexture: part.texture,
+      writeMask: part.writeMask,
+      partOriginDocument: part.originDocument,
+      manifest: part.manifest,
+      targetSubject: { kind: "revision", id: "revision_applied" },
+      strategy: "use_part",
+    });
+
+    expect(summarizePixelOrigins(applied.originDocument)).toMatchObject({
+      containsGeneratedPixels: true,
+      counts: { generated_completion: 1 },
+    });
+    expect(getPixelOrigin(applied.originDocument, 8 * 64 + 8)).toMatchObject({
+      intrinsicOrigin: "generated_completion",
+      evidence: { candidateId: "candidate_test" },
+      copyLineage: {
+        sourceSubject: { kind: "part", id: "part_generated" },
+        sourceComponentInstanceId: "hair.main",
+        sourcePixelId: 8 * 64 + 8,
+      },
+    });
   });
 });
 

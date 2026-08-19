@@ -94,6 +94,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 14,
+    name: "pixel origin snapshots and Part 2.0 assets",
+    sql: readFileSync(
+      new URL("./migrations/014_pixel_origins.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {
@@ -130,14 +138,31 @@ function applyMigrations(database: Database.Database): void {
       continue;
     }
 
-    const run = database.transaction(() => {
-      database.exec(migration.sql);
-      database
-        .prepare(
-          "INSERT INTO schema_migration (version, name, applied_at) VALUES (?, ?, ?)",
-        )
-        .run(migration.version, migration.name, new Date().toISOString());
-    });
-    run.immediate();
+    // Migration 14 rebuilds parent tables whose closed CHECK enums cannot be
+    // extended in place. SQLite implements DROP TABLE as an implicit DELETE,
+    // so populated RESTRICT references require FK enforcement to be suspended
+    // around the still-atomic schema transaction. foreign_key_check runs before
+    // commit, and any violation rolls the complete migration back.
+    const rebuildsReferencedTables = migration.version === 14;
+    if (rebuildsReferencedTables) database.pragma("foreign_keys = OFF");
+    try {
+      const run = database.transaction(() => {
+        database.exec(migration.sql);
+        if (rebuildsReferencedTables) {
+          const violations = database.pragma("foreign_key_check") as unknown[];
+          if (violations.length > 0) {
+            throw new Error("pixel-origin migration produced foreign key violations");
+          }
+        }
+        database
+          .prepare(
+            "INSERT INTO schema_migration (version, name, applied_at) VALUES (?, ?, ?)",
+          )
+          .run(migration.version, migration.name, new Date().toISOString());
+      });
+      run.immediate();
+    } finally {
+      if (rebuildsReferencedTables) database.pragma("foreign_keys = ON");
+    }
   }
 }

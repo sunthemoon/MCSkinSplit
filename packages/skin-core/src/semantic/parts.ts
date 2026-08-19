@@ -2,18 +2,36 @@ import { createRgbaImage } from "../image";
 import { getSkinLayout } from "../layouts/layout";
 import type { ArmType, Rgba, RgbaImage } from "../types";
 import { assertMask, maskToPixelIds, pixelIdsToMask } from "./mask";
+import {
+  createCopiedPixelOriginAssignments,
+  deriveGeneratedPixelMask,
+  propagatePixelOriginDocument,
+  summarizePixelOrigins,
+  validatePixelOriginDocument,
+} from "./origin";
 import type {
   PartApplicationReport,
   PartManifest,
+  PartManifestV2,
   PartPixelConflict,
+  PixelOriginDocument,
+  PixelOriginSubject,
   SemanticComponent,
 } from "./types";
 
 export interface ExportedPart {
-  readonly manifest: PartManifest;
+  readonly manifest: PartManifestV2;
   readonly texture: RgbaImage;
   readonly writeMask: Uint8Array;
   readonly preview: RgbaImage;
+  readonly originDocument: PixelOriginDocument;
+  readonly generatedMask: Uint8Array;
+}
+
+export interface AppliedPartWithOrigins {
+  readonly image: RgbaImage;
+  readonly originDocument: PixelOriginDocument;
+  readonly appliedPixelIds: readonly number[];
 }
 
 const MANNEQUIN_BASE: Rgba = [226, 229, 224, 255];
@@ -73,8 +91,17 @@ export function exportSemanticPart(input: {
   readonly image: RgbaImage;
   readonly component: SemanticComponent;
   readonly componentMask: Uint8Array;
+  readonly originDocument: PixelOriginDocument;
 }): ExportedPart {
   assertMask(input.componentMask);
+  validatePixelOriginDocument(input.originDocument, input.image);
+  if (
+    input.originDocument.subject.kind !== "revision" ||
+    input.originDocument.subject.id !== input.revisionId ||
+    input.originDocument.source.armType !== input.armType
+  ) {
+    throw new RangeError("Part origin document does not match its source revision");
+  }
   const textureData = new Uint8Array(input.image.data.length);
   const coloredPixelIds: number[] = [];
   for (const pixelId of maskToPixelIds(input.componentMask)) {
@@ -87,6 +114,22 @@ export function exportSemanticPart(input: {
   }
   const writeMask = pixelIdsToMask(coloredPixelIds);
   const texture = createRgbaImage(64, 64, textureData);
+  const originDocument = propagatePixelOriginDocument({
+    sourceDocument: input.originDocument,
+    sourceImage: input.image,
+    resultImage: texture,
+    resultSubject: { kind: "part", id: input.id },
+    assignments: createCopiedPixelOriginAssignments({
+      sourceDocument: input.originDocument,
+      mappings: coloredPixelIds.map((pixelId) => ({
+        sourcePixelId: pixelId,
+        targetPixelId: pixelId,
+      })),
+      sourceComponentInstanceId: input.component.instanceId,
+    }),
+  });
+  const generatedMask = deriveGeneratedPixelMask(originDocument);
+  const originSummary = summarizePixelOrigins(originDocument);
   const surfaces = [...new Set(input.component.spans.map((span) => span.surface))];
   const preferredLayers = [
     ...new Set(surfaces.map((surface) => surface.split(".")[1] as "base" | "outer")),
@@ -94,8 +137,8 @@ export function exportSemanticPart(input: {
   const touchesArm = surfaces.some(
     (surface) => surface.startsWith("leftArm.") || surface.startsWith("rightArm."),
   );
-  const manifest: PartManifest = {
-    schemaVersion: "1.0",
+  const manifest: PartManifestV2 = {
+    schemaVersion: "2.0",
     id: input.id,
     name: input.name?.trim() || input.component.displayName,
     category: input.component.category,
@@ -113,9 +156,23 @@ export function exportSemanticPart(input: {
     relations: { softConflicts: [], hardConflicts: [] },
     palette: { dominant: input.component.palette.dominant },
     maskMode: "write-colored-pixels-only",
+    origin: {
+      schemaVersion: "1.0",
+      file: "origin.json",
+      generatedMaskFile: "generated-mask.png",
+      summary: originSummary,
+      containsGeneratedPixels: originSummary.containsGeneratedPixels,
+    },
     createdAt: input.createdAt,
   };
-  return { manifest, texture, writeMask, preview: texture };
+  return {
+    manifest,
+    texture,
+    writeMask,
+    preview: texture,
+    originDocument,
+    generatedMask,
+  };
 }
 
 export function analyzePartApplication(
@@ -189,6 +246,110 @@ export function applyPartPixels(
     data.set(partTexture.data.subarray(offset, offset + 4), offset);
   }
   return createRgbaImage(64, 64, data);
+}
+
+/**
+ * Applies a Part while carrying intrinsic origins and recording one immediate
+ * copied-from derivation for every pixel selected by the conflict strategy.
+ */
+export function applyPartPixelsWithOrigins(input: {
+  readonly base: RgbaImage;
+  readonly baseOriginDocument: PixelOriginDocument;
+  readonly partTexture: RgbaImage;
+  readonly writeMask: Uint8Array;
+  readonly partOriginDocument: PixelOriginDocument;
+  readonly manifest: PartManifest;
+  readonly targetSubject: PixelOriginSubject;
+  readonly strategy: "use_part" | "keep_base";
+}): AppliedPartWithOrigins {
+  assertCompatibleImages(input.base, input.partTexture);
+  assertMask(input.writeMask);
+  validatePixelOriginDocument(input.baseOriginDocument, input.base);
+  validatePixelOriginDocument(input.partOriginDocument, input.partTexture);
+  if (!input.manifest.compatibility.armTypes.includes(input.baseOriginDocument.source.armType)) {
+    throw new RangeError("Part origin cannot be applied to the target arm model");
+  }
+  if (
+    input.partOriginDocument.subject.kind !== "part" ||
+    input.partOriginDocument.subject.id !== input.manifest.id
+  ) {
+    throw new RangeError("Part origin document subject does not match its manifest");
+  }
+  if (input.manifest.schemaVersion === "2.0") {
+    const summary = summarizePixelOrigins(input.partOriginDocument);
+    if (
+      input.manifest.origin.schemaVersion !== "1.0" ||
+      input.manifest.origin.file !== "origin.json" ||
+      input.manifest.origin.generatedMaskFile !== "generated-mask.png" ||
+      input.manifest.origin.containsGeneratedPixels !== summary.containsGeneratedPixels ||
+      !originSummariesEqual(input.manifest.origin.summary, summary)
+    ) {
+      throw new RangeError("Part manifest origin summary does not match origin.json");
+    }
+  }
+  const generatedMask = deriveGeneratedPixelMask(input.partOriginDocument);
+  const originPixels = new Set(
+    input.partOriginDocument.entries.flatMap((entry) =>
+      entry.spans.flatMap((span) => {
+        const pixelIds: number[] = [];
+        for (let x = span.x0; x <= span.x1; x += 1) {
+          pixelIds.push(span.y * 64 + x);
+        }
+        return pixelIds;
+      }),
+    ),
+  );
+  for (let pixelId = 0; pixelId < input.writeMask.length; pixelId += 1) {
+    if (generatedMask[pixelId] !== 0 && input.writeMask[pixelId] === 0) {
+      throw new RangeError("Part generated mask must be a subset of its write mask");
+    }
+    const shouldWrite = input.writeMask[pixelId] !== 0;
+    if (shouldWrite !== originPixels.has(pixelId)) {
+      throw new RangeError("Part origin coverage must match its write mask exactly");
+    }
+    if (shouldWrite && input.partTexture.data[pixelId * 4 + 3] === 0) {
+      throw new RangeError(`Part write mask contains transparent pixel ${pixelId}`);
+    }
+  }
+  const appliedPixelIds = maskToPixelIds(input.writeMask).filter(
+    (pixelId) =>
+      input.strategy === "use_part" ||
+      input.base.data[pixelId * 4 + 3] === 0,
+  );
+  const image = applyPartPixels(
+    input.base,
+    input.partTexture,
+    input.writeMask,
+    input.strategy,
+  );
+  const originDocument = propagatePixelOriginDocument({
+    sourceDocument: input.baseOriginDocument,
+    sourceImage: input.base,
+    resultImage: image,
+    resultSubject: input.targetSubject,
+    assignments: createCopiedPixelOriginAssignments({
+      sourceDocument: input.partOriginDocument,
+      mappings: appliedPixelIds.map((pixelId) => ({
+        sourcePixelId: pixelId,
+        targetPixelId: pixelId,
+      })),
+      sourceComponentInstanceId: input.manifest.source.componentInstanceId,
+    }),
+  });
+  return { image, originDocument, appliedPixelIds };
+}
+
+function originSummariesEqual(
+  left: ReturnType<typeof summarizePixelOrigins>,
+  right: ReturnType<typeof summarizePixelOrigins>,
+): boolean {
+  return (
+    left.containsGeneratedPixels === right.containsGeneratedPixels &&
+    left.counts.source_visible === right.counts.source_visible &&
+    left.counts.manual_authored === right.counts.manual_authored &&
+    left.counts.generated_completion === right.counts.generated_completion &&
+    left.counts.legacy_mixed === right.counts.legacy_mixed
+  );
 }
 
 function assertCompatibleImages(left: RgbaImage, right: RgbaImage): void {
