@@ -29,6 +29,7 @@ Skin compositor
 
 AI worker
   -> isolated, integrity-checked analysis workspace
+  -> exact CandidateRegions plus deterministic evidence graph and visual grounding
   -> replaceable provider
   -> schema and pixel-ownership validator
   -> proposal returned to revision service
@@ -126,10 +127,11 @@ The detailed contract is in
 - `packages/ai-provider` owns the replaceable model boundary. The default adapter
   starts `codex exec` without a shell in a read-only, tool-free profile, inlines
   the immutable semantic contract, attaches only the prepared skin views, applies
-  timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.3.0`,
-  prompt `semantic-proposal-v5-bounded-transfers`, proposal Schema `1.1`, and
-  validator v2 identify the current runtime contract. Prompt v5 retains explicit
-  cross-body long-hair guidance and makes every bounded pixel transfer explicit.
+  timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.4.0`,
+  prompt `semantic-proposal-v7-all-surface-grounding`, proposal Schema `1.2`, and
+  validator v3 identify the current runtime contract. Prompt v7 retains explicit
+  cross-body long-hair guidance, consumes host-generated graph/grounding evidence,
+  and keeps every bounded pixel transfer explicit.
 - The model returns only a JSON proposal captured by the provider. It cannot read
   or write the Run workspace. Host-side Ajv and deterministic pixel checks require
   complete, non-overlapping ownership before the proposal is converted to semantic
@@ -338,6 +340,42 @@ The detailed contract is in
   binding transition; project heads, repair-project state, and library lifecycle
   fields remain mutable.
 
+## M17 decisions
+
+- Existing CandidateRegions remain the exact deterministic ownership partition.
+  A separately versioned Candidate Evidence Graph adds stable visual IDs and
+  host-computed geometry, shape, surface-edge, dominant-color, and relation
+  evidence without changing Region pixels or semantic categories.
+- Graph edges are limited to coordinate-verifiable same-surface contact/proximity,
+  canonical UV seams, Base/Outer same-texel projection, and bilateral mirror
+  mappings. The graph does not derive adjacency from Atlas layout and does not
+  invent perspective, hidden 3D, or cross-body edges.
+- The analysis pack owns deterministic four-direction orthographic grounding.
+  Composite, Base, and Outer natural-color sheets are paired with CandidateRegion
+  pseudocolor sheets and a stable-ID legend. A labelled natural/CandidateRegion
+  six-face sheet covers top and bottom, and the all-surface natural/candidate Atlas
+  pair preserves exact UV lookup. Role/path order is a checked provider input;
+  separate face sheets remain hashed audit artifacts rather than duplicate model
+  attachments.
+- The provider receives compact graph and grounding manifests rather than the full
+  pixel map or full graph. A 300,000-character prompt limit is enforced before CLI
+  execution. Visual IDs are lookup aids only; exact CandidateRegion IDs and the
+  supplied graph relations remain authoritative references.
+- Prompt v7 audits top/bottom faces separately and treats Surface names as cube
+  geometry, not anatomy. UV seams, adjacent vertical ownership, or similar color
+  alone cannot extend a cross-body component onto a top/bottom face.
+- Proposal Schema 1.2 adds a bounded same-pass `appearanceInventory`. Validator v3
+  validates its structure and Region references, but it remains diagnostic and
+  cannot change Region ownership, masks, commit decisions, or M15 follow-up input.
+  Schema 1.0/1.1 remain historical read-only shapes, and stale Job contracts require
+  a fresh analysis rather than an upgraded Retry.
+- Host-side ownership and bounded-transfer rules remain unchanged: one bucket per
+  CandidateRegion, at most 32 override spans and 64 unique override pixels, and an
+  explicit paired removal for every transferred pixel.
+- M17 is visible-evidence classification work only. Per-pixel provenance, Part 2.0,
+  hidden-content Completion, player Completion UX, and its release gate remain
+  isolated in M18-M21.
+
 ## Package boundaries
 
 ```text
@@ -347,6 +385,6 @@ apps/ai-worker           persistent semantic/recommendation jobs, follow-up acti
 packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, and restoration (M1-M9)
 packages/skin-revision   immutable snapshots, catalog variants, parts, repair histories, AI audit, and compositions
 packages/skin-compositor ordered layers, restoration, and deterministic conflict evaluation (M6/M9)
-packages/skin-analysis-pack deterministic model inputs, candidate catalogs, follow-up assessment, and manifests (M5/M10/M15)
-packages/ai-provider     replaceable model execution and task-specific validation (M5/M10)
+packages/skin-analysis-pack deterministic model inputs, evidence graph/grounding, candidate catalogs, follow-up assessment, and manifests (M5/M10/M15/M17)
+packages/ai-provider     replaceable model execution and task-specific validation (M5/M10/M17)
 ```

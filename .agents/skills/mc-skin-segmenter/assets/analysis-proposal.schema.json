@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mcskinsplit.local/schemas/analysis-proposal.v1.1.schema.json",
+  "$id": "https://mcskinsplit.local/schemas/analysis-proposal.v1.2.schema.json",
   "title": "MCSkinSplit semantic analysis proposal",
   "type": "object",
   "additionalProperties": false,
@@ -8,13 +8,14 @@
     "schemaVersion",
     "sourceRevisionId",
     "modelAssessment",
+    "appearanceInventory",
     "components",
     "unassignedCandidateRegionIds",
     "reviewItems",
     "summary"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.1" },
+    "schemaVersion": { "const": "1.2" },
     "sourceRevisionId": { "type": "string", "minLength": 3, "maxLength": 120 },
     "modelAssessment": {
       "type": "object",
@@ -25,6 +26,7 @@
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
+    "appearanceInventory": { "$ref": "#/$defs/appearanceInventory" },
     "components": {
       "type": "array",
       "maxItems": 256,
@@ -43,6 +45,59 @@
     "summary": { "type": "string", "minLength": 1, "maxLength": 500 }
   },
   "$defs": {
+    "appearanceSubject": {
+      "type": "string",
+      "enum": ["hair", "clothing", "accessory", "face", "skin"]
+    },
+    "appearanceCue": {
+      "type": "string",
+      "enum": [
+        "color_continuity",
+        "shape_continuity",
+        "layering",
+        "symmetry",
+        "edge_boundary",
+        "other"
+      ]
+    },
+    "appearanceObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject",
+        "cue",
+        "candidateRegionIds",
+        "confidence",
+        "description"
+      ],
+      "properties": {
+        "subject": { "$ref": "#/$defs/appearanceSubject" },
+        "cue": { "$ref": "#/$defs/appearanceCue" },
+        "candidateRegionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/regionId" }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "appearanceInventory": {
+      "type": "object",
+      "description": "Bounded evidence-linked appearance observations for evaluation. This inventory is diagnostic only and never owns pixels.",
+      "additionalProperties": false,
+      "required": ["observations", "summary"],
+      "properties": {
+        "observations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/appearanceObservation" }
+        },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 300 }
+      }
+    },
     "category": {
       "type": "string",
       "enum": [

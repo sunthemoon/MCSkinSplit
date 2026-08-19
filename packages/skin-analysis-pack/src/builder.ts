@@ -10,8 +10,18 @@ import {
   createAnalysisDocuments,
   createCandidateRegionSummary,
 } from "./candidate-regions";
-import { renderAnalysisImages } from "./render-analysis";
 import {
+  buildCandidateEvidenceGraph,
+  CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+  createCandidateEvidenceGraphSummary,
+} from "./candidate-evidence-graph";
+import {
+  CANDIDATE_GROUNDING_RENDERER_VERSION,
+  renderAnalysisImages,
+  renderCandidateRegionGrounding,
+} from "./render-analysis";
+import {
+  ANALYSIS_IMAGE_ATTACHMENT_CONTRACT,
   CANDIDATE_REGION_ALGORITHM_VERSION,
   PROMPT_VERSION,
   TAXONOMY_VERSION,
@@ -26,8 +36,10 @@ export async function buildAnalysisPack(
   const root = resolve(input.workspaceDirectory);
   const inputDirectory = resolveWithin(root, "input");
   const viewsDirectory = resolveWithin(inputDirectory, "views");
+  const groundingDirectory = resolveWithin(inputDirectory, "grounding");
   await Promise.all([
     mkdir(viewsDirectory, { recursive: true }),
+    mkdir(groundingDirectory, { recursive: true }),
     mkdir(resolveWithin(root, "output"), { recursive: true }),
     mkdir(resolveWithin(root, "logs"), { recursive: true }),
   ]);
@@ -39,9 +51,19 @@ export async function buildAnalysisPack(
     layout,
   );
   const rendered = renderAnalysisImages(image, input.armType);
+  const candidateEvidenceGraph = buildCandidateEvidenceGraph(candidateRegions);
+  const candidateEvidenceSummary = createCandidateEvidenceGraphSummary(
+    candidateEvidenceGraph,
+  );
+  const candidateGrounding = renderCandidateRegionGrounding(
+    image,
+    input.armType,
+    candidateRegions,
+  );
   const candidateSummary = createCandidateRegionSummary(candidateRegions);
+  const imageAttachments = ANALYSIS_IMAGE_ATTACHMENT_CONTRACT;
   const job: AnalysisJobDocument = {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     jobId: input.jobId,
     runId: input.runId,
     projectId: input.projectId,
@@ -58,10 +80,14 @@ export async function buildAnalysisPack(
     focus: [...input.focus],
     createRevisionOnSuccess: input.createRevisionOnSuccess,
     candidateRegionAlgorithmVersion: CANDIDATE_REGION_ALGORITHM_VERSION,
+    candidateEvidenceGraphAlgorithmVersion:
+      CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+    candidateGroundingRendererVersion: CANDIDATE_GROUNDING_RENDERER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
     skillName: "mc-skin-segmenter",
     skillVersion: input.skillVersion,
     promptVersion: PROMPT_VERSION,
+    imageAttachments,
     paths: {
       source: "input/source.png",
       atlas: "input/atlas-16x.png",
@@ -71,6 +97,23 @@ export async function buildAnalysisPack(
       palette: "input/palette.json",
       candidateSummary: "input/candidate-summary.json",
       candidateRegions: "input/candidate-regions.json",
+      candidateEvidenceGraph: "input/candidate-evidence-graph.json",
+      candidateEvidenceSummary: "input/candidate-evidence-summary.json",
+      candidateGroundingManifest: "input/candidate-grounding-manifest.json",
+      candidateGroundingAtlas: "input/grounding/candidate-atlas-16x.png",
+      candidateGroundingFaceContact:
+        "input/grounding/candidate-face-contact-sheet.png",
+      candidateGroundingAllSurfacePair:
+        "input/grounding/all-surface-natural-candidate-pair.png",
+      candidateGroundingLegend: "input/grounding/legend.png",
+      candidateGroundingCompositeNatural:
+        "input/grounding/composite-natural.png",
+      candidateGroundingCompositeRegions:
+        "input/grounding/composite-regions.png",
+      candidateGroundingBaseNatural: "input/grounding/base-natural.png",
+      candidateGroundingBaseRegions: "input/grounding/base-regions.png",
+      candidateGroundingOuterNatural: "input/grounding/outer-natural.png",
+      candidateGroundingOuterRegions: "input/grounding/outer-regions.png",
       previousSegmentation: "input/previous-segmentation.json",
       outputSchema: "schema/analysis-proposal.schema.json",
       proposal: "output/analysis-proposal.json",
@@ -88,11 +131,52 @@ export async function buildAnalysisPack(
     "input/views/back.png": encodePngRgba(rendered.views.back),
     "input/views/left.png": encodePngRgba(rendered.views.left),
     "input/views/right.png": encodePngRgba(rendered.views.right),
-    "input/views/isometric.png": encodePngRgba(rendered.views.isometric),
+    "input/views/front-right-contact.png": encodePngRgba(
+      rendered.views.frontRightContact,
+    ),
     "input/pixel-map.json": utf8(canonicalJson(pixelMap)),
     "input/palette.json": utf8(canonicalJson(palette)),
     "input/candidate-summary.json": utf8(compactJson(candidateSummary)),
     "input/candidate-regions.json": utf8(canonicalJson(candidateRegions)),
+    "input/candidate-evidence-graph.json": utf8(
+      canonicalJson(candidateEvidenceGraph),
+    ),
+    "input/candidate-evidence-summary.json": utf8(
+      compactJson(candidateEvidenceSummary),
+    ),
+    "input/candidate-grounding-manifest.json": utf8(
+      canonicalJson(candidateGrounding.manifest),
+    ),
+    "input/grounding/candidate-atlas-16x.png": encodePngRgba(
+      candidateGrounding.candidateAtlas,
+    ),
+    "input/grounding/candidate-face-contact-sheet.png": encodePngRgba(
+      candidateGrounding.allSurfaceContactSheet.candidateRegions,
+    ),
+    "input/grounding/all-surface-natural-candidate-pair.png": encodePngRgba(
+      candidateGrounding.allSurfacePairedContactSheet,
+    ),
+    "input/grounding/composite-natural.png": encodePngRgba(
+      candidateGrounding.contactSheet.naturalColor,
+    ),
+    "input/grounding/composite-regions.png": encodePngRgba(
+      candidateGrounding.contactSheet.candidateRegions,
+    ),
+    "input/grounding/base-natural.png": encodePngRgba(
+      candidateGrounding.layerContactSheets.base.naturalColor,
+    ),
+    "input/grounding/base-regions.png": encodePngRgba(
+      candidateGrounding.layerContactSheets.base.candidateRegions,
+    ),
+    "input/grounding/outer-natural.png": encodePngRgba(
+      candidateGrounding.layerContactSheets.outer.naturalColor,
+    ),
+    "input/grounding/outer-regions.png": encodePngRgba(
+      candidateGrounding.layerContactSheets.outer.candidateRegions,
+    ),
+    "input/grounding/legend.png": encodePngRgba(
+      candidateGrounding.legendImage,
+    ),
     "input/previous-segmentation.json": utf8(
       canonicalJson(input.previousSegmentation),
     ),
@@ -125,6 +209,9 @@ export async function buildAnalysisPack(
       canonicalJson({
         sourceRevisionResultHash: input.sourceResultHash,
         candidateRegionAlgorithmVersion: CANDIDATE_REGION_ALGORITHM_VERSION,
+        candidateEvidenceGraphAlgorithmVersion:
+          CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+        candidateGroundingRendererVersion: CANDIDATE_GROUNDING_RENDERER_VERSION,
         taxonomyVersion: TAXONOMY_VERSION,
         skillVersion: input.skillVersion,
         promptVersion: PROMPT_VERSION,
@@ -134,6 +221,7 @@ export async function buildAnalysisPack(
         semanticBaseline: input.semanticBaseline,
         focus: [...input.focus].sort(),
         createRevisionOnSuccess: input.createRevisionOnSuccess,
+        imageAttachments,
         files: cacheFiles,
       }),
     ),
@@ -148,18 +236,16 @@ export async function buildAnalysisPack(
     workspaceDirectory: root,
     job,
     candidateRegions,
+    candidateEvidenceGraph,
+    candidateEvidenceSummary,
+    candidateGroundingManifest: candidateGrounding.manifest,
     pixelMap,
     palette,
     previousSegmentation: input.previousSegmentation,
     inputHash,
     fileHashes,
-    imagePaths: [
-      "input/atlas-grid-16x.png",
-      "input/face-contact-sheet.png",
-      "input/views/front.png",
-      "input/views/back.png",
-      "input/views/isometric.png",
-    ],
+    imageAttachments,
+    imagePaths: imageAttachments.map((attachment) => attachment.path),
   };
 }
 

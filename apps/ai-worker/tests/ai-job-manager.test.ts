@@ -133,9 +133,21 @@ describe("AiJobManager", () => {
         pack.candidateRegions.regions;
       suggestionRegion = clothingRegion!;
       return {
-        schemaVersion: "1.1",
+        schemaVersion: "1.2",
         sourceRevisionId: pack.job.sourceRevisionId,
         modelAssessment: { armType: "slim", confidence: 0.9 },
+        appearanceInventory: {
+          observations: [
+            {
+              subject: "hair",
+              cue: "shape_continuity",
+              candidateRegionIds: [hairRegion!.id, clothingRegion!.id],
+              confidence: 0.9,
+              description: "头部与躯干候选呈连续长发形态。",
+            },
+          ],
+          summary: "头发跨越头部与躯干，服装保持独立。",
+        },
         components: [
           {
             instanceId: "hair.main",
@@ -1427,9 +1439,13 @@ function validProposal(
 ): AnalysisProposal {
   const first = regions[0]!;
   return {
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     sourceRevisionId,
     modelAssessment: { armType: "slim", confidence: 0.98 },
+    appearanceInventory: {
+      observations: [],
+      summary: "未记录额外外观观察。",
+    },
     components: [
       {
         instanceId: "hair.main",

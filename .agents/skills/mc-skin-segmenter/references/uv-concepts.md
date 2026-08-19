@@ -22,3 +22,14 @@
   are the same semantic item.
 - UV discontinuity does not prove semantic discontinuity. Use the contact sheet and
   body views to judge continuity across seams.
+- The Candidate Evidence Graph contains only host-computed relationships:
+  `same_surface_contact`, `same_surface_proximity`, `uv_seam`,
+  `layer_projection`, and `bilateral_mirror`. Atlas neighbors are not physical
+  neighbors unless the graph contains the corresponding edge.
+- Grounding views pair natural color with CandidateRegion pseudo-color and stable
+  short visual IDs. A visual ID is only a lookup aid; proposals always use the
+  exact CandidateRegion ID supplied by the graph summary.
+- The labelled all-surface pair aligns natural and CandidateRegion panels across
+  front, back, left, right, top, and bottom. Use it for top/bottom faces that are
+  absent from the four-direction orthographic body views. Surface names describe
+  cube geometry and must not be treated as anatomical categories.

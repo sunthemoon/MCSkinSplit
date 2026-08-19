@@ -15,16 +15,19 @@ import type { AnalysisPack } from "@mc-skin-split/skin-analysis-pack";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import {
   ANALYSIS_PROPOSAL_SCHEMA,
+  ANALYSIS_PROPOSAL_SCHEMA_VERSION,
   LEGACY_ANALYSIS_PROPOSAL_SCHEMA,
   LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION,
   MAX_PROPOSAL_OVERRIDE_PIXELS,
   MAX_PROPOSAL_OVERRIDE_SPANS,
+  PREVIOUS_ANALYSIS_PROPOSAL_SCHEMA,
+  PREVIOUS_ANALYSIS_PROPOSAL_SCHEMA_VERSION,
   PROPOSAL_VALIDATOR_VERSION,
 } from "./schema";
 import type {
   AnalysisProposal,
   AnalysisProposalComponent,
-  AnalysisProposalV1_1,
+  AnalysisProposalV1_2,
   ProposalValidationIssue,
   ProposalValidationReport,
   ProposalValidationResult,
@@ -36,13 +39,13 @@ const ajv = new Ajv2020({
   strict: true,
 });
 const validateCurrentSchema = ajv.compile(ANALYSIS_PROPOSAL_SCHEMA);
+const validatePreviousSchema = ajv.compile(PREVIOUS_ANALYSIS_PROPOSAL_SCHEMA);
 const validateLegacySchema = ajv.compile(LEGACY_ANALYSIS_PROPOSAL_SCHEMA);
 
-/** Shape-only reader for persisted proposal artifacts from schema 1.0 or 1.1. */
+/** Shape-only reader for persisted proposal artifacts from schema 1.0, 1.1, or 1.2. */
 export function isAnalysisProposalArtifact(input: unknown): input is AnalysisProposal {
-  return proposalSchemaVersion(input) === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION
-    ? validateLegacySchema(input)
-    : validateCurrentSchema(input);
+  const validateSchema = schemaValidatorForVersion(proposalSchemaVersion(input));
+  return validateSchema ? validateSchema(input) : false;
 }
 
 export function validateAnalysisProposal(input: {
@@ -67,26 +70,27 @@ export function validateAnalysisProposal(input: {
     reviewItemCount: 0,
     overrideUniquePixelCount: 0,
     overrideSpanCount: 0,
+    appearanceObservationCount: 0,
   };
 
-  const validateSchema = proposalSchemaVersion(input.proposal) === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION
-    ? validateLegacySchema
-    : validateCurrentSchema;
+  const validateSchema =
+    schemaValidatorForVersion(proposalSchemaVersion(input.proposal)) ??
+    validateCurrentSchema;
   if (!validateSchema(input.proposal)) {
     errors.push(...schemaIssues(validateSchema.errors ?? []));
     return invalidResult(null, errors, warnings, emptyStats);
   }
 
   const artifact = input.proposal as unknown as AnalysisProposal;
-  if (artifact.schemaVersion === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION) {
+  if (artifact.schemaVersion !== ANALYSIS_PROPOSAL_SCHEMA_VERSION) {
     errors.push(issue(
       "LEGACY_PROPOSAL_READ_ONLY",
       "/schemaVersion",
-      "1.0 提案仅用于读取历史记录；新的 AI 提交必须使用 1.1 契约",
+      `${artifact.schemaVersion} 提案仅用于读取历史记录；新的 AI 提交必须使用 ${ANALYSIS_PROPOSAL_SCHEMA_VERSION} 契约`,
     ));
     return invalidResult(artifact, errors, warnings, emptyStats);
   }
-  const proposal = artifact as AnalysisProposalV1_1;
+  const proposal = artifact as AnalysisProposalV1_2;
   if (proposal.sourceRevisionId !== input.pack.job.sourceRevisionId) {
     errors.push(issue("SOURCE_REVISION_MISMATCH", "/sourceRevisionId", "提案来源 Revision 与任务不一致"));
   }
@@ -97,6 +101,7 @@ export function validateAnalysisProposal(input: {
   const regionById = new Map(
     input.pack.candidateRegions.regions.map((region) => [region.id, region]),
   );
+  validateAppearanceInventory(proposal, regionById, errors);
   const bucketByRegion = new Map<string, string>();
   const componentIds = new Set<string>();
   for (const [index, component] of proposal.components.entries()) {
@@ -194,6 +199,7 @@ export function validateAnalysisProposal(input: {
     reviewItemCount: proposal.reviewItems.length,
     overrideUniquePixelCount: overrideValidation.uniquePixelCount,
     overrideSpanCount: overrideValidation.spanCount,
+    appearanceObservationCount: proposal.appearanceInventory.observations.length,
   };
   if (errors.length > 0) return invalidResult(proposal, errors, warnings, stats);
 
@@ -239,7 +245,7 @@ interface PixelOverrideValidation {
 }
 
 function validateProposalPixelOverrides(input: {
-  readonly proposal: AnalysisProposalV1_1;
+  readonly proposal: AnalysisProposalV1_2;
   readonly candidatePixelIds: ReadonlySet<number>;
   readonly regionById: ReadonlyMap<
     string,
@@ -394,7 +400,7 @@ function normalizeComponent(
 }
 
 function validateRelations(
-  proposal: AnalysisProposalV1_1,
+  proposal: AnalysisProposalV1_2,
   componentIds: ReadonlySet<string>,
   errors: ProposalValidationIssue[],
 ): void {
@@ -409,6 +415,26 @@ function validateRelations(
       }
       if (target === component.instanceId) {
         errors.push(issue("SELF_RELATION", `/components/${index}/relations`, `组件不能引用自身：${target}`));
+      }
+    }
+  }
+}
+
+function validateAppearanceInventory(
+  proposal: AnalysisProposalV1_2,
+  knownRegions: ReadonlyMap<string, unknown>,
+  errors: ProposalValidationIssue[],
+): void {
+  for (const [observationIndex, observation] of
+    proposal.appearanceInventory.observations.entries()) {
+    for (const [regionIndex, regionId] of
+      observation.candidateRegionIds.entries()) {
+      if (!knownRegions.has(regionId)) {
+        errors.push(issue(
+          "UNKNOWN_APPEARANCE_REGION",
+          `/appearanceInventory/observations/${observationIndex}/candidateRegionIds/${regionIndex}`,
+          `外观观察引用不存在的候选区域：${regionId}`,
+        ));
       }
     }
   }
@@ -475,6 +501,21 @@ function proposalSchemaVersion(value: unknown): string | null {
   }
   const schemaVersion = (value as Readonly<Record<string, unknown>>).schemaVersion;
   return typeof schemaVersion === "string" ? schemaVersion : null;
+}
+
+function schemaValidatorForVersion(
+  version: string | null,
+): typeof validateCurrentSchema | null {
+  switch (version) {
+    case ANALYSIS_PROPOSAL_SCHEMA_VERSION:
+      return validateCurrentSchema;
+    case PREVIOUS_ANALYSIS_PROPOSAL_SCHEMA_VERSION:
+      return validatePreviousSchema;
+    case LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION:
+      return validateLegacySchema;
+    default:
+      return null;
+  }
 }
 
 function invalidResult(

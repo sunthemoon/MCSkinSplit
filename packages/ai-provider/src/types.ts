@@ -50,6 +50,34 @@ export interface AnalysisReviewItem {
   readonly confidence: number;
 }
 
+export type AppearanceInventorySubject =
+  | "hair"
+  | "clothing"
+  | "accessory"
+  | "face"
+  | "skin";
+
+export type AppearanceInventoryCue =
+  | "color_continuity"
+  | "shape_continuity"
+  | "layering"
+  | "symmetry"
+  | "edge_boundary"
+  | "other";
+
+export interface AppearanceInventoryObservation {
+  readonly subject: AppearanceInventorySubject;
+  readonly cue: AppearanceInventoryCue;
+  readonly candidateRegionIds: readonly string[];
+  readonly confidence: number;
+  readonly description: string;
+}
+
+export interface AppearanceInventory {
+  readonly observations: readonly AppearanceInventoryObservation[];
+  readonly summary: string;
+}
+
 interface AnalysisProposalBase {
   readonly sourceRevisionId: string;
   readonly modelAssessment: {
@@ -60,16 +88,24 @@ interface AnalysisProposalBase {
   readonly summary: string;
 }
 
+export interface AnalysisProposalV1_2 extends AnalysisProposalBase {
+  readonly schemaVersion: "1.2";
+  readonly appearanceInventory: AppearanceInventory;
+  readonly components: readonly AnalysisProposalComponent[];
+  readonly reviewItems: readonly AnalysisReviewItem[];
+}
+
+/**
+ * Read compatibility for bounded-transfer proposals captured before M17 visual
+ * evidence and appearance inventory. New providers must emit AnalysisProposalV1_2.
+ */
 export interface AnalysisProposalV1_1 extends AnalysisProposalBase {
   readonly schemaVersion: "1.1";
   readonly components: readonly AnalysisProposalComponent[];
   readonly reviewItems: readonly AnalysisReviewItem[];
 }
 
-/**
- * Read compatibility for proposals captured before the bounded-transfer contract.
- * New providers must emit AnalysisProposalV1_1.
- */
+/** Read compatibility for proposals captured before bounded transfers. */
 export interface AnalysisProposalV1 extends AnalysisProposalBase {
   readonly schemaVersion: "1.0";
   readonly components: readonly LegacyAnalysisProposalComponent[];
@@ -90,7 +126,10 @@ export type LegacyAnalysisReviewItem = Omit<
   readonly suggestedCategories: readonly SemanticCategory[];
 };
 
-export type AnalysisProposal = AnalysisProposalV1 | AnalysisProposalV1_1;
+export type AnalysisProposal =
+  | AnalysisProposalV1
+  | AnalysisProposalV1_1
+  | AnalysisProposalV1_2;
 
 export interface ProposalValidationIssue {
   readonly code: string;
@@ -103,7 +142,8 @@ export interface ProposalValidationReport {
   readonly schemaVersion: "1.0";
   readonly validatorVersion:
     | "semantic-proposal-validator-v1"
-    | "semantic-proposal-validator-v2";
+    | "semantic-proposal-validator-v2"
+    | "semantic-proposal-validator-v3";
   readonly valid: boolean;
   readonly errors: readonly ProposalValidationIssue[];
   readonly warnings: readonly ProposalValidationIssue[];
@@ -119,11 +159,13 @@ export interface ProposalValidationReport {
     readonly overrideUniquePixelCount?: number;
     /** Present on validator v2 reports; optional only for stored v1 report compatibility. */
     readonly overrideSpanCount?: number;
+    /** Present on validator v3 reports; optional for stored v1/v2 compatibility. */
+    readonly appearanceObservationCount?: number;
   };
 }
 
 export interface ValidatedAnalysisProposal {
-  readonly proposal: AnalysisProposalV1_1;
+  readonly proposal: AnalysisProposalV1_2;
   readonly state: SemanticState;
   readonly report: ProposalValidationReport & { readonly valid: true };
 }

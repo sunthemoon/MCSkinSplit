@@ -23,23 +23,26 @@ selected Branch HEAD Revision
 The output Revision changes semantic segmentation only. Its `skin.png` is copied
 byte-for-byte from the input Revision.
 
-The current semantic runtime pins `mc-skin-segmenter` Skill `1.3.0`, prompt
-`semantic-proposal-v5-bounded-transfers`, proposal Schema `1.1`, taxonomy
+The current semantic runtime pins `mc-skin-segmenter` Skill `1.4.0`, prompt
+`semantic-proposal-v7-all-surface-grounding`, proposal Schema `1.2`, taxonomy
 `coarse-v2-no-unknown-components`, and validator
-`semantic-proposal-validator-v2`. Those values are stored on every new Job so a
-retry remains attributable to the contract that actually ran. Schema `1.0`
-proposal artifacts remain shape-readable for audit, but are read-only and cannot
-be submitted to the current validator.
+`semantic-proposal-validator-v3`. Those values are stored on every new Job so a
+retry remains attributable to the contract that actually ran. Schema `1.0` and
+`1.1` proposal artifacts remain shape-readable for audit, but are read-only and
+cannot be submitted to the current validator.
 
 ## Analysis workspace
 
 `packages/skin-analysis-pack` creates one private directory per Run. It contains:
 
 - `job.json` with input Revision, model, reasoning, arm type, and version pins;
-- `input/source.png`, a 16x Atlas, a gridded Atlas, a face Contact Sheet, and
-  front/back/left/right/isometric views;
+- `input/source.png`, a 16x Atlas, a gridded Atlas, a face Contact Sheet,
+  front/back/left/right views, and a truthful front/right contact image;
 - palette, full pixel map, compact candidate summary, complete candidate regions,
-  and previous segmentation documents;
+  full and compact Candidate Evidence Graph documents, a grounding manifest, and
+  previous segmentation documents;
+- paired composite/Base/Outer natural and candidate-region orthographic contact
+  sheets plus a stable visual-ID legend under `input/grounding/`;
 - a copied `.agents/skills/mc-skin-segmenter` Skill and proposal JSON Schema;
 - isolated `output/` and `logs/` directories.
 
@@ -52,6 +55,46 @@ The compact summary contains every candidate identifier but avoids placing the f
 pixel map in model context. A manifest hashes the source, all derived inputs, the
 schema, and the copied Skill. The worker verifies those hashes after model execution;
 input or Skill mutation invalidates the Run.
+
+### Candidate evidence and visual grounding
+
+M17 retains `bounded-color80-surface-cc-v2` as the exact, non-overlapping source
+partition. It builds a separate `CandidateEvidenceGraphDocument` Schema `1.0`
+using algorithm `candidate-evidence-graph-v1`. Each graph node keeps the exact
+CandidateRegion ID plus a stable display-only ID such as `R001`, body/surface/layer
+identity, Atlas and local bounding boxes, area/fill ratio, slenderness and principal
+axis, surface-edge pixel counts, and deterministic dominant-color family features.
+
+Graph edges are undirected host evidence with matched-texel counts, mapping IDs,
+dominant RGB distance, and any same-surface local distance. The only edge kinds
+are same-surface contact, same-surface Manhattan-distance-2 proximity, canonical UV
+seam, Base/Outer same-texel projection, and bilateral mirror. The builder does not
+treat nearby Atlas rectangles as neighbors and does not synthesize an unverifiable
+3D or cross-body relation. Long-hair continuity across head and torso therefore
+still depends on visible evidence in the attached views rather than an invented
+graph edge.
+
+Renderer `orthographic-candidate-regions-v2` produces front, back, left, and right
+views in a fixed manifest order. Composite, Base-only, and Outer-only natural-color
+contact sheets each have a matching candidate-region pseudocolor sheet. A labelled
+six-face sheet places natural color and CandidateRegion color side by side for
+front/back/left/right/top/bottom, while a pixel-aligned natural/candidate Atlas pair
+keeps exact UV lookup available. These inputs, the six four-direction grounding
+images, and the visual-ID legend form the ordered attachment contract. Separate
+natural and candidate face sheets remain hashed audit files but are not duplicate
+model attachments. The provider checks that attachment roles and actual paths agree
+before it starts the CLI.
+
+Only compact node/edge and grounding tables enter the prompt; the full graph and
+manifest remain integrity-hashed Run inputs. The provider rejects a semantic prompt
+above 300,000 characters before provider execution. Visual IDs and pseudocolors are
+lookup aids only: the proposal must return exact CandidateRegion IDs, may not invent
+edges, and remains subject to complete host ownership validation.
+
+Prompt v7 requires a separate top/bottom audit. Surface names describe cube
+geometry rather than anatomy, and vertical long-hair ownership may not be extended
+onto torso top/bottom from UV seams, adjacent-face labels, or similar color alone.
+Conflicting visible evidence is deferred for review.
 
 ### Clean and current semantic baselines
 
@@ -95,9 +138,9 @@ For semantic analysis, the adapter:
   `--ignore-rules`, JSONL events, attached analysis images, and a bounded timeout;
 - disables shell, web, browser, computer, image-generation, app, plugin, MCP,
   delegation, and related tool capabilities, and inherits no shell environment;
-- inlines the immutable public Job, compact candidate summary, palette,
-  classification rules, and only when requested the current component summary
-  through stdin. The model neither
+- inlines the immutable public Job, compact evidence graph, compact grounding and
+  attachment manifests, palette, classification rules, and only when requested the
+  current component summary through stdin. The model neither
   reads the workspace nor writes the proposal file; Codex captures its final
   response through `--output-last-message`;
 - resolves the Windows `codex.cmd` shim to the installed Node entry point instead
@@ -179,11 +222,17 @@ A proposal is accepted only when all of the following hold:
   boundary pixel to Unknown;
 - component masks plus `unknown` cover every visible valid UV pixel exactly once;
 - confidence below 0.65 produces `needs_review` rather than a confirmed component.
+- Schema 1.2 includes a same-response `appearanceInventory` with at most 32
+  Region-linked observations over visible evidence. Validator v3 checks its shape
+  and CandidateRegion references, but the inventory is not an ownership bucket and
+  cannot assign pixels, create masks, alter commit behavior, or affect the
+  deterministic follow-up.
 
 Validation errors are written to the Run log and can be supplied to one repair
-attempt. A repaired proposal must pass the complete validator again. Validator v2
+attempt. A repaired proposal must pass the complete validator again. Validator v3
 reports the total override span count and unique override pixel count so the
-bounded-transfer behavior remains auditable.
+bounded-transfer behavior remains auditable, together with the diagnostic
+appearance-observation count.
 
 ## Jobs, Runs, and audit assets
 
@@ -356,7 +405,7 @@ remained auditable; the bounded repair attempt succeeded and created the AI
 Revision.
 
 The browser observations below are historical M13-era evidence for prompt v3, not
-verification of the current `semantic-proposal-v5-bounded-transfers` contract.
+verification of the current `semantic-proposal-v7-all-surface-grounding` contract.
 
 On 2026-08-13, a separate real-browser run started from the Studio against
 `9058f3af3ffb104c.png` with `max` reasoning, Skill `1.2.0`, and the historical

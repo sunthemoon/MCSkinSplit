@@ -3,7 +3,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-const SCHEMA_VERSION = "1.1";
+const SCHEMA_VERSION = "1.2";
 const MAX_OVERRIDE_PIXELS = 64;
 const MAX_OVERRIDE_SPANS = 32;
 const COMPONENT_CATEGORIES = new Set([
@@ -12,6 +12,13 @@ const COMPONENT_CATEGORIES = new Set([
   "one_piece_clothing", "sleeve", "glove", "legwear", "shoe",
   "neck_accessory", "body_accessory", "waist_accessory", "arm_accessory",
   "leg_accessory", "back_accessory", "other_accessory",
+]);
+const APPEARANCE_SUBJECTS = new Set([
+  "hair", "clothing", "accessory", "face", "skin",
+]);
+const APPEARANCE_CUES = new Set([
+  "color_continuity", "shape_continuity", "layering", "symmetry",
+  "edge_boundary", "other",
 ]);
 
 const jobPath = resolve(process.argv[2] ?? "job.json");
@@ -35,6 +42,56 @@ if (proposal.sourceRevisionId !== job.sourceRevisionId) {
 }
 if (proposal.modelAssessment?.armType !== job.armType) {
   errors.push("modelAssessment.armType does not match job.json");
+}
+
+const appearanceObservations = proposal.appearanceInventory?.observations;
+if (!Array.isArray(appearanceObservations) || appearanceObservations.length > 32) {
+  errors.push("appearanceInventory.observations must contain at most 32 entries");
+} else {
+  for (const [index, observation] of appearanceObservations.entries()) {
+    if (!APPEARANCE_SUBJECTS.has(observation?.subject)) {
+      errors.push(`appearance observation ${index} has an unsupported subject`);
+    }
+    if (!APPEARANCE_CUES.has(observation?.cue)) {
+      errors.push(`appearance observation ${index} has an unsupported cue`);
+    }
+    if (
+      !Array.isArray(observation?.candidateRegionIds) ||
+      observation.candidateRegionIds.length < 1 ||
+      observation.candidateRegionIds.length > 32 ||
+      new Set(observation.candidateRegionIds).size !==
+        observation.candidateRegionIds.length
+    ) {
+      errors.push(`appearance observation ${index} has invalid candidateRegionIds`);
+    } else {
+      for (const id of observation.candidateRegionIds) {
+        if (!regionById.has(id)) {
+          errors.push(`appearance observation ${index} references unknown candidate region: ${id}`);
+        }
+      }
+    }
+    if (
+      typeof observation?.confidence !== "number" ||
+      observation.confidence < 0 ||
+      observation.confidence > 1
+    ) {
+      errors.push(`appearance observation ${index} has invalid confidence`);
+    }
+    if (
+      typeof observation?.description !== "string" ||
+      observation.description.length < 1 ||
+      observation.description.length > 160
+    ) {
+      errors.push(`appearance observation ${index} has invalid description`);
+    }
+  }
+}
+if (
+  typeof proposal.appearanceInventory?.summary !== "string" ||
+  proposal.appearanceInventory.summary.length < 1 ||
+  proposal.appearanceInventory.summary.length > 300
+) {
+  errors.push("appearanceInventory.summary must contain 1 to 300 characters");
 }
 
 for (const component of proposal.components ?? []) {
@@ -104,11 +161,14 @@ for (const [pixelId, destination] of addedByPixel) {
 
 const report = {
   schemaVersion: SCHEMA_VERSION,
-  validatorVersion: "skill-proposal-validator-v2",
+  validatorVersion: "skill-proposal-validator-v3",
   valid: errors.length === 0,
   errorCount: errors.length,
   overrideUniquePixelCount: uniqueOverridePixels.size,
   overrideSpanCount,
+  appearanceObservationCount: Array.isArray(appearanceObservations)
+    ? appearanceObservations.length
+    : 0,
   errors,
 };
 await mkdir(resolve(root, "logs"), { recursive: true });

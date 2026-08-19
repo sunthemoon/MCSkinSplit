@@ -377,10 +377,11 @@ plugins、MCP 与多代理等能力，附加经过确定性生成的皮肤视图
 stderr。默认单次响应通过 `--output-last-message` 捕获，最终 JSON 由宿主 Schema
 与像素归属 Validator 严格校验。兼容端点可通过 `AI_USE_OUTPUT_SCHEMA=true`
 显式加入 `--output-schema`；该模式发生结构化传输失败时才允许移除参数重试，
-并继续执行同一宿主校验。当前 Skill 版本为 `1.3.0`，prompt 版本为
-`semantic-proposal-v5-bounded-transfers`，proposal Schema 为 `1.1`，Validator
-为 `semantic-proposal-validator-v2`；v5 保留长发跨躯干与干净/现有语义基线，
-并要求所有少量像素调整采用有界、显式的组件间转移。
+并继续执行同一宿主校验。当前 Skill 版本为 `1.4.0`，prompt 版本为
+`semantic-proposal-v7-all-surface-grounding`，proposal Schema 为 `1.2`，Validator
+为 `semantic-proposal-validator-v3`；v7 保留长发跨躯干与干净/现有语义基线，
+加入紧凑 Candidate Evidence Graph、成对视觉 grounding 与诊断型
+`appearanceInventory`，并继续要求少量像素调整采用有界、显式的组件间转移。
 
 ### 方案 C：Responses API，部署型补充
 
@@ -432,10 +433,21 @@ runs/<run-id>/
 │   │   ├── back.png
 │   │   ├── left.png
 │   │   ├── right.png
-│   │   └── isometric.png
+│   │   └── front-right-contact.png
+│   ├── grounding/
+│   │   ├── composite-natural.png
+│   │   ├── composite-regions.png
+│   │   ├── base-natural.png
+│   │   ├── base-regions.png
+│   │   ├── outer-natural.png
+│   │   ├── outer-regions.png
+│   │   └── legend.png
 │   ├── pixel-map.json
 │   ├── palette.json
 │   ├── candidate-regions.json
+│   ├── candidate-evidence-graph.json
+│   ├── candidate-evidence-summary.json
+│   ├── candidate-grounding-manifest.json
 │   └── previous-segmentation.json
 ├── schema/
 │   └── analysis-proposal.schema.json
@@ -525,6 +537,24 @@ Torso Base: ...
 - 颜色调色板聚类。
 
 候选区域不需要天然等于最终部件。它们只是让 AI 不必手写大量坐标。
+
+### `candidate-evidence-graph.json` 与视觉 grounding
+
+M17 保持 `candidate-regions.json` 的精确分区不变，另建版本化
+`CandidateEvidenceGraphDocument`。节点为每个 Region 提供稳定视觉 ID、Surface、
+BodyPart、Layer、Face、Atlas/局部包围盒、面积与填充率、细长度、主轴、接触
+Surface 边的像素数，以及宿主计算的主色与颜色族。
+
+图边只来自可验证坐标映射：同 Surface 正交接触、局部曼哈顿距离 2、canonical
+UV seam、Base/Outer 同 texel 投影和左右镜像。Atlas 上看似相邻的矩形不会自动
+连边，也不生成未经验证的 3D 或跨 BodyPart 关系。图边只是分类证据，不表示两个
+Region 必然属于同一语义组件。
+
+视觉 grounding 以固定 front/back/left/right 顺序生成 composite、Base、Outer
+三组自然色与 Region 伪彩对照图，并附稳定 ID 图例。Provider 按角色清单接收
+Atlas grid、face Contact Sheet、六张对照图和图例；视觉 ID 只用于查图，模型
+输出仍必须使用精确 CandidateRegion ID。完整图进入分析包 Hash，Prompt 只内联
+紧凑摘要与 grounding 清单，并在超过 300,000 字符时于模型调用前拒绝。
 
 ---
 
@@ -2630,6 +2660,59 @@ feat(web): add responsive workflow navigation
 
 ---
 
+## M17：Candidate Evidence Graph 与视觉 grounding
+
+状态：**完成**。
+
+目标：提高跨 Surface 长发、裙摆、外套和饰品的 Region 归属质量，同时保持
+CandidateRegion 精确分区、Host 像素所有权和不可变 Revision 合同不变。
+
+实现：
+
+1. 增加 Schema `1.0` / `candidate-evidence-graph-v1`。节点记录稳定视觉 ID、
+   精确 Region ID、Surface/BodyPart/Layer/Face、局部与 Atlas 几何、面积填充、
+   细长度/主轴/Surface 边接触以及确定性颜色特征。
+2. 只生成宿主可验证的同 Surface 接触/距离、canonical UV seam、Base/Outer
+   同 texel 投影和左右镜像边。禁止 Atlas 折行伪邻接，也不发明隐藏 3D 或
+   head↔torso 语义边；跨部位连续性由同机位视觉证据判断。
+3. 分析包增加 front/back/left/right 的 composite、Base、Outer 自然色↔Region
+   伪彩对照图、稳定 ID 图例、grounding manifest 与严格有序附件角色；另提供
+   像素对齐的自然色/候选 Atlas，以及带行列标签的六面自然色↔Region 同图对照。
+   单独 face Contact Sheet 保留为哈希审计输入，不重复作为模型附件。
+4. 新 Job 使用 Skill `1.4.0`、Prompt
+   `semantic-proposal-v7-all-surface-grounding`、Proposal Schema `1.2` 和 Validator
+   `semantic-proposal-validator-v3`。Prompt 内联紧凑 graph/grounding manifest，
+   超过 300,000 字符则在 Provider 执行前失败。Schema `1.0`/`1.1` 仅历史读取；
+   旧 Skill/Prompt Job 的 Retry 必须改为从来源 Revision 发起新分析。
+   Prompt v7 对 top/bottom 单独复核：Surface 名称只描述方块几何，不能只凭
+   UV seam、相邻竖面分类或相似颜色把跨部位组件延伸到顶/底面。
+5. 同一 JSON 提案增加最多 32 条 `appearanceInventory` 可见证据观察。它只做
+   诊断，不属于所有权桶，不生成 Mask，不改变提交判断，也不驱动 M15 follow-up。
+6. Host 仍要求每个 CandidateRegion 唯一归属；边界修正继续执行 M16 的全提案
+   32 spans / 64 unique pixels 上限与成对 remove 规则。
+
+验证：
+
+- 全仓 fixture/typecheck/test/build 通过，共 344 项测试。
+- 对 `750fa4166940b473` 运行真实、干净基线、只读 Codex 分析；211 个 Region、
+  617 条图边通过 Validator v3，267/267 个已确认躯干长发像素归入 hair，且没有
+  创建 Revision。
+- 两个旧分类中的顶/底面差异经六面证据复核：head 底面归入 hair；歧义 torso
+  顶面进入 hair/upper_clothing 人工审核，没有再用 seam/颜色静默推断。
+- Studio 刷新后显示完成的六阶段流程、审核项与只读边界，新的页面日志没有应用
+  warning/error。
+
+边界：
+
+- M17 只改善可见像素的语义分类证据，不生成被遮挡的衣服、头发或身体像素。
+- M18 建立逐像素来源和 Part 2.0；M19 建立独立 Completion Proposal；M20
+  负责玩家优先 Completion 工作区；M21 负责离线评测与默认发布门。
+
+详细证据与验收项见
+[`audit/current-state-audit.md`](audit/current-state-audit.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2655,7 +2738,12 @@ feat(web): add responsive workflow navigation
 | S15 | M14 分析结果目录可逆归档 | S8、S12、S14 |
 | S16 | M15 玩家优先干净识别与分类修复 | S14、S15 |
 | S17 | M16 有界语义转移与不可变历史防护 | S16 |
-| S18 | 综合测试与审核 | 全部 |
+| S18 | M17 Candidate Evidence Graph 与视觉 grounding | S17 |
+| S19 | M18 逐像素来源与 Part 2.0 | S18 |
+| S20 | M19 独立隐藏内容 Completion Proposal 核心 | S19 |
+| S21 | M20 玩家优先工作区与高效人工校正 | S19、S20 |
+| S22 | M21 Completion 评测与发布门 | S20、S21 |
+| S23 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

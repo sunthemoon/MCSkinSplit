@@ -11,7 +11,10 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildAnalysisPack,
+  CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+  CANDIDATE_GROUNDING_RENDERER_VERSION,
   createAnalysisDocuments,
+  PROMPT_VERSION,
   verifyAnalysisPackIntegrity,
 } from "../src/index";
 
@@ -104,15 +107,119 @@ describe("analysis pack", () => {
     });
 
     expect(first.inputHash).toBe(second.inputHash);
+    expect(first.job.schemaVersion).toBe("1.1");
+    expect(first.job.promptVersion).toBe(PROMPT_VERSION);
     expect(first.job.semanticBaseline).toBe("current");
+    expect(first.job.candidateEvidenceGraphAlgorithmVersion).toBe(
+      CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+    );
+    expect(first.job.candidateGroundingRendererVersion).toBe(
+      CANDIDATE_GROUNDING_RENDERER_VERSION,
+    );
     expect(first.candidateRegions.visiblePixelCount).toBeGreaterThan(1_000);
-    expect(first.imagePaths).toHaveLength(5);
+    expect(first.candidateEvidenceGraph.nodeCount).toBe(
+      first.candidateRegions.regions.length,
+    );
+    expect(first.candidateEvidenceSummary.nodeCount).toBe(
+      first.candidateRegions.regions.length,
+    );
+    expect(first.candidateGroundingManifest.legend).toHaveLength(
+      first.candidateRegions.regions.length,
+    );
+    expect(first.imageAttachments.map((attachment) => attachment.role)).toEqual([
+      "atlas_grid",
+      "candidate_region_atlas",
+      "all_surface_natural_candidate_pair",
+      "orthographic_composite_natural",
+      "orthographic_composite_regions",
+      "orthographic_base_natural",
+      "orthographic_base_regions",
+      "orthographic_outer_natural",
+      "orthographic_outer_regions",
+      "candidate_region_legend",
+    ]);
+    expect(first.imagePaths).toEqual(
+      first.imageAttachments.map((attachment) => attachment.path),
+    );
+    expect(first.job.paths.candidateGroundingAtlas).toBe(
+      "input/grounding/candidate-atlas-16x.png",
+    );
+    expect(first.job.paths.candidateGroundingFaceContact).toBe(
+      "input/grounding/candidate-face-contact-sheet.png",
+    );
+    expect(first.job.paths.candidateGroundingAllSurfacePair).toBe(
+      "input/grounding/all-surface-natural-candidate-pair.png",
+    );
     expect(
       decodePngRgba(await readFile(resolve(firstRoot, "input/atlas-grid-16x.png"))),
     ).toMatchObject({ width: 1_024, height: 1_024 });
     expect(
+      decodePngRgba(
+        await readFile(
+          resolve(firstRoot, "input/grounding/candidate-atlas-16x.png"),
+        ),
+      ),
+    ).toMatchObject({ width: 1_024, height: 1_024 });
+    const naturalFaceContact = decodePngRgba(
+      await readFile(resolve(firstRoot, "input/face-contact-sheet.png")),
+    );
+    const candidateFaceContact = decodePngRgba(
+      await readFile(
+        resolve(firstRoot, "input/grounding/candidate-face-contact-sheet.png"),
+      ),
+    );
+    expect(candidateFaceContact).toMatchObject({
+      width: naturalFaceContact.width,
+      height: naturalFaceContact.height,
+    });
+    const pairedFaceContact = decodePngRgba(
+      await readFile(
+        resolve(
+          firstRoot,
+          "input/grounding/all-surface-natural-candidate-pair.png",
+        ),
+      ),
+    );
+    expect(pairedFaceContact).toMatchObject({ width: 1_008, height: 1_332 });
+    expect(first.fileHashes).toHaveProperty(
+      "input/grounding/candidate-atlas-16x.png",
+    );
+    expect(first.fileHashes).toHaveProperty(
+      "input/grounding/candidate-face-contact-sheet.png",
+    );
+    expect(first.fileHashes).toHaveProperty(
+      "input/grounding/all-surface-natural-candidate-pair.png",
+    );
+    expect(first.fileHashes["input/grounding/candidate-atlas-16x.png"]).toBe(
+      second.fileHashes["input/grounding/candidate-atlas-16x.png"],
+    );
+    expect(
+      first.fileHashes["input/grounding/candidate-face-contact-sheet.png"],
+    ).toBe(
+      second.fileHashes["input/grounding/candidate-face-contact-sheet.png"],
+    );
+    expect(
+      first.fileHashes[
+        "input/grounding/all-surface-natural-candidate-pair.png"
+      ],
+    ).toBe(
+      second.fileHashes[
+        "input/grounding/all-surface-natural-candidate-pair.png"
+      ],
+    );
+    expect(
       decodePngRgba(await readFile(resolve(firstRoot, "input/views/front.png"))),
     ).toMatchObject({ width: 144, height: 272 });
+    expect(
+      decodePngRgba(
+        await readFile(
+          resolve(firstRoot, "input/grounding/composite-regions.png"),
+        ),
+      ),
+    ).toMatchObject({ width: 304, height: 560 });
+    await expect(
+      readFile(resolve(firstRoot, "input/views/isometric.png")),
+    ).rejects.toThrow();
     expect(
       await readFile(
         resolve(
@@ -135,14 +242,25 @@ describe("analysis pack", () => {
 
     await expect(verifyAnalysisPackIntegrity(first)).resolves.toBeUndefined();
     await writeFile(
-      resolve(firstRoot, "input/candidate-regions.json"),
+      resolve(firstRoot, "input/candidate-evidence-graph.json"),
       "provider mutation",
       "utf8",
     );
     await expect(verifyAnalysisPackIntegrity(first)).rejects.toThrow(
-      "Analysis input file changed during provider run: input/candidate-regions.json",
+      "Analysis input file changed during provider run: input/candidate-evidence-graph.json",
     );
-  });
+    await writeFile(
+      resolve(
+        secondRoot,
+        "input/grounding/all-surface-natural-candidate-pair.png",
+      ),
+      "provider mutation",
+      "utf8",
+    );
+    await expect(verifyAnalysisPackIntegrity(second)).rejects.toThrow(
+      "Analysis input file changed during provider run: input/grounding/all-surface-natural-candidate-pair.png",
+    );
+  }, 15_000);
 
   it("includes the semantic baseline in the canonical job and input hash", async () => {
     const skinPng = new Uint8Array(

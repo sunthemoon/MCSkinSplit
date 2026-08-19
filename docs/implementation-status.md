@@ -23,6 +23,7 @@ Last updated: 2026-08-19
 | M14 analyzed-result catalog archive | Complete | Result-Revision-scoped archive/restore, default active visibility, non-cascading immutable history, and browser persistence |
 | M15 player-first clean analysis and classification repair | Complete | Default clean baseline, six-stage persistent flow, deterministic cross-body review, immutable repaired catalog variant, and real-browser confirmation |
 | M16 bounded semantic transfers and immutable history guards | Complete | Proposal 1.1 ownership rules, provenance-safe reanalysis rejection, and SQLite append-only enforcement |
+| M17 Candidate Evidence Graph and visual grounding | Complete | 344 automated checks, deterministic Wide/Slim graph/grounding coverage, real-provider target run, and Studio browser confirmation |
 
 ## M0 baseline
 
@@ -1063,3 +1064,82 @@ Last updated: 2026-08-19
   distinguish authorship that occurred before import.
 - M16 does not add CandidateRegion seam/3D evidence or hidden-content generation;
   those remain separately gated future milestones.
+
+## M17 deliverables
+
+- CandidateRegion generation and exact pixel ownership remain unchanged.
+  `CandidateEvidenceGraphDocument` Schema `1.0` / algorithm
+  `candidate-evidence-graph-v1` adds a stable visual ID and host-computed geometry,
+  area/fill, shape/slenderness, surface-edge contact, dominant-color family, and
+  color-distance evidence for every existing Region.
+- The graph contains only deterministic relations supported by canonical
+  coordinates: same-surface orthogonal contact, same-surface Manhattan-distance-2
+  proximity, canonical UV seams, Base/Outer same-texel projection, and bilateral
+  mirror mappings. Atlas rectangle proximity is not an edge, and M17 does not
+  invent perspective, hidden 3D, or head-to-torso semantic relations.
+- The analysis pack adds the full graph, a compact prompt summary, and a grounding
+  manifest. Its ordered model attachments are a pixel-aligned all-surface
+  natural/candidate Atlas pair, one labelled six-face natural/Region sheet,
+  composite/Base/Outer natural-to-candidate pairs for front/back/left/right
+  orthographic views, and the stable visual-ID legend. Separate face sheets remain
+  hashed audit inputs without duplicating model attachments.
+  The manifest hashes `job.json` and every generated input; the input hash also
+  binds the attachment roles, graph/renderer versions, and content hashes used for
+  cache identity.
+- The current semantic contract is Skill `1.4.0`, prompt
+  `semantic-proposal-v7-all-surface-grounding`, proposal Schema `1.2`, and validator
+  `semantic-proposal-validator-v3`. Schema `1.0` and `1.1` proposals remain
+  readable for audit only; a Job pinned to an older Skill/Prompt must start a fresh
+  analysis instead of being silently upgraded by Retry.
+- Prompt v7 inlines compact graph and grounding manifests, declares the exact
+  attachment order, and rejects an analysis prompt larger than 300,000 characters
+  before provider execution. Visual IDs are lookup labels only; proposals must
+  return exact CandidateRegion IDs and may use only supplied graph edges.
+  Top/bottom candidates receive a separate audit rule: Surface names are geometry,
+  and seams/color/adjacent vertical ownership alone cannot decide their category.
+- Schema 1.2 requires one same-pass `appearanceInventory` with at most 32 concise,
+  Region-linked observations over visible hair, clothing, accessory, face, or skin
+  evidence. It is diagnostic only: it does not assign ownership, create masks,
+  alter commit behavior, or feed the deterministic M15 follow-up.
+- Host authority is unchanged. Every CandidateRegion must still enter exactly one
+  ownership bucket, and proposal-wide pixel transfers remain capped at 32 spans
+  and 64 unique pixels with the M16 paired-remove rules.
+
+## M17 verification status
+
+- `pnpm verify` passes: fixture determinism, all workspace typechecks, 344 tests,
+  and all package builds. The only existing Vite warning is the known >500 kB
+  production chunk advisory.
+- A clean-baseline, read-only real Codex run against Project
+  `750fa4166940b473` succeeded as Job
+  `aijob_adca7e99606f4140af667dc6209bf93f` / Run
+  `airun_bc18a90b67d44551b4a2ebf92b769330` in about 426.7 seconds. It used Prompt
+  v7, 211 CandidateRegions, graph 617 edges, the labelled six-face pair, and
+  Validator v3; no provider error, fallback, or tool event occurred and no
+  Revision was created.
+- The target’s previously identified 267 visible torso long-hair pixels were all
+  assigned to hair. Three known exposed-skin torso Regions stayed out of hair;
+  `head.base.bottom` was recognized as hair, while the inherited ambiguous gray
+  `torso.base.top` label was conservatively sent to one hair-versus-clothing review
+  item instead of being silently propagated through seams/color. One mixed
+  front-head Region used the bounded transfer contract to move eight central face
+  pixels from hair to skin.
+- A real Studio reload loaded the persisted v7 Job on `main #1`, displayed the
+  completed six-step analysis, the 54% torso-top review, and the read-only result
+  boundary. A fresh-page console slice contained only Vite/React development
+  messages and no application warning or error.
+- During the first full verification attempt, the unrelated analyzed-catalog API
+  test crossed Vitest's 5-second timeout under concurrent model/test load. The
+  exact test then passed independently in 4.59 seconds, the full API package passed
+  13/13, and the final low-interference `pnpm verify` passed; no unrelated timeout
+  change was included in M17.
+
+## M17 boundaries
+
+- Graph edges are geometric evidence, not semantic truth. Cross-body long-hair
+  continuity must still be judged from the paired visual grounding; no unverified
+  cross-body or 3D edge is synthesized.
+- `appearanceInventory` describes visible evidence only. It does not reconstruct
+  pixels hidden by hair or accessories and does not introduce another model pass.
+- Per-pixel origin, Part 2.0, hidden-content Completion proposals, player-first
+  Completion UX, and the Completion release gate remain M18-M21 work respectively.

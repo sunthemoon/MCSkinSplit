@@ -1976,11 +1976,15 @@ class ApiAiProvider implements SkinSemanticAiProvider {
 function apiProposal(input: ProviderAnalysisInput): AnalysisProposal {
   const regions = input.pack.candidateRegions.regions;
   return {
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     sourceRevisionId: input.pack.job.sourceRevisionId,
     modelAssessment: {
       armType: input.pack.job.armType,
       confidence: 0.95,
+    },
+    appearanceInventory: {
+      observations: [],
+      summary: "API 测试未记录额外外观观察。",
     },
     components: [
       {

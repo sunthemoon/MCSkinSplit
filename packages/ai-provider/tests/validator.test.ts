@@ -7,15 +7,20 @@ import {
   getSkinLayout,
 } from "@mc-skin-split/skin-core";
 import {
+  CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+  CANDIDATE_GROUNDING_RENDERER_VERSION,
   CANDIDATE_REGION_ALGORITHM_VERSION,
   PROMPT_VERSION,
   TAXONOMY_VERSION,
+  buildCandidateEvidenceGraph,
   createAnalysisDocuments,
+  createCandidateEvidenceGraphSummary,
+  renderCandidateRegionGrounding,
   type AnalysisPack,
 } from "@mc-skin-split/skin-analysis-pack";
 import { describe, expect, it } from "vitest";
 import { ANALYSIS_PROPOSAL_SCHEMA } from "../src/schema";
-import type { AnalysisProposal, AnalysisProposalV1_1 } from "../src/types";
+import type { AnalysisProposal, AnalysisProposalV1_2 } from "../src/types";
 import {
   isAnalysisProposalArtifact,
   validateAnalysisProposal,
@@ -139,7 +144,7 @@ describe("analysis proposal validator", () => {
       (region) => region.pixelCount > 1,
     )!;
     const pixelId = sourceRegion.pixelIds[0]!;
-    const proposal: AnalysisProposalV1_1 = {
+    const proposal: AnalysisProposalV1_2 = {
       ...proposalFor(pack),
       components: [componentFor("source.main", "Source", [sourceRegion.id], {
         remove: [spanFor(pixelId)],
@@ -168,7 +173,7 @@ describe("analysis proposal validator", () => {
     const { pack, image } = await fixturePack();
     const [ownedRegion, unassignedRegion] = transferRegions(pack);
     const unassignedPixel = unassignedRegion.pixelIds[0]!;
-    const proposal: AnalysisProposalV1_1 = {
+    const proposal: AnalysisProposalV1_2 = {
       ...proposalFor(pack),
       components: [componentFor("destination.main", "Destination", [ownedRegion.id], {
         add: [spanFor(unassignedPixel)],
@@ -201,7 +206,7 @@ describe("analysis proposal validator", () => {
       pack.candidateRegions.regions.flatMap((region) => region.pixelIds),
     )].sort((left, right) => left - right);
     const allRegionIds = pack.candidateRegions.regions.map((region) => region.id);
-    const pixelLimited: AnalysisProposalV1_1 = {
+    const pixelLimited: AnalysisProposalV1_2 = {
       ...proposalFor(pack),
       components: [componentFor("all.main", "All", allRegionIds, {
         add: [],
@@ -222,7 +227,7 @@ describe("analysis proposal validator", () => {
     );
     expect(pixelResult.report.stats.overrideUniquePixelCount).toBe(65);
 
-    const spanLimited: AnalysisProposalV1_1 = {
+    const spanLimited: AnalysisProposalV1_2 = {
       ...pixelLimited,
       components: [componentFor("all.main", "All", allRegionIds, {
         add: visiblePixels.slice(17, 33).map(spanFor),
@@ -246,7 +251,7 @@ describe("analysis proposal validator", () => {
     const visiblePixels = [...new Set(
       pack.candidateRegions.regions.flatMap((region) => region.pixelIds),
     )].sort((left, right) => left - right);
-    const proposal: AnalysisProposalV1_1 = {
+    const proposal: AnalysisProposalV1_2 = {
       ...proposalFor(pack),
       components: [componentFor(
         "all.main",
@@ -267,10 +272,24 @@ describe("analysis proposal validator", () => {
     expect(result.report.errors.map((error) => error.code)).toContain("SCHEMA_INVALID");
   });
 
-  it("reads legacy 1.0 artifact shapes without accepting them as new submissions", async () => {
+  it("reads historical 1.0 and 1.1 artifact shapes without accepting them as new submissions", async () => {
     const { pack, image } = await fixturePack();
     const current = proposalFor(pack);
-    const legacy: AnalysisProposal = { ...current, schemaVersion: "1.0" };
+    const { appearanceInventory: _appearanceInventory, ...historicalShape } = current;
+    void _appearanceInventory;
+    const previous: AnalysisProposal = { ...historicalShape, schemaVersion: "1.1" };
+    const legacy: AnalysisProposal = { ...historicalShape, schemaVersion: "1.0" };
+    expect(isAnalysisProposalArtifact(previous)).toBe(true);
+    const previousResult = validateAnalysisProposal({
+      proposal: previous,
+      pack,
+      image,
+      aiRunId: "run_previous",
+    });
+    expect(previousResult.report.valid).toBe(false);
+    expect(previousResult.report.errors.map((error) => error.code)).toContain(
+      "LEGACY_PROPOSAL_READ_ONLY",
+    );
     const legacyResult = validateAnalysisProposal({
       proposal: legacy,
       pack,
@@ -329,6 +348,102 @@ describe("analysis proposal validator", () => {
     expect(result.report.errors.map((error) => error.code)).toContain("SCHEMA_INVALID");
   });
 
+  it("requires the bounded appearance inventory in schema 1.2", async () => {
+    const { pack, image } = await fixturePack();
+    const proposal = proposalFor(pack);
+    const { appearanceInventory: _appearanceInventory, ...withoutInventory } =
+      proposal;
+    void _appearanceInventory;
+
+    const missing = validateAnalysisProposal({
+      proposal: withoutInventory,
+      pack,
+      image,
+      aiRunId: "run_appearance_missing",
+    });
+    expect(missing.report.errors.map((error) => error.code)).toContain(
+      "SCHEMA_INVALID",
+    );
+
+    const oversized = validateAnalysisProposal({
+      proposal: {
+        ...proposal,
+        appearanceInventory: {
+          ...proposal.appearanceInventory,
+          observations: Array.from(
+            { length: 33 },
+            () => proposal.appearanceInventory.observations[0]!,
+          ),
+        },
+      },
+      pack,
+      image,
+      aiRunId: "run_appearance_oversized",
+    });
+    expect(oversized.report.errors.map((error) => error.code)).toContain(
+      "SCHEMA_INVALID",
+    );
+  });
+
+  it("validates diagnostic appearance observations without changing Region ownership", async () => {
+    const { pack, image } = await fixturePack();
+    const proposal = proposalFor(pack);
+    const regionId = pack.candidateRegions.regions[0]!.id;
+    const repeatedEvidence: AnalysisProposalV1_2 = {
+      ...proposal,
+      appearanceInventory: {
+        summary: "Hair and clothing use a visible boundary.",
+        observations: [
+          {
+            subject: "hair",
+            cue: "shape_continuity",
+            candidateRegionIds: [regionId],
+            confidence: 0.8,
+            description: "The region follows the visible hair silhouette.",
+          },
+          {
+            subject: "clothing",
+            cue: "edge_boundary",
+            candidateRegionIds: [regionId],
+            confidence: 0.4,
+            description: "The same boundary remains ambiguous against clothing.",
+          },
+        ],
+      },
+    };
+
+    const valid = validateAnalysisProposal({
+      proposal: repeatedEvidence,
+      pack,
+      image,
+      aiRunId: "run_appearance",
+    });
+    expect(valid.report.valid).toBe(true);
+    expect(valid.report.stats.appearanceObservationCount).toBe(2);
+    expect(valid.report.stats.assignedPixelCount).toBe(
+      pack.candidateRegions.regions[0]!.pixelCount,
+    );
+
+    const invalid = validateAnalysisProposal({
+      proposal: {
+        ...proposal,
+        appearanceInventory: {
+          ...proposal.appearanceInventory,
+          observations: [{
+            ...proposal.appearanceInventory.observations[0]!,
+            candidateRegionIds: ["region_missing_appearance_001"],
+          }],
+        },
+      },
+      pack,
+      image,
+      aiRunId: "run_appearance_invalid",
+    });
+    expect(invalid.report.errors.map((error) => error.code)).toContain(
+      "UNKNOWN_APPEARANCE_REGION",
+    );
+  });
+
   it("keeps the repository Skill schema byte-for-byte equivalent", async () => {
     const skillSchema = JSON.parse(
       await readFile(
@@ -360,8 +475,16 @@ async function fixturePack(): Promise<{
     armType: "slim",
     image,
   }).document;
+  const candidateEvidenceGraph = buildCandidateEvidenceGraph(
+    documents.candidateRegions,
+  );
+  const candidateGrounding = renderCandidateRegionGrounding(
+    image,
+    "slim",
+    documents.candidateRegions,
+  );
   const job: AnalysisPack["job"] = {
-    schemaVersion: "1.0" as const,
+    schemaVersion: "1.1" as const,
     jobId: "job_1",
     runId: "run_1",
     projectId: "project_1",
@@ -378,10 +501,14 @@ async function fixturePack(): Promise<{
     focus: ["hair"] as const,
     createRevisionOnSuccess: true,
     candidateRegionAlgorithmVersion: CANDIDATE_REGION_ALGORITHM_VERSION,
+    candidateEvidenceGraphAlgorithmVersion:
+      CANDIDATE_EVIDENCE_GRAPH_ALGORITHM_VERSION,
+    candidateGroundingRendererVersion: CANDIDATE_GROUNDING_RENDERER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
     skillName: "mc-skin-segmenter" as const,
-    skillVersion: "1.0.0",
+    skillVersion: "1.4.0",
     promptVersion: PROMPT_VERSION,
+    imageAttachments: [],
     paths: {
       source: "input/source.png" as const,
       atlas: "input/atlas-16x.png" as const,
@@ -391,6 +518,28 @@ async function fixturePack(): Promise<{
       palette: "input/palette.json" as const,
       candidateSummary: "input/candidate-summary.json" as const,
       candidateRegions: "input/candidate-regions.json" as const,
+      candidateEvidenceGraph: "input/candidate-evidence-graph.json" as const,
+      candidateEvidenceSummary: "input/candidate-evidence-summary.json" as const,
+      candidateGroundingManifest: "input/candidate-grounding-manifest.json" as const,
+      candidateGroundingAtlas:
+        "input/grounding/candidate-atlas-16x.png" as const,
+      candidateGroundingFaceContact:
+        "input/grounding/candidate-face-contact-sheet.png" as const,
+      candidateGroundingAllSurfacePair:
+        "input/grounding/all-surface-natural-candidate-pair.png" as const,
+      candidateGroundingLegend: "input/grounding/legend.png" as const,
+      candidateGroundingCompositeNatural:
+        "input/grounding/composite-natural.png" as const,
+      candidateGroundingCompositeRegions:
+        "input/grounding/composite-regions.png" as const,
+      candidateGroundingBaseNatural:
+        "input/grounding/base-natural.png" as const,
+      candidateGroundingBaseRegions:
+        "input/grounding/base-regions.png" as const,
+      candidateGroundingOuterNatural:
+        "input/grounding/outer-natural.png" as const,
+      candidateGroundingOuterRegions:
+        "input/grounding/outer-regions.png" as const,
       previousSegmentation: "input/previous-segmentation.json" as const,
       outputSchema: "schema/analysis-proposal.schema.json" as const,
       proposal: "output/analysis-proposal.json" as const,
@@ -403,22 +552,37 @@ async function fixturePack(): Promise<{
       workspaceDirectory: "C:/isolated/run",
       job,
       candidateRegions: documents.candidateRegions,
+      candidateEvidenceGraph,
+      candidateEvidenceSummary:
+        createCandidateEvidenceGraphSummary(candidateEvidenceGraph),
+      candidateGroundingManifest: candidateGrounding.manifest,
       pixelMap: documents.pixelMap,
       palette: documents.palette,
       previousSegmentation: previous,
       inputHash: `sha256:${"3".repeat(64)}`,
       fileHashes: {},
+      imageAttachments: [],
       imagePaths: [],
     },
   };
 }
 
-function proposalFor(pack: AnalysisPack): AnalysisProposalV1_1 {
+function proposalFor(pack: AnalysisPack): AnalysisProposalV1_2 {
   const first = pack.candidateRegions.regions[0]!;
   return {
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     sourceRevisionId: pack.job.sourceRevisionId,
     modelAssessment: { armType: pack.job.armType, confidence: 0.9 },
+    appearanceInventory: {
+      observations: [{
+        subject: "hair",
+        cue: "color_continuity",
+        candidateRegionIds: [first.id],
+        confidence: 0.7,
+        description: "The region shares a visible hair color family.",
+      }],
+      summary: "One bounded appearance observation is available.",
+    },
     components: [
       {
         instanceId: "hair.main",
@@ -460,7 +624,7 @@ function transferProposal(
   sourceRegionId: string,
   destinationRegionId: string,
   pixelId: number,
-): AnalysisProposalV1_1 {
+): AnalysisProposalV1_2 {
   return {
     ...proposalFor(pack),
     components: [
@@ -483,8 +647,8 @@ function componentFor(
   instanceId: string,
   displayName: string,
   candidateRegionIds: readonly string[],
-  pixelOverrides: AnalysisProposalV1_1["components"][number]["pixelOverrides"],
-): AnalysisProposalV1_1["components"][number] {
+  pixelOverrides: AnalysisProposalV1_2["components"][number]["pixelOverrides"],
+): AnalysisProposalV1_2["components"][number] {
   return {
     instanceId,
     displayName,
