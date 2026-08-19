@@ -470,11 +470,15 @@ that component review is complete. The live event list remains the detailed reco
 beneath this outline. Paired tool rows and recoverable warnings reduce duplicate
 noise without changing stored event history.
 
-M15 does not generate pixels hidden by clothing, long hair, or accessories. It
-cannot infer the factual back of a covered garment or reconstruct hair hidden on
-both sides. Generated/inferred texture completion requires a future provenance-
-aware candidate and review workflow; until then, manual component repair and
-Composition restoration remain the explicit authored alternatives.
+M15 semantic analysis does not generate pixels hidden by clothing, long hair, or
+accessories, and it cannot infer the factual back of a covered garment or
+reconstruct hair hidden on both sides. M19 implements a separate,
+provenance-aware Completion Proposal service: the host owns candidate pixels and
+an optional dedicated AI task may only rank existing candidate IDs. Every result
+still requires an explicit user accept/reject decision. This is not an extension
+of the semantic-analysis proposal or its follow-up. See
+[`hidden-content-completion.md`](hidden-content-completion.md) for the completed
+service and API contract; its player UI and default release gate remain M20/M21.
 
 ## Constrained replacement recommendation
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import { decodeSkinPng, getPixel } from "@mc-skin-split/skin-core";
 import type {
   AnalysisProposal,
+  CompletionRankingProposal,
   ProviderAnalysisInput,
   ProviderAnalysisResult,
+  ProviderCompletionRankingInput,
+  ProviderCompletionRankingResult,
   ProviderReplacementInput,
   ProviderReplacementResult,
   ReplacementPlanProposal,
@@ -14,7 +18,7 @@ import type {
 } from "@mc-skin-split/ai-provider";
 import { RevisionStore } from "@mc-skin-split/skin-revision";
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApi } from "../src/app";
 
 const REAL_SKIN_PATH = fileURLToPath(
@@ -45,6 +49,7 @@ afterEach(async () => {
       rm(directory, { force: true, recursive: true }),
     ),
   );
+  vi.unstubAllEnvs();
 });
 
 describe("revision API", () => {
@@ -1610,6 +1615,7 @@ describe("revision API", () => {
     expect(providers.statusCode).toBe(200);
     expect(providers.json()).toMatchObject({
       providers: ["provider-a", "provider-b"],
+      completionRankingProviders: ["provider-a", "provider-b"],
     });
 
     const started = await app.inject({
@@ -1731,6 +1737,399 @@ describe("revision API", () => {
     expect(invalid.statusCode).toBe(400);
     expect(invalid.json()).toMatchObject({
       error: { code: "INVALID_REQUEST" },
+    });
+  });
+
+  it("lists, accepts, rejects, and idempotently replays completion decisions", async () => {
+    const provider = new ApiAiProvider("unused-completion-provider");
+    const { app } = await createApi([provider]);
+    const project = await createProject(app, "Completion API");
+    const imported = await importSkin(app, project.projectId);
+    const target = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "clothing.completion",
+          displayName: "待补全衣服",
+          category: "upper_clothing",
+        },
+        spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+      },
+    });
+    expect(target.statusCode).toBe(201);
+    const occluder = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${target.json<MutationResponse>().revision.id}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: {
+          instanceId: "hair.occluder",
+          displayName: "遮挡头发",
+          category: "hair",
+        },
+        spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+      },
+    });
+    expect(occluder.statusCode).toBe(201);
+    const sourceRevisionId = occluder.json<MutationResponse>().revision.id;
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/completion-proposals`,
+      payload: {
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "latent_component",
+        generatedMask: [1],
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/completion-proposals`,
+      payload: {
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "latent_component",
+      },
+    });
+    expect(started.statusCode).toBe(202);
+    const jobId = started.json<{ job: { id: string } }>().job.id;
+    const job = await waitForAiJob(app, jobId);
+    expect(job.job).toMatchObject({
+      kind: "completion_proposal",
+      status: "succeeded",
+      provider: "deterministic_host",
+      model: "completion-candidates-v1",
+      resultRevisionId: null,
+    });
+    expect(job.runs).toEqual([]);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals?revisionId=${sourceRevisionId}&jobId=${jobId}`,
+    });
+    expect(listed.statusCode).toBe(200);
+    const proposalSummary = listed.json<{
+      proposals: readonly {
+        proposal: {
+          id: string;
+          sourceResultHash: string;
+          proposalHash: string;
+          evidenceHash: string;
+          allowedGeneratedPixelCount: number;
+        };
+      }[];
+    }>().proposals[0]!;
+    expect(proposalSummary).toMatchObject({
+      status: "awaiting_decision",
+      candidateCount: expect.any(Number),
+      ranking: null,
+    });
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${proposalSummary.proposal.id}`,
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    const detail = detailResponse.json<{
+      proposal: {
+        id: string;
+        sourceResultHash: string;
+        proposalHash: string;
+        evidenceHash: string;
+        allowedGeneratedPixelCount: number;
+        allowedMask: { sha256: string };
+      };
+      status: string;
+      candidateCount: number;
+      candidates: readonly {
+        id: string;
+        candidateHash: string;
+        reviewRequired: boolean;
+        automaticAcceptanceAllowed: boolean;
+        document: { sha256: string };
+        texture: { sha256: string };
+        writeMask: { sha256: string };
+        generatedMask: { sha256: string };
+      }[];
+      decision: null;
+      result: null;
+      ranking: null;
+      document?: unknown;
+    }>();
+    expect(detail.document).toBeUndefined();
+    expect(detail.proposal.allowedGeneratedPixelCount).toBeGreaterThan(0);
+    expect(detail.candidates.length).toBeGreaterThan(0);
+    const candidate = detail.candidates[0]!;
+    expect(candidate).toMatchObject({
+      reviewRequired: true,
+      automaticAcceptanceAllowed: false,
+    });
+
+    const allowedMask = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${detail.proposal.id}/allowed-mask.png`,
+    });
+    expect(allowedMask.statusCode).toBe(200);
+    expect(allowedMask.headers["content-type"]).toContain("image/png");
+    expect(allowedMask.headers.etag).toBe(`"${detail.proposal.allowedMask.sha256}"`);
+    expect(allowedMask.headers["cache-control"]).toContain("immutable");
+    expect(sha256Bytes(allowedMask.rawPayload)).toBe(
+      detail.proposal.allowedMask.sha256,
+    );
+    const notModified = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${detail.proposal.id}/allowed-mask.png`,
+      headers: { "if-none-match": `W/"${detail.proposal.allowedMask.sha256}"` },
+    });
+    expect(notModified.statusCode).toBe(304);
+    expect(notModified.rawPayload).toHaveLength(0);
+
+    const candidateAssets = [
+      ["candidate.json", candidate.document.sha256, "application/json"],
+      ["texture.png", candidate.texture.sha256, "image/png"],
+      ["write-mask.png", candidate.writeMask.sha256, "image/png"],
+      ["generated-mask.png", candidate.generatedMask.sha256, "image/png"],
+    ] as const;
+    for (const [fileName, expectedHash, expectedMime] of candidateAssets) {
+      const asset = await app.inject({
+        method: "GET",
+        url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/${fileName}`,
+      });
+      expect(asset.statusCode).toBe(200);
+      expect(asset.headers["content-type"]).toContain(expectedMime);
+      expect(asset.headers.etag).toBe(`"${expectedHash}"`);
+      expect(asset.headers["cache-control"]).toContain("immutable");
+      expect(sha256Bytes(asset.rawPayload)).toBe(expectedHash);
+    }
+
+    const mismatchedCandidate = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/completioncandidate_missing/texture.png`,
+    });
+    expect(mismatchedCandidate.statusCode).toBe(404);
+    expect(mismatchedCandidate.json()).toMatchObject({
+      error: { code: "COMPLETION_CANDIDATE_NOT_FOUND" },
+    });
+
+    const acceptPayload = {
+      expectedSourceResultHash: detail.proposal.sourceResultHash,
+      expectedProposalHash: detail.proposal.proposalHash,
+      expectedEvidenceHash: detail.proposal.evidenceHash,
+      expectedCandidateHash: candidate.candidateHash,
+      actorId: "api-reviewer",
+      summary: "接受隐藏内容候选",
+    };
+    const staleAccept = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      payload: {
+        ...acceptPayload,
+        expectedProposalHash: `sha256:${"0".repeat(64)}`,
+      },
+    });
+    expect(staleAccept.statusCode).toBe(409);
+    expect(staleAccept.json()).toMatchObject({
+      error: { code: "CONFLICT" },
+    });
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      payload: acceptPayload,
+    });
+    expect(accepted.statusCode).toBe(201);
+    const acceptedBody = accepted.json<{
+      result: { latentPart: { id: string } };
+    }>();
+    expect(acceptedBody).toMatchObject({
+      changed: true,
+      status: "accepted",
+      decision: { action: "accept", candidateId: candidate.id },
+      result: {
+        representation: "latent_component",
+        revision: null,
+        latentPart: { id: expect.any(String) },
+        publishedAt: null,
+      },
+    });
+    const partsAfterAccept = await app.inject({
+      method: "GET",
+      url: `/api/parts?projectId=${project.projectId}`,
+    });
+    expect(partsAfterAccept.statusCode).toBe(200);
+    expect(
+      partsAfterAccept.json<{ parts: readonly { id: string }[] }>().parts.map(
+        (part) => part.id,
+      ),
+    ).not.toContain(acceptedBody.result.latentPart.id);
+    const repeatedAccept = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      payload: acceptPayload,
+    });
+    expect(repeatedAccept.statusCode).toBe(200);
+    expect(repeatedAccept.json()).toMatchObject({ changed: false });
+
+    const conflictingReject = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/reject`,
+      payload: {
+        expectedSourceResultHash: detail.proposal.sourceResultHash,
+        expectedProposalHash: detail.proposal.proposalHash,
+        expectedEvidenceHash: detail.proposal.evidenceHash,
+      },
+    });
+    expect(conflictingReject.statusCode).toBe(409);
+
+    const succeededRetry = await app.inject({
+      method: "POST",
+      url: `/api/ai-jobs/${jobId}/retry`,
+      payload: {},
+    });
+    expect(succeededRetry.statusCode).toBe(409);
+    expect(succeededRetry.json()).toMatchObject({
+      error: { code: "COMPLETION_RETRY_UNSUPPORTED" },
+    });
+
+    const rejectStarted = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/completion-proposals`,
+      payload: {
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "auto",
+      },
+    });
+    expect(rejectStarted.statusCode).toBe(202);
+    const rejectJobId = rejectStarted.json<{ job: { id: string } }>().job.id;
+    expect((await waitForAiJob(app, rejectJobId)).job.status).toBe("succeeded");
+    const awaiting = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals?revisionId=${sourceRevisionId}&status=awaiting_decision`,
+    });
+    expect(awaiting.statusCode).toBe(200);
+    const rejectProposal = awaiting.json<{
+      proposals: readonly {
+        proposal: {
+          id: string;
+          sourceResultHash: string;
+          proposalHash: string;
+          evidenceHash: string;
+        };
+      }[];
+    }>().proposals[0]!.proposal;
+    const rejectDetailResponse = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${rejectProposal.id}`,
+    });
+    expect(rejectDetailResponse.statusCode).toBe(200);
+    const rejectCandidateId = rejectDetailResponse.json<{
+      candidates: readonly { id: string }[];
+    }>().candidates[0]!.id;
+    const crossProposalAsset = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${rejectCandidateId}/texture.png`,
+    });
+    expect(crossProposalAsset.statusCode).toBe(404);
+    expect(crossProposalAsset.json()).toMatchObject({
+      error: { code: "COMPLETION_CANDIDATE_NOT_FOUND" },
+    });
+    const rejectPayload = {
+      expectedSourceResultHash: rejectProposal.sourceResultHash,
+      expectedProposalHash: rejectProposal.proposalHash,
+      expectedEvidenceHash: rejectProposal.evidenceHash,
+      reason: "保留原始内容",
+    };
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${rejectProposal.id}/reject`,
+      payload: rejectPayload,
+    });
+    expect(rejected.statusCode).toBe(201);
+    expect(rejected.json()).toMatchObject({
+      changed: true,
+      status: "rejected",
+      decision: { action: "reject", candidateId: null },
+      result: null,
+    });
+    const repeatedReject = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${rejectProposal.id}/reject`,
+      payload: rejectPayload,
+    });
+    expect(repeatedReject.statusCode).toBe(200);
+    expect(repeatedReject.json()).toMatchObject({ changed: false });
+  });
+
+  it("enables advisory completion ranking only through server configuration", async () => {
+    const provider = new ApiAiProvider("api-completion-ranker");
+    vi.stubEnv("AI_COMPLETION_RANKING", "true");
+    vi.stubEnv("AI_COMPLETION_RANKING_PROVIDER", provider.providerName);
+    vi.stubEnv("AI_COMPLETION_RANKING_MODEL", "api-ranking-model");
+    vi.stubEnv("AI_COMPLETION_RANKING_REASONING_EFFORT", "high");
+    const { app } = await createApi([provider]);
+    const { sourceRevisionId } = await createCompletionApiFixture(
+      app,
+      "Ranked completion API",
+    );
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${sourceRevisionId}/completion-proposals`,
+      payload: {
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "latent_component",
+      },
+    });
+    expect(started.statusCode).toBe(202);
+    const jobId = started.json<{ job: { id: string } }>().job.id;
+    const finished = await waitForAiJob(app, jobId);
+    expect(finished.job).toMatchObject({
+      status: "succeeded",
+      provider: provider.providerName,
+      model: "api-ranking-model",
+      resultRevisionId: null,
+      options: { rankingMode: "ai", reasoningEffort: "high" },
+    });
+    expect(finished.runs).toHaveLength(1);
+    expect(finished.runs[0]).toMatchObject({ status: "succeeded" });
+    expect(provider.rankingCalls).toBe(1);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals?jobId=${jobId}`,
+    });
+    expect(listed.statusCode).toBe(200);
+    const proposal = listed.json<{
+      proposals: readonly {
+        readonly proposal: { readonly id: string };
+      }[];
+    }>().proposals[0]!;
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${proposal.proposal.id}`,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      status: "awaiting_decision",
+      decision: null,
+      result: null,
+      ranking: {
+        provider: provider.providerName,
+        model: "api-ranking-model",
+        reasoningEffort: "high",
+        document: {
+          jobId,
+          proposalId: proposal.proposal.id,
+          recommendation: { status: "recommend" },
+        },
+      },
     });
   });
 
@@ -1991,7 +2390,11 @@ interface AiJobApiDetail {
     readonly model: string;
     readonly proposalSummary: string | null;
     readonly advisoryResult: ReplacementPlanProposal | null;
-    readonly options: { readonly semanticBaseline?: "empty" | "current" };
+    readonly options: {
+      readonly semanticBaseline?: "empty" | "current";
+      readonly rankingMode?: "host_only" | "ai";
+      readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+    };
   };
   readonly runs: readonly {
     readonly status: string;
@@ -2025,6 +2428,8 @@ async function waitForAiJob(
 }
 
 class ApiAiProvider implements SkinSemanticAiProvider {
+  rankingCalls = 0;
+
   constructor(readonly providerName: string) {}
 
   async analyze(input: ProviderAnalysisInput): Promise<ProviderAnalysisResult> {
@@ -2107,6 +2512,21 @@ class ApiAiProvider implements SkinSemanticAiProvider {
       usage: { input_tokens: 16, output_tokens: 8 },
     };
   }
+
+  async rankCompletion(
+    input: ProviderCompletionRankingInput,
+  ): Promise<ProviderCompletionRankingResult> {
+    this.rankingCalls += 1;
+    const proposal = apiCompletionRankingProposal(input);
+    return {
+      proposal,
+      rawEvents:
+        `${JSON.stringify({ type: "thread.started", thread_id: `${this.providerName}-completion-thread` })}\n`,
+      stderr: "",
+      threadId: `${this.providerName}-completion-thread`,
+      usage: { input_tokens: 18, output_tokens: 9 },
+    };
+  }
 }
 
 function apiProposal(input: ProviderAnalysisInput): AnalysisProposal {
@@ -2143,6 +2563,84 @@ function apiProposal(input: ProviderAnalysisInput): AnalysisProposal {
     reviewItems: [],
     summary: "API AI 提案",
   };
+}
+
+function apiCompletionRankingProposal(
+  input: ProviderCompletionRankingInput,
+): CompletionRankingProposal {
+  const candidateIds = input.pack.evidence.candidates.map(
+    ({ candidateId }) => candidateId,
+  );
+  return {
+    schemaVersion: "1.0",
+    jobId: input.jobId,
+    proposalId: input.pack.evidence.proposalId,
+    proposalHash: input.pack.evidence.proposalHash,
+    sourceRevisionId: input.pack.evidence.sourceRevisionId,
+    sourceResultHash: input.pack.evidence.sourceResultHash,
+    sourceSkinHash: input.pack.evidence.sourceSkinHash,
+    rankings: candidateIds.map((candidateId) => ({
+      candidateId,
+      confidence: 0.8,
+      explanation: "Visible continuity supports this ordering.",
+    })),
+    recommendation: candidateIds[0]
+      ? {
+          status: "recommend",
+          candidateId: candidateIds[0],
+          confidence: 0.8,
+          explanation: "The strongest visible continuity evidence is ranked first.",
+        }
+      : {
+          status: "defer",
+          candidateId: null,
+          confidence: 0.2,
+          explanation: "There is not enough visible continuity evidence to recommend one.",
+        },
+  };
+}
+
+async function createCompletionApiFixture(
+  app: FastifyInstance,
+  name: string,
+): Promise<{ readonly sourceRevisionId: string }> {
+  const project = await createProject(app, name);
+  const imported = await importSkin(app, project.projectId);
+  const target = await app.inject({
+    method: "POST",
+    url: `/api/revisions/${imported.revisionId}/operations`,
+    payload: {
+      type: "assign_pixels",
+      target: {
+        instanceId: "clothing.completion",
+        displayName: "Completion clothing",
+        category: "upper_clothing",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+    },
+  });
+  expect(target.statusCode).toBe(201);
+  const occluder = await app.inject({
+    method: "POST",
+    url: `/api/revisions/${target.json<MutationResponse>().revision.id}/operations`,
+    payload: {
+      type: "assign_pixels",
+      target: {
+        instanceId: "hair.occluder",
+        displayName: "Completion occluder",
+        category: "hair",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+    },
+  });
+  expect(occluder.statusCode).toBe(201);
+  return {
+    sourceRevisionId: occluder.json<MutationResponse>().revision.id,
+  };
+}
+
+function sha256Bytes(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 async function createProject(

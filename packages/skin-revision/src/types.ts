@@ -7,7 +7,13 @@ import type {
   PartRepairOverwriteMode,
   PartApplicationReport,
   PartManifest,
+  CompletionProposal,
+  CompletionTargetRepresentation,
+  CompletionCandidateStrategy,
+  CompletionConfidence,
+  CompletionPixelOriginMode,
   SemanticComponent,
+  SemanticPixelSpan,
   SemanticState,
 } from "@mc-skin-split/skin-core";
 import type {
@@ -27,6 +33,7 @@ export const OPERATION_TYPES = [
   "palette_change",
   "revert",
   "branch",
+  "completion_accept",
 ] as const;
 
 export type RevisionOperationType = (typeof OPERATION_TYPES)[number];
@@ -706,6 +713,206 @@ export interface RevisionDiff {
   } | null;
 }
 
+export type CompletionProposalStatus =
+  | "awaiting_decision"
+  | "accepted"
+  | "rejected";
+
+export interface CompletionStoredFile {
+  readonly storagePath: string;
+  readonly mimeType: "application/json" | "image/png";
+  readonly byteSize: number;
+  readonly sha256: string;
+}
+
+export interface StoredCompletionProposal {
+  readonly id: string;
+  readonly jobId: string;
+  readonly projectId: string;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly targetComponentId: string;
+  readonly occludingComponentIds: readonly string[];
+  readonly representation: CompletionTargetRepresentation;
+  readonly allowedSpans: readonly SemanticPixelSpan[];
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly evidenceHash: string;
+  readonly proposalHash: string;
+  readonly document: CompletionStoredFile;
+  readonly allowedMask: CompletionStoredFile;
+  readonly createdAt: string;
+}
+
+export interface StoredCompletionCandidate {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly representation: CompletionTargetRepresentation;
+  readonly strategy: CompletionCandidateStrategy;
+  readonly confidence: CompletionConfidence;
+  readonly originMode: CompletionPixelOriginMode | "mixed";
+  readonly pixelCount: number;
+  readonly generatedPixelCount: number;
+  readonly candidateHash: string;
+  readonly evidenceHash: string;
+  readonly document: CompletionStoredFile;
+  readonly texture: CompletionStoredFile;
+  readonly writeMask: CompletionStoredFile;
+  readonly generatedMask: CompletionStoredFile;
+  readonly createdAt: string;
+}
+
+export interface CompletionCandidateRanking {
+  readonly candidateId: string;
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface CompletionRankingRecommendation {
+  readonly status: "recommend" | "defer";
+  readonly candidateId: string | null;
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface CompletionRankingProposal {
+  readonly schemaVersion: "1.0";
+  readonly jobId: string;
+  readonly proposalId: string;
+  readonly proposalHash: string;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly rankings: readonly CompletionCandidateRanking[];
+  readonly recommendation: CompletionRankingRecommendation;
+}
+
+export interface StoredCompletionProposalRanking {
+  readonly proposalId: string;
+  readonly jobId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly document: CompletionRankingProposal;
+  readonly orderedCandidateIds: readonly string[];
+  readonly recommendation: CompletionRankingRecommendation;
+  readonly rankingHash: string;
+  readonly createdAt: string;
+}
+
+export interface StoredCompletionDecision {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly candidateId: string | null;
+  readonly action: "accept" | "reject";
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string | null;
+  readonly actorType: "user";
+  readonly actorId: string | null;
+  readonly reason: string | null;
+  readonly decisionHash: string;
+  readonly createdAt: string;
+}
+
+export interface CompletionResult {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly decisionId: string;
+  readonly candidateId: string;
+  readonly representation: CompletionTargetRepresentation;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly revision: SkinRevision | null;
+  readonly latentPart: SkinPart | null;
+  readonly resultHash: string;
+  readonly resultSkinHash: string;
+  readonly originHash: string;
+  readonly publishedAt: string | null;
+  readonly createdAt: string;
+}
+
+export interface CompletionProposalSummary {
+  readonly proposal: StoredCompletionProposal;
+  readonly jobStatus:
+    | "queued"
+    | "preparing"
+    | "running"
+    | "validating"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  readonly visible: boolean;
+  readonly status: CompletionProposalStatus;
+  readonly candidateCount: number;
+  readonly ranking: StoredCompletionProposalRanking | null;
+  readonly decision: StoredCompletionDecision | null;
+  readonly result: CompletionResult | null;
+}
+
+export interface CompletionProposalDetail extends CompletionProposalSummary {
+  readonly document: CompletionProposal;
+  readonly candidates: readonly StoredCompletionCandidate[];
+}
+
+export interface CompletionProposalRankingInput {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly document: CompletionRankingProposal;
+  readonly rankingHash: string;
+}
+
+export interface CreateCompletionProposalInput {
+  readonly jobId: string;
+  readonly proposal: CompletionProposal;
+  readonly ranking?: CompletionProposalRankingInput;
+}
+
+export interface CompletionProposalListQuery {
+  readonly projectId?: string;
+  readonly sourceRevisionId?: string;
+  readonly jobId?: string;
+  readonly representation?: CompletionTargetRepresentation;
+  readonly status?: CompletionProposalStatus | "all";
+}
+
+interface CompletionDecisionInputBase {
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly actorId?: string;
+}
+
+export interface AcceptCompletionCandidateInput
+  extends CompletionDecisionInputBase {
+  readonly action: "accept";
+  readonly candidateId: string;
+  readonly expectedCandidateHash: string;
+  readonly summary?: string;
+}
+
+export interface RejectCompletionProposalInput
+  extends CompletionDecisionInputBase {
+  readonly action: "reject";
+  readonly reason?: string;
+}
+
+export type DecideCompletionProposalInput =
+  | AcceptCompletionCandidateInput
+  | RejectCompletionProposalInput;
+
+export interface CompletionDecisionOutcome {
+  readonly detail: CompletionProposalDetail;
+  readonly changed: boolean;
+}
+
+export interface PublishCompletionResultInput {
+  readonly actorId?: string;
+}
+
 export type RevisionIdKind =
   | "project"
   | "branch"
@@ -717,7 +924,8 @@ export type RevisionIdKind =
   | "part_edit"
   | "part_edit_revision"
   | "composition"
-  | "composition_layer";
+  | "composition_layer"
+  | "completion_result";
 
 export interface RevisionStoreOptions {
   readonly dataDirectory: string;

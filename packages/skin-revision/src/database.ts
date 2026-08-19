@@ -102,6 +102,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 15,
+    name: "completion proposals and immutable decisions",
+    sql: readFileSync(
+      new URL("./migrations/015_completion_proposals.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {
@@ -143,7 +151,8 @@ function applyMigrations(database: Database.Database): void {
     // so populated RESTRICT references require FK enforcement to be suspended
     // around the still-atomic schema transaction. foreign_key_check runs before
     // commit, and any violation rolls the complete migration back.
-    const rebuildsReferencedTables = migration.version === 14;
+    const rebuildsReferencedTables =
+      migration.version === 14 || migration.version === 15;
     if (rebuildsReferencedTables) database.pragma("foreign_keys = OFF");
     try {
       const run = database.transaction(() => {
@@ -151,7 +160,12 @@ function applyMigrations(database: Database.Database): void {
         if (rebuildsReferencedTables) {
           const violations = database.pragma("foreign_key_check") as unknown[];
           if (violations.length > 0) {
-            throw new Error("pixel-origin migration produced foreign key violations");
+            const migrationLabel = migration.version === 14
+              ? "pixel-origin migration"
+              : "completion migration";
+            throw new Error(
+              `${migrationLabel} produced foreign key violations`,
+            );
           }
         }
         database

@@ -25,6 +25,7 @@ Last updated: 2026-08-19
 | M16 bounded semantic transfers and immutable history guards | Complete | Proposal 1.1 ownership rules, provenance-safe reanalysis rejection, and SQLite append-only enforcement |
 | M17 Candidate Evidence Graph and visual grounding | Complete | 344 automated checks, deterministic Wide/Slim graph/grounding coverage, real-provider target run, and Studio browser confirmation |
 | M18 per-pixel origin and Part 2.0 | Complete | Canonical origin propagation, seven-file Part round trip, migration upgrade/tamper tests, full verification, and browser confirmation |
+| M19 independent hidden-content Completion Proposal core | Complete | Deterministic candidates, immutable proposal/decision/result storage, optional ID-only ranking, accept/reject integration, full verification, and isolated service evidence |
 
 ## M0 baseline
 
@@ -1197,3 +1198,105 @@ Last updated: 2026-08-19
   subset of the Part write mask. `origin.json` remains authoritative.
 - `legacy_mixed` is a durable honest fallback, not a claim that a pixel was
   generated or sourced from the original import.
+
+## M19 implementation status
+
+Status: **Complete**. The implementation contracts below passed full repository
+verification and isolated end-to-end service checks. M20 remains responsible for
+the feature-gated browser workspace.
+
+- `packages/skin-core` defines Completion Proposal Schema `1.0` and deterministic
+  algorithm `completion-candidates-v1`. Targets are limited to clothing hidden by
+  hair/accessories and hair hidden by accessories. Candidate strategies cover
+  opposite-layer underlay, mirror, same-surface continuation, opposite/neighbor
+  reference, and pattern continuation; lack of supported evidence yields no
+  candidate.
+- The allowed range is source-derived. `skin_texel` is limited to transparent,
+  unowned Base texels below visible Outer occluders, with visible target support;
+  it never writes Outer pixels above Base-owned source artwork.
+  `latent_component` is limited to actual same-layer occluder texels on supported
+  body-part/layer groups. `auto` prefers a safe skin texel when one exists and
+  otherwise selects the latent representation.
+- Every candidate is explicitly review-only. Inferred pixels use intrinsic
+  `generated_completion`; sampled or mirrored values may also retain immediate
+  copied-from lineage. The bounded core manual-edit contract marks only actual
+  edits as `manual_authored`.
+- Migration 015 defines independent append-only proposal, candidate, optional
+  ranking, decision, result, and latent-publication records. Proposal/candidate
+  JSON, textures, write masks, generated masks, evidence hashes, and source
+  bindings are persisted and reverified. Normal Completion lists include only
+  proposals tied to succeeded Jobs.
+- `skin_texel` acceptance creates a `completion_accept` Revision, assigns the new
+  pixels to the target component, and updates Branch/Project HEAD through exact
+  compare-and-swap checks. It refuses to overwrite a visible or owned texel.
+- `latent_component` acceptance creates a verified Part 2.0 containing the visible
+  target plus hidden additions while preserving the source Revision and source
+  skin hash. The resulting Part is not returned by normal library lists until a
+  separate append-only publication, and M19 exposes no public publication route.
+- `apps/ai-worker` adds the persistent `completion_proposal` Job kind and the
+  normal queued/preparing/running/validating/succeeded lifecycle. Host candidate
+  generation is deterministic and provider-free. Optional dedicated AI ranking
+  runs only after candidates are locked, validates an exact permutation of their
+  IDs, and persists no proposal if ranking fails.
+- A post-persistence cancellation remains cancelled and leaves its Proposal hidden.
+  On restart, a validating Completion Job becomes succeeded only after its full
+  Proposal/Candidate/ranking and Job contract revalidate; partial or corrupt state
+  keeps the interrupted-Job failure semantics.
+- `packages/skin-analysis-pack` builds a hash-bound ranking pack with one source
+  preview plus ordered candidate previews. `packages/ai-provider` exposes the
+  optional `rankCompletion` capability and a dedicated Schema/validator. Ranking
+  can order or recommend existing IDs only; it cannot return pixel material or
+  decide acceptance.
+- `apps/api` exposes provider-free start, list/detail, immutable allowed/candidate
+  JSON and PNG review assets, candidate acceptance, and proposal rejection routes.
+  Decision requests bind source/proposal/evidence and,
+  for acceptance, candidate hashes. Exact repeats return `changed: false`; stale
+  bindings and conflicting decisions return a conflict.
+
+The public service contract and route shapes are documented in
+[`hidden-content-completion.md`](hidden-content-completion.md).
+
+## M19 verification status
+
+- `pnpm verify` passed with generated fixtures unchanged, all package typechecks,
+  421 tests, and all production builds. Test totals were `skin-core` 93,
+  `skin-compositor` 8, `web` 113, `skin-analysis-pack` 38, `ai-provider` 48,
+  `skin-revision` 65, `ai-worker` 40, and `api` 16.
+- An isolated API using a copied `MC_SKIN_DATA_DIR` verified the real
+  `750fa4166940b473` result Revision. Its `dark_top` behind `long_white_hair`
+  latent proposal produced 273 allowed pixels and three review-only candidates.
+  Accepting the medium same-surface candidate created unpublished Part 2.0
+  `part_840b63d48c45436f8fc605ed5abef321` with 273
+  `generated_completion` pixels. The source Revision, Branch HEAD, and skin hash
+  remained unchanged; normal Part lists still excluded the latent result, while
+  direct verified reads returned its exact seven-file Part 2.0 set.
+- The same real Revision's explicit `skin_texel` request correctly succeeded with
+  zero allowed pixels and zero candidates: this corpus has no safe transparent
+  Base texel below an eligible Outer hair/accessory occluder. A clean isolated
+  12-pixel overlay fixture then exercised positive `skin_texel` acceptance.
+  Proposal `completion_da49d3d0477e4532965caa0ddb46d057` produced three complete
+  candidates; accepting the medium candidate created `completion_accept` Revision
+  `rev_9c101968be3147a68e2cc3900d506458`. The diff contained exactly 12 RGBA and
+  12 origin changes, the target component reported 12 generated pixels, and the
+  non-default Branch HEAD advanced without changing the Project's default HEAD.
+- Immutable review assets matched their stored SHA-256 hashes, returned immutable
+  cache headers, and honored matching ETags with `304`; a candidate from another
+  Proposal returned `404`. Exact accept/reject repeats returned `changed:false`.
+  A mismatched proposal hash returned `409` without a decision or result.
+- The isolated database finished on Schema 15 with `quick_check=ok`, no foreign-key
+  violations, one accepted result of each representation, and zero latent
+  publications. The live `data/` database was not opened for writes and retained
+  its pre-test Schema 13 state without Completion tables.
+- Optional real-provider ranking is not required for deterministic CI. Its Schema,
+  pack-integrity, exact-ID permutation, adversarial output, provider failure, and
+  retry coverage passed without an external-model smoke.
+
+## M19 boundaries
+
+- A Completion Proposal is an auditable inference, not recovery of factual hidden
+  source pixels. No confidence level or AI recommendation can auto-accept it.
+- M19 does not add a default Studio entry, a public latent-Part publication route,
+  automatic post-analysis execution, or a Bundle/Catalog publication side effect.
+- M20 owns the feature-gated player review/editor and simple workflow integration.
+  M21 owns hidden-ground-truth evaluation and the release gate for the default
+  player path.

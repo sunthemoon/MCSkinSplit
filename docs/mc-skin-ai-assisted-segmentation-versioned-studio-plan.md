@@ -2764,6 +2764,70 @@ CandidateRegion 精确分区、Host 像素所有权和不可变 Revision 合同�
 
 ---
 
+## M19：独立隐藏内容 Completion Proposal 核心
+
+状态：**完成**。
+
+目标：为被长发或饰品遮挡的服装，以及被饰品遮挡的头发，提供来源明确、
+范围受限、必须由用户决定的补全候选。候选描述“可能的隐藏内容”，不冒充
+原作者实际画过但已不可见的像素。
+
+实现：
+
+1. 增加独立 `completion_proposal` Job，以及 proposal、candidate、可选 ranking、
+   decision、result 和 latent publication 存储。它们不复用 semantic follow-up、
+   Composition restoration 或 PartEdit 状态；只有 Job 成功且 output hash 与提案
+   匹配时，提案才进入正常查询结果。
+2. Proposal Schema `1.0` / `completion-candidates-v1` 绑定来源 Revision、result hash、
+   skin hash、目标组件、遮挡组件、允许生成范围、证据 hash 和目标表示。目标仅限
+   服装或头发：服装可被头发/饰品遮挡，头发可被饰品遮挡；目标与遮挡组件都必须
+   已有可见证据。
+3. Host 按真实 opposite-layer underlay、左右镜像、同 Surface 连续、对面/邻域参考
+   和图案延续生成确定性候选。没有足够证据时允许返回零候选，不使用任意颜色或
+   无来源填充兜底。所有候选都固定 `reviewRequired=true` 且禁止自动接受。
+4. `skin_texel` 只允许写入有目标可见支撑、位于可见 Outer 遮挡物下方、当前透明且
+   没有 owner 的 Base texel；Base 遮挡物不能反向授权在上方写 Outer texel。Accept
+   创建 `completion_accept` Revision，把新增像素归入
+   原目标组件，并以 compare-and-swap 更新 Branch/Project HEAD；任何可见或已有
+   owner 的 texel 都不能被覆盖。
+5. 同 Layer 遮挡使用 `latent_component`。Accept 创建包含目标原可见像素和隐藏
+   推测像素的 Part 2.0，源 Revision、Branch HEAD、RGBA 和 skin hash 不变。该 Part
+   默认不进入普通组件库；发布是后续独立 append-only 动作，M19 不提供公开发布 API。
+   `auto` 在存在安全 texel 时选 `skin_texel`，否则选 `latent_component`，决定时不能
+   再改变表示。
+6. 推测新增像素的固有来源一律为 `generated_completion`。镜像/取样只增加直接
+   copied-from Revision/component/pixel 血缘，不把推测像素伪装成 `source_visible`。
+   核心合同支持有界人工候选修改，只有实际改动的像素记为 `manual_authored`；M19
+   HTTP 暂不暴露候选编辑器，由 M20 提供玩家界面。
+7. 可选 AI 使用独立 Completion ranking pack、Schema 和 Validator。输入只含绑定
+   hash 的无像素 JSON 证据、来源预览和 Host 候选预览；输出必须是全部既有 candidate
+   ID 的唯一排列，并只能推荐第一项或 defer。模型不能生成 texture/mask/坐标/颜色、
+   新候选或决定；配置了排序而模型失败时 Job 失败，不保存半完成提案。
+8. Reject 只保存一次不可变审计决定，不创建 Revision 或 Part。Accept 绑定来源、
+   proposal、evidence 和 candidate hash，并创建不可变 Completion Result。服务层在
+   决定前和写事务内重复检查 stale 状态；Accept 还要求来源仍是精确 Branch HEAD。
+   完全相同的重复决定返回幂等结果，不同动作或 candidate 返回冲突。
+   Job 成功前记录的取消请求始终优先；服务重启只恢复完整通过 Proposal/Candidate/
+   ranking 与 Job 合同复验的 validating 任务，取消、缺失或损坏状态不会误公开。
+9. 公开 API 提供从 Revision 发起、提案列表/详情、经过完整校验的 allowed/candidate
+   JSON 与 PNG 审阅资源、接受一个候选和拒绝整个提案。
+   发起请求只包含目标组件、遮挡组件和可选表示，不接受客户端像素、hash、Provider、
+   Model 或 reasoning 参数；AI 排序是否启用由服务端配置决定。
+
+验证已完成：全仓 fixtures/typecheck/test/build 通过，共 421 项测试；隔离 API
+完成 `skin_texel` 与 `latent_component` 两种表示、Reject/幂等/stale、candidate
+资源与 ETag、latent Part 默认不可见、来源/HEAD 不变量及 SQLite 完整性验证。
+真实 `750fa4166940b473` 的同层长发遮衣案例产出 273 像素 latent 候选并生成未发布
+Part 2.0；独立 12 像素 Outer-over-transparent-Base 夹具完成了正向
+`completion_accept` Revision 验证。M20 的 feature-gated 玩家 UI 和 M21 的隐藏真值
+评测仍是后续阶段。
+
+详细服务与 API 合同见
+[`hidden-content-completion.md`](hidden-content-completion.md)，验收边界见
+[`audit/current-state-audit.md`](audit/current-state-audit.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。

@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { isSemanticCategory } from "@mc-skin-split/skin-core";
+import {
+  MAX_COMPLETION_OCCLUDING_COMPONENTS,
+  isSemanticCategory,
+} from "@mc-skin-split/skin-core";
 import {
   SEMANTIC_FOLLOWUP_ALGORITHM_VERSIONS,
   type SemanticFollowupAlgorithmVersion,
@@ -9,6 +12,7 @@ import {
 import Database from "better-sqlite3";
 import type {
   AiAnalysisOptions,
+  AiCompletionProposalOptions,
   AiJob,
   AiJobError,
   AiJobEvent,
@@ -23,8 +27,10 @@ import type {
   AiRunFileRole,
   AiRunStatus,
   CreateAiJobInput,
+  CreateCompletionProposalAiJobInput,
   CreateRestorationRecommendationAiJobInput,
   CreateSemanticAnalysisAiJobInput,
+  CompletionProposalAiJob,
   RestorationRecommendationAiJob,
   SemanticAnalysisAiJob,
   SemanticFollowupStatus,
@@ -157,6 +163,9 @@ export class AiJobStore {
   createJob(
     input: CreateRestorationRecommendationAiJobInput,
   ): RestorationRecommendationAiJob;
+  createJob(
+    input: CreateCompletionProposalAiJobInput,
+  ): CompletionProposalAiJob;
   createJob(input: CreateAiJobInput): AiJob;
   createJob(input: CreateAiJobInput): AiJob {
     const id = this.id("job");
@@ -195,15 +204,13 @@ export class AiJobStore {
       this.appendEventUnlocked(
         id,
         "queued",
-        input.kind === "semantic_analysis"
-          ? "AI 分析已进入队列"
-          : "AI 换装建议已进入队列",
+        jobTaskMessage(input.kind, "已进入队列"),
         {
-        kind: input.kind,
-        provider,
-        model,
-        ...(compositionId ? { compositionId } : {}),
-        ...(input.retryOfJobId ? { retryOfJobId: input.retryOfJobId } : {}),
+          kind: input.kind,
+          provider,
+          model,
+          ...(compositionId ? { compositionId } : {}),
+          ...(input.retryOfJobId ? { retryOfJobId: input.retryOfJobId } : {}),
         },
       );
     });
@@ -261,12 +268,25 @@ export class AiJobStore {
         jobId,
       });
     }
+    if (status === "succeeded" && current.cancelRequested) {
+      throw cancellationRequested(jobId);
+    }
     validateTransitionPatch(current, status, patch);
     const now = this.now();
     const startedAt = current.startedAt ?? (status === "preparing" ? now : null);
     const terminal = isTerminal(status);
     const error = patch.error ?? (terminal && status !== "succeeded" ? current.error : null);
     const update = this.database.transaction(() => {
+      const latest = this.getJob(jobId);
+      if (latest.status !== current.status) {
+        throw conflict(
+          `AI Job 状态已从 ${current.status} 变为 ${latest.status}`,
+          { jobId },
+        );
+      }
+      if (status === "succeeded" && latest.cancelRequested) {
+        throw cancellationRequested(jobId);
+      }
       this.database
         .prepare(`
           UPDATE ai_job
@@ -319,22 +339,25 @@ export class AiJobStore {
   }
 
   requestCancellation(jobId: string): AiJob {
-    const current = this.getJob(jobId);
-    if (isTerminal(current.status) || current.cancelRequested) return current;
+    this.getJob(jobId);
     const update = this.database.transaction(() => {
+      const current = this.getJob(jobId);
+      if (isTerminal(current.status) || current.cancelRequested) return;
       this.database
         .prepare("UPDATE ai_job SET cancel_requested = 1 WHERE id = ?")
         .run(jobId);
       this.appendEventUnlocked(
         jobId,
         "cancel_requested",
-        current.kind === "restoration_recommendation"
-          ? "已请求取消 AI 换装建议"
-          : "已请求取消 AI 分析",
+        `已请求取消${jobTaskName(current.kind)}`,
         {},
       );
     });
-    update.immediate();
+    try {
+      update.immediate();
+    } catch (error) {
+      throw databaseError(error);
+    }
     return this.getJob(jobId);
   }
 
@@ -583,34 +606,41 @@ export class AiJobStore {
     );
   }
 
-  failInterruptedJobs(): number {
+  failInterruptedJob(jobId: string): boolean {
+    const job = this.getJob(jobId);
+    if (isTerminal(job.status)) return false;
+    const taskName = jobTaskName(job.kind);
+    this.transitionJob(job.id, "failed", `服务重启中断了${taskName}`, {
+      error: {
+        code: "WORKER_RESTARTED",
+        message: `服务重启中断了${taskName}，可创建重试任务`,
+      },
+    });
+    this.database
+      .prepare(`
+        UPDATE ai_run
+        SET status = 'failed', finished_at = ?, error_json = ?
+        WHERE job_id = ? AND status = 'running'
+      `)
+      .run(
+        this.now(),
+        JSON.stringify({ code: "WORKER_RESTARTED", message: "服务重启中断了模型调用" }),
+        job.id,
+      );
+    return true;
+  }
+
+  failInterruptedJobs(excludedJobIds: readonly string[] = []): number {
+    const excluded = new Set(excludedJobIds);
     const rows = this.database
       .prepare("SELECT id FROM ai_job WHERE status IN ('queued', 'preparing', 'running', 'validating')")
       .all() as { id: string }[];
+    let failed = 0;
     for (const row of rows) {
-      const job = this.getJob(row.id);
-      const taskName = job.kind === "restoration_recommendation"
-        ? "AI 换装建议"
-        : "AI 分析";
-      this.transitionJob(job.id, "failed", `服务重启中断了${taskName}`, {
-        error: {
-          code: "WORKER_RESTARTED",
-          message: `服务重启中断了${taskName}，可创建重试任务`,
-        },
-      });
-      this.database
-        .prepare(`
-          UPDATE ai_run
-          SET status = 'failed', finished_at = ?, error_json = ?
-          WHERE job_id = ? AND status = 'running'
-        `)
-        .run(
-          this.now(),
-          JSON.stringify({ code: "WORKER_RESTARTED", message: "服务重启中断了模型调用" }),
-          job.id,
-        );
+      if (excluded.has(row.id)) continue;
+      if (this.failInterruptedJob(row.id)) failed += 1;
     }
-    return rows.length;
+    return failed;
   }
 
   private getRunAsset(assetId: string): AiRunAsset {
@@ -735,6 +765,26 @@ function mapJob(row: AiJobRow): AiJob {
       options,
       advisoryResult: null,
       reviewItems: reviewItems as SemanticAnalysisAiJob["reviewItems"],
+    };
+  }
+  if (row.job_kind === "completion_proposal") {
+    if (
+      row.composition_id !== null ||
+      row.result_revision_id !== null ||
+      row.advisory_result_json !== null ||
+      options.mode !== "completion_proposal" ||
+      reviewItems.length !== 0
+    ) {
+      throw corrupt("completion_proposal Job 存储结构无效");
+    }
+    return {
+      ...common,
+      kind: "completion_proposal",
+      resultRevisionId: null,
+      compositionId: null,
+      options,
+      reviewItems: [],
+      advisoryResult: null,
     };
   }
   if (
@@ -1035,7 +1085,19 @@ function isAiJobStatus(value: string): value is AiJobStatus {
 }
 
 function isAiJobKind(value: string): value is AiJobKind {
-  return value === "semantic_analysis" || value === "restoration_recommendation";
+  return value === "semantic_analysis" ||
+    value === "restoration_recommendation" ||
+    value === "completion_proposal";
+}
+
+function jobTaskName(kind: AiJobKind): string {
+  if (kind === "restoration_recommendation") return "AI 换装建议";
+  if (kind === "completion_proposal") return "隐藏内容候选生成";
+  return "AI 分析";
+}
+
+function jobTaskMessage(kind: AiJobKind, suffix: string): string {
+  return `${jobTaskName(kind)}${suffix}`;
 }
 
 function isAiRunStatus(value: string): value is AiRunStatus {
@@ -1075,7 +1137,7 @@ function validateCreateJobInput(input: CreateAiJobInput): string | null {
   if (input.retryOfJobId !== undefined) {
     visibleText("retryOfJobId", input.retryOfJobId, 120);
   }
-  if (input.kind === "semantic_analysis") return null;
+  if (input.kind !== "restoration_recommendation") return null;
   const compositionId = visibleText("compositionId", input.compositionId, 120);
   if (input.options.compositionId.trim() !== compositionId) {
     throw invalid("compositionId 与 options.compositionId 不一致");
@@ -1213,6 +1275,62 @@ function validateJobOptions(
       focus: value.focus,
       createRevisionOnSuccess: value.createRevisionOnSuccess,
     } satisfies AiAnalysisOptions;
+  }
+
+  if (kind === "completion_proposal") {
+    assertExactKeys(
+      value,
+      [
+        "mode",
+        "provider",
+        "model",
+        "rankingMode",
+        "targetComponentId",
+        "occludingComponentIds",
+        "representation",
+        ...(value.rankingMode === "ai" ? ["reasoningEffort"] : []),
+      ],
+      "completion_proposal options",
+      failure,
+    );
+    if (
+      value.mode !== "completion_proposal" ||
+      (value.rankingMode !== "host_only" && value.rankingMode !== "ai") ||
+      (value.rankingMode === "ai" &&
+        !isReasoningEffort(value.reasoningEffort)) ||
+      !isComponentId(value.targetComponentId) ||
+      !Array.isArray(value.occludingComponentIds) ||
+      value.occludingComponentIds.length < 1 ||
+      value.occludingComponentIds.length > MAX_COMPLETION_OCCLUDING_COMPONENTS ||
+      new Set(value.occludingComponentIds).size !==
+        value.occludingComponentIds.length ||
+      !value.occludingComponentIds.every(isComponentId) ||
+      value.occludingComponentIds.includes(value.targetComponentId) ||
+      !["auto", "skin_texel", "latent_component"].includes(
+        value.representation as string,
+      )
+    ) {
+      throw failure("completion_proposal options 无效");
+    }
+    if (compositionId !== null) {
+      throw failure("completion_proposal compositionId 必须为空");
+    }
+    const common = {
+      mode: "completion_proposal",
+      provider: validateTextValue(value.provider, "provider", 80, failure),
+      model: validateTextValue(value.model, "model", 120, failure),
+      targetComponentId: value.targetComponentId,
+      occludingComponentIds: value.occludingComponentIds,
+      representation:
+        value.representation as AiCompletionProposalOptions["representation"],
+    } as const;
+    return value.rankingMode === "ai"
+      ? {
+          ...common,
+          rankingMode: "ai",
+          reasoningEffort: value.reasoningEffort as AiAnalysisOptions["reasoningEffort"],
+        }
+      : { ...common, rankingMode: "host_only" };
   }
 
   assertExactKeys(
@@ -1367,6 +1485,21 @@ function validateTransitionPatch(
     }
     return;
   }
+  if (job.kind === "completion_proposal") {
+    if (patch.resultRevisionId !== undefined) {
+      throw invalid("completion_proposal Job 不能直接生成 Revision");
+    }
+    if (patch.reviewItems !== undefined && patch.reviewItems.length !== 0) {
+      throw invalid("completion_proposal reviewItems 必须为空");
+    }
+    if (patch.advisoryResult !== undefined) {
+      throw invalid("completion_proposal Job 不能保存换装建议结果");
+    }
+    if (status === "succeeded" && patch.outputHash === undefined && !job.outputHash) {
+      throw invalid("completion_proposal 成功时必须绑定 proposal hash");
+    }
+    return;
+  }
   if (patch.resultRevisionId !== undefined) {
     throw invalid("restoration_recommendation Job 不能生成 Revision");
   }
@@ -1496,6 +1629,15 @@ function notFound(kind: string, id: string): AiJobStoreError {
 
 function conflict(message: string, details?: Readonly<Record<string, unknown>>): AiJobStoreError {
   return new AiJobStoreError("AI_JOB_CONFLICT", message, 409, details);
+}
+
+function cancellationRequested(jobId: string): AiJobStoreError {
+  return new AiJobStoreError(
+    "AI_CANCELLED",
+    "AI Job 已请求取消，不能标记成功",
+    409,
+    { jobId },
+  );
 }
 
 function corrupt(message: string, cause?: unknown): AiJobStoreError {

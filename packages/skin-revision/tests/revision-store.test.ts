@@ -5,17 +5,24 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
+  buildSurfaceTexels,
+  canonicalCompletionJson,
   decodeSkinPng,
   createRgbaImage,
   encodeSkinPng,
   getPixelOrigin,
   getSkinLayout,
   getPixel,
+  generateCompletionProposalCandidates,
   maskToPixelIds,
   pixelIdsToSpans,
   rgbaImageToMask,
+  setPixel,
   type BodyPart,
+  type CompletionProposal,
   type PixelOriginDocument,
+  type SurfaceKey,
+  type SurfaceTexel,
 } from "@mc-skin-split/skin-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -1564,7 +1571,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 14 });
+          .toEqual({ version: 15 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -1743,7 +1750,7 @@ describe("RevisionStore", () => {
       try {
         expect(database.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 14 });
+        ).get()).toEqual({ version: 15 });
         expect(database.prepare(
           "SELECT origin_asset_id FROM skin_revision WHERE id = ?",
         ).get(fixture.revisionId)).toEqual({ origin_asset_id: null });
@@ -1754,6 +1761,36 @@ describe("RevisionStore", () => {
           origin_asset_id: null,
           generated_mask_asset_id: null,
         });
+        const revisionSql = database.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skin_revision'",
+        ).get() as { readonly sql: string };
+        const jobSql = database.prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ai_job'",
+        ).get() as { readonly sql: string };
+        expect(revisionSql.sql).toContain("completion_accept");
+        expect(jobSql.sql).toContain("completion_proposal");
+        expect(database.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name LIKE 'completion_%'
+          ORDER BY name
+        `).all()).toEqual([
+          { name: "completion_candidate" },
+          { name: "completion_decision" },
+          { name: "completion_proposal" },
+          { name: "completion_proposal_ranking" },
+          { name: "completion_result" },
+          { name: "completion_result_publication" },
+        ]);
+        expect(database.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'trigger' AND name IN (
+            'skin_asset_revision_binding_guard',
+            'semantic_analysis_followup_insert_guard',
+            'semantic_analysis_followup_applied_revision_insert_guard',
+            'semantic_analysis_followup_applied_revision_update_guard',
+            'semantic_analysis_followup_job_success_guard'
+          ) ORDER BY name
+        `).all()).toHaveLength(5);
         expect(database.pragma("foreign_key_check")).toEqual([]);
       } finally {
         database.close();
@@ -2014,7 +2051,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 14 });
+          ).get()).toEqual({ version: 15 });
           const triggers = upgraded.prepare(`
             SELECT name
             FROM sqlite_master
@@ -2107,7 +2144,7 @@ describe("RevisionStore", () => {
         downgradeSemanticFollowupToEarlyV11(legacy);
         expect(legacy.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 14 });
+        ).get()).toEqual({ version: 15 });
         const legacyInsertSql = legacy.prepare(
           "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
         ).get() as { readonly sql: string };
@@ -2123,7 +2160,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 14 });
+          ).get()).toEqual({ version: 15 });
           expect(upgraded.prepare(`
             SELECT job_id, result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -2323,7 +2360,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 14 });
+          ).get()).toEqual({ version: 15 });
           expect(upgraded.prepare(`
             SELECT result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -2396,7 +2433,7 @@ describe("RevisionStore", () => {
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 14 });
+        ).get()).toEqual({ version: 15 });
         expect(afterFailure.prepare(
           "SELECT COUNT(*) AS count FROM semantic_analysis_followup WHERE job_id = ?",
         ).get("aijob_v11_invalid")).toEqual({ count: 1 });
@@ -2487,7 +2524,7 @@ describe("RevisionStore", () => {
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 14 });
+        ).get()).toEqual({ version: 15 });
         expect(afterFailure.prepare(`
           SELECT status, applied_revision_id
           FROM semantic_analysis_followup
@@ -4072,9 +4109,946 @@ describe("RevisionStore", () => {
       store.close();
     }
   });
+
+  it("round-trips a skin-texel Completion accept with semantic ownership and exact idempotency", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      const pending = await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      expect(pending).toMatchObject({
+        visible: false,
+        jobStatus: "validating",
+        ranking: null,
+        decision: null,
+      });
+      expect(sha256(await store.readCompletionAllowedMaskPng(
+        fixture.proposal.proposalId,
+      ))).toBe(pending.proposal.allowedMask.sha256);
+      await expect(store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      })).resolves.toMatchObject({
+        proposal: { id: fixture.proposal.proposalId },
+        visible: false,
+      });
+      await expect(store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: {
+          ...fixture.proposal,
+          proposalId: `${fixture.proposal.proposalId}_other`,
+        },
+      })).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+      expect(await store.listCompletionProposals({
+        jobId: fixture.jobId,
+      })).toHaveLength(1);
+
+      const candidate = fixture.proposal.candidates.find(
+        (item) => item.strategy === "same_surface_continuation",
+      ) ?? fixture.proposal.candidates[0]!;
+      const decisionInput = {
+        candidateId: candidate.candidateId,
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        actorId: "completion-reviewer",
+      } as const;
+      const accepted = await store.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        decisionInput,
+      );
+      expect(accepted.changed).toBe(true);
+      expect(accepted.detail.result).toMatchObject({
+        representation: "skin_texel",
+        sourceRevisionId: fixture.sourceRevisionId,
+        latentPart: null,
+        revision: {
+          parentRevisionId: fixture.sourceRevisionId,
+          branchId: fixture.branchId,
+          operationType: "completion_accept",
+          actorType: "user",
+          actorId: "completion-reviewer",
+        },
+      });
+      const resultRevision = accepted.detail.result!.revision!;
+      expect(store.getBranch(fixture.branchId).headRevisionId).toBe(
+        resultRevision.id,
+      );
+      expect(accepted.detail.result!.resultSkinHash).not.toBe(
+        fixture.proposal.sourceSkinHash,
+      );
+      expect(accepted.detail.result!.resultHash).toBe(resultRevision.resultHash);
+
+      const sourceState = await store.readRevisionSemanticState(
+        fixture.sourceRevisionId,
+      );
+      const resultState = await store.readRevisionSemanticState(resultRevision.id);
+      expect(maskToPixelIds(resultState.masks[fixture.targetComponentId]!)).toEqual(
+        [...new Set([
+          ...maskToPixelIds(sourceState.masks[fixture.targetComponentId]!),
+          ...candidate.pixelIds,
+        ])].sort((left, right) => left - right),
+      );
+      expect(maskToPixelIds(resultState.masks[fixture.occludingComponentId]!))
+        .toEqual(maskToPixelIds(sourceState.masks[fixture.occludingComponentId]!));
+      expect(maskToPixelIds(resultState.unknownMask)).toEqual(
+        maskToPixelIds(sourceState.unknownMask),
+      );
+      const resultSnapshot = await store.verifyRevisionSnapshot(resultRevision.id);
+      const resultOrigin = JSON.parse(
+        Buffer.from(resultSnapshot.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      for (const pixelId of candidate.pixelIds) {
+        expect(getPixelOrigin(resultOrigin, pixelId)).toMatchObject({
+          intrinsicOrigin: "generated_completion",
+          evidence: {
+            candidateId: candidate.candidateId,
+            decisionId: accepted.detail.decision!.id,
+          },
+        });
+      }
+
+      await expect(store.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        decisionInput,
+      )).resolves.toMatchObject({ changed: false });
+      await expect(store.rejectCompletionProposal(
+        fixture.proposal.proposalId,
+        {
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          actorId: "completion-reviewer",
+        },
+      )).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+
+      const database = new Database(store.databasePath);
+      try {
+        expect(() => database.prepare(`
+          UPDATE completion_result SET result_skin_hash = ? WHERE proposal_id = ?
+        `).run(`sha256:${"f".repeat(64)}`, fixture.proposal.proposalId))
+          .toThrow(/immutable/u);
+        database.exec("DROP TRIGGER completion_result_immutable_update");
+        database.prepare(`
+          UPDATE completion_result SET result_skin_hash = ? WHERE proposal_id = ?
+        `).run(`sha256:${"f".repeat(64)}`, fixture.proposal.proposalId);
+      } finally {
+        database.close();
+      }
+      await expect(store.getCompletionProposalDetail(fixture.proposal.proposalId))
+        .rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists a latent Completion as an unpublished immutable Part without moving HEAD", async () => {
+    const created = await createStore();
+    let activeStore: RevisionStore = created.store;
+    try {
+      const fixture = await createCompletionFixture(activeStore, "latent_component");
+      await activeStore.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(
+        activeStore,
+        fixture.jobId,
+        fixture.proposal.proposalHash,
+      );
+      const candidate = fixture.proposal.candidates.find(
+        (item) => item.strategy === "opposite_surface_reference",
+      ) ?? fixture.proposal.candidates[0]!;
+      const revisionsBefore = activeStore.listRevisions(fixture.projectId);
+      const sourceSkin = await activeStore.readRevisionSkinPng(
+        fixture.sourceRevisionId,
+      );
+      const accepted = await activeStore.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        {
+          candidateId: candidate.candidateId,
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: candidate.candidateHash,
+          actorId: "completion-reviewer",
+        },
+      );
+      const result = accepted.detail.result!;
+      const part = result.latentPart!;
+      expect(result).toMatchObject({
+        representation: "latent_component",
+        revision: null,
+        resultSkinHash: fixture.proposal.sourceSkinHash,
+        publishedAt: null,
+      });
+      expect(activeStore.listRevisions(fixture.projectId)).toEqual(revisionsBefore);
+      expect(activeStore.getBranch(fixture.branchId).headRevisionId).toBe(
+        fixture.sourceRevisionId,
+      );
+      expect(await activeStore.readRevisionSkinPng(fixture.sourceRevisionId))
+        .toEqual(sourceSkin);
+      expect(activeStore.getPart(part.id).id).toBe(part.id);
+      expect(activeStore.listParts({ projectId: fixture.projectId })).toEqual([]);
+      const storedPart = await activeStore.verifyPartStorage(part.id);
+      const origin = JSON.parse(
+        Buffer.from(storedPart.files["origin.json"]!.bytes).toString("utf8"),
+      ) as PixelOriginDocument;
+      expect(getPixelOrigin(origin, fixture.visibleTarget.pixelId)).toMatchObject({
+        intrinsicOrigin: "source_visible",
+        copyLineage: {
+          sourceSubject: { kind: "revision", id: fixture.sourceRevisionId },
+          sourceComponentInstanceId: fixture.targetComponentId,
+          sourcePixelId: fixture.visibleTarget.pixelId,
+        },
+      });
+      for (const pixelId of candidate.pixelIds) {
+        expect(getPixelOrigin(origin, pixelId)).toMatchObject({
+          intrinsicOrigin: "generated_completion",
+        });
+      }
+
+      activeStore.close();
+      activeStore = new RevisionStore({ dataDirectory: created.directory });
+      const roundTrip = await activeStore.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      );
+      expect(roundTrip.result).toMatchObject({
+        id: result.id,
+        publishedAt: null,
+        latentPart: { id: part.id },
+      });
+      expect(activeStore.listParts({ projectId: fixture.projectId })).toEqual([]);
+      const published = await activeStore.publishCompletionResult(result.id, {
+        actorId: "library-curator",
+      });
+      expect(published.publishedAt).not.toBeNull();
+      expect(activeStore.listParts({ projectId: fixture.projectId }))
+        .toMatchObject([{ id: part.id }]);
+
+      const database = new Database(activeStore.databasePath);
+      try {
+        expect(() => database.prepare(`
+          UPDATE completion_result SET result_hash = ? WHERE id = ?
+        `).run(`sha256:${"f".repeat(64)}`, result.id)).toThrow(/immutable/u);
+        database.exec("DROP TRIGGER completion_result_immutable_update");
+        database.prepare(`
+          UPDATE completion_result SET result_hash = ? WHERE id = ?
+        `).run(`sha256:${"f".repeat(64)}`, result.id);
+      } finally {
+        database.close();
+      }
+      await expect(activeStore.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      )).rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      activeStore.close();
+    }
+  });
+
+  it("rejects Completion proposals idempotently without creating a Revision", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+      const revisionsBefore = store.listRevisions(fixture.projectId);
+      const input = {
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        actorId: "completion-reviewer",
+        reason: "Evidence is insufficient",
+      } as const;
+      await expect(store.rejectCompletionProposal(
+        fixture.proposal.proposalId,
+        { ...input, expectedProposalHash: `sha256:${"f".repeat(64)}` },
+      )).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      const rejected = await store.rejectCompletionProposal(
+        fixture.proposal.proposalId,
+        input,
+      );
+      expect(rejected).toMatchObject({
+        changed: true,
+        detail: {
+          status: "rejected",
+          decision: { action: "reject", candidateId: null },
+          result: null,
+        },
+      });
+      expect(store.listRevisions(fixture.projectId)).toEqual(revisionsBefore);
+      await expect(store.rejectCompletionProposal(
+        fixture.proposal.proposalId,
+        input,
+      )).resolves.toMatchObject({ changed: false });
+      await expect(store.rejectCompletionProposal(
+        fixture.proposal.proposalId,
+        { ...input, reason: "Different terminal reason" },
+      )).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+
+      const database = new Database(store.databasePath);
+      try {
+        const row = database.prepare(`
+          SELECT decision_json FROM completion_decision WHERE proposal_id = ?
+        `).get(fixture.proposal.proposalId) as { readonly decision_json: string };
+        const tampered = canonicalCompletionJson({
+          ...(JSON.parse(row.decision_json) as Record<string, unknown>),
+          actor: { type: "user", id: "tampered-reviewer" },
+        });
+        expect(() => database.prepare(`
+          UPDATE completion_decision SET decision_json = ? WHERE proposal_id = ?
+        `).run(tampered, fixture.proposal.proposalId)).toThrow(/immutable/u);
+        database.exec("DROP TRIGGER completion_decision_immutable_update");
+        database.prepare(`
+          UPDATE completion_decision SET decision_json = ? WHERE proposal_id = ?
+        `).run(tampered, fixture.proposal.proposalId);
+      } finally {
+        database.close();
+      }
+      await expect(store.getCompletionProposalDetail(fixture.proposal.proposalId))
+        .rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a stale Completion accept after the source Branch HEAD moves", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+      await store.revertRevision(fixture.sourceRevisionId);
+      const candidate = fixture.proposal.candidates[0]!;
+      await expect(store.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        {
+          candidateId: candidate.candidateId,
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: candidate.candidateHash,
+          actorId: "completion-reviewer",
+        },
+      )).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect((await store.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      )).decision).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("returns one exact result for concurrent Completion accepts across stores", async () => {
+    const created = await createStore();
+    const primary = created.store;
+    let secondary: RevisionStore | null = null;
+    try {
+      const fixture = await createCompletionFixture(primary, "skin_texel");
+      await primary.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(primary, fixture.jobId, fixture.proposal.proposalHash);
+      secondary = new RevisionStore({ dataDirectory: created.directory });
+      const candidate = fixture.proposal.candidates[0]!;
+      const input = {
+        candidateId: candidate.candidateId,
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        actorId: "concurrent-reviewer",
+      } as const;
+      const revisionCount = primary.listRevisions(fixture.projectId).length;
+      const outcomes = await Promise.all([
+        primary.acceptCompletionCandidate(fixture.proposal.proposalId, input),
+        secondary.acceptCompletionCandidate(fixture.proposal.proposalId, input),
+      ]);
+
+      expect(outcomes.map((outcome) => outcome.changed).sort()).toEqual([
+        false,
+        true,
+      ]);
+      expect(new Set(outcomes.map((outcome) => outcome.detail.result!.id)).size)
+        .toBe(1);
+      expect(primary.listRevisions(fixture.projectId)).toHaveLength(
+        revisionCount + 1,
+      );
+    } finally {
+      secondary?.close();
+      primary.close();
+    }
+  });
+
+  it("normalizes concurrent different Completion decisions to an explicit conflict", async () => {
+    const created = await createStore();
+    const primary = created.store;
+    let secondary: RevisionStore | null = null;
+    try {
+      const fixture = await createCompletionFixture(primary, "skin_texel");
+      await primary.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(primary, fixture.jobId, fixture.proposal.proposalHash);
+      secondary = new RevisionStore({ dataDirectory: created.directory });
+      const common = {
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        actorId: "concurrent-reviewer",
+      } as const;
+      const outcomes = await Promise.allSettled([
+        primary.rejectCompletionProposal(fixture.proposal.proposalId, {
+          ...common,
+          reason: "first concurrent reason",
+        }),
+        secondary.rejectCompletionProposal(fixture.proposal.proposalId, {
+          ...common,
+          reason: "second concurrent reason",
+        }),
+      ]);
+      const fulfilled = outcomes.filter(
+        (outcome): outcome is PromiseFulfilledResult<Awaited<
+          ReturnType<RevisionStore["rejectCompletionProposal"]>
+        >> => outcome.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(fulfilled[0]!.value.changed).toBe(true);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toMatchObject({
+        code: "CONFLICT",
+        statusCode: 409,
+      });
+    } finally {
+      secondary?.close();
+      primary.close();
+    }
+  });
+
+  it("freezes the exact Completion candidate set and AI ranking before Job success", async () => {
+    const { store } = await createStore();
+    try {
+      const host = await createCompletionFixture(store, "skin_texel");
+      await store.createCompletionProposal({
+        jobId: host.jobId,
+        proposal: host.proposal,
+      });
+      const database = new Database(store.databasePath);
+      try {
+        const sourceCandidateId = host.proposal.candidates[0]!.candidateId;
+        expect(() => database.prepare(`
+          INSERT INTO completion_candidate (
+            id, proposal_id, representation, strategy, confidence, origin_mode,
+            pixel_count, generated_pixel_count, candidate_json, candidate_hash,
+            evidence_hash, document_storage_path, document_byte_size,
+            document_sha256, texture_storage_path, texture_byte_size,
+            texture_sha256, write_mask_storage_path, write_mask_byte_size,
+            write_mask_sha256, generated_mask_storage_path,
+            generated_mask_byte_size, generated_mask_sha256, created_at
+          )
+          SELECT ?, proposal_id, representation, strategy, confidence, origin_mode,
+            pixel_count, generated_pixel_count,
+            json_set(candidate_json, '$.candidateId', ?), candidate_hash,
+            evidence_hash, document_storage_path || '-extra', document_byte_size,
+            document_sha256, texture_storage_path || '-extra', texture_byte_size,
+            texture_sha256, write_mask_storage_path || '-extra', write_mask_byte_size,
+            write_mask_sha256, generated_mask_storage_path || '-extra',
+            generated_mask_byte_size, generated_mask_sha256, created_at
+          FROM completion_candidate WHERE id = ?
+        `).run(
+          "completioncandidate_extra",
+          "completioncandidate_extra",
+          sourceCandidateId,
+        )).toThrow(/invalid completion candidate binding/u);
+      } finally {
+        database.close();
+      }
+
+      const ai = await createCompletionFixture(store, "skin_texel", "ai");
+      expect(ai.proposal.candidates.length).toBeGreaterThan(1);
+      const rankings = ai.proposal.candidates.map((candidate, index) => ({
+        candidateId: candidate.candidateId,
+        confidence: Math.max(0, 1 - index / ai.proposal.candidates.length),
+        explanation: `Candidate-set guard ranking ${index + 1}`,
+      }));
+      const document = {
+        schemaVersion: "1.0",
+        jobId: ai.jobId,
+        proposalId: ai.proposal.proposalId,
+        proposalHash: ai.proposal.proposalHash,
+        sourceRevisionId: ai.proposal.sourceRevisionId,
+        sourceResultHash: ai.proposal.sourceResultHash,
+        sourceSkinHash: ai.proposal.sourceSkinHash,
+        rankings,
+        recommendation: {
+          status: "recommend",
+          candidateId: rankings[0]!.candidateId,
+          confidence: rankings[0]!.confidence,
+          explanation: "The first candidate leads the guarded ranking",
+        },
+      } as const;
+      await store.createCompletionProposal({
+        jobId: ai.jobId,
+        proposal: ai.proposal,
+        ranking: {
+          provider: "codex",
+          model: "completion-ranking-model",
+          reasoningEffort: "medium",
+          document,
+          rankingHash: sha256(canonicalCompletionJson(document)),
+        },
+      });
+
+      const aiDatabase = new Database(store.databasePath);
+      try {
+        const rankingRow = aiDatabase.prepare(`
+          SELECT ranking_json FROM completion_proposal_ranking
+          WHERE proposal_id = ?
+        `).get(ai.proposal.proposalId) as { readonly ranking_json: string };
+        aiDatabase.exec("DROP TRIGGER completion_proposal_ranking_immutable_update");
+        aiDatabase.prepare(`
+          UPDATE completion_proposal_ranking
+          SET ranking_json = json_set(
+            ranking_json,
+            '$.rankings[1].candidateId',
+            json_extract(ranking_json, '$.rankings[0].candidateId')
+          )
+          WHERE proposal_id = ?
+        `).run(ai.proposal.proposalId);
+        expect(() => finishCompletionJob(
+          store,
+          ai.jobId,
+          ai.proposal.proposalHash,
+        )).toThrow(/invalid AI job kind shape/u);
+        aiDatabase.prepare(`
+          UPDATE completion_proposal_ranking SET ranking_json = ?
+          WHERE proposal_id = ?
+        `).run(rankingRow.ranking_json, ai.proposal.proposalId);
+
+        const removedCandidateId = ai.proposal.candidates[0]!.candidateId;
+        aiDatabase.exec(`
+          CREATE TEMP TABLE removed_completion_candidate AS
+          SELECT * FROM completion_candidate WHERE 0;
+          DROP TRIGGER completion_candidate_immutable_delete;
+        `);
+        aiDatabase.prepare(`
+          INSERT INTO removed_completion_candidate
+          SELECT * FROM completion_candidate WHERE id = ?
+        `).run(removedCandidateId);
+        expect(aiDatabase.prepare(
+          "DELETE FROM completion_candidate WHERE id = ?",
+        ).run(removedCandidateId).changes).toBe(1);
+        expect(() => aiDatabase.exec(`
+          INSERT INTO completion_candidate
+          SELECT * FROM removed_completion_candidate;
+        `)).toThrow(/invalid completion candidate binding/u);
+        expect(() => finishCompletionJob(
+          store,
+          ai.jobId,
+          ai.proposal.proposalHash,
+        )).toThrow(/invalid AI job kind shape/u);
+      } finally {
+        aiDatabase.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("persists a bound AI ranking while keeping a non-recommended user decision authoritative", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel", "ai");
+      expect(fixture.proposal.candidates.length).toBeGreaterThan(1);
+      const rankings = fixture.proposal.candidates.map((candidate, index) => ({
+        candidateId: candidate.candidateId,
+        confidence: Math.max(0, 1 - index / fixture.proposal.candidates.length),
+        explanation: `Host-bound ranking ${index + 1}`,
+      }));
+      const document = {
+        schemaVersion: "1.0",
+        jobId: fixture.jobId,
+        proposalId: fixture.proposal.proposalId,
+        proposalHash: fixture.proposal.proposalHash,
+        sourceRevisionId: fixture.proposal.sourceRevisionId,
+        sourceResultHash: fixture.proposal.sourceResultHash,
+        sourceSkinHash: fixture.proposal.sourceSkinHash,
+        rankings,
+        recommendation: {
+          status: "recommend",
+          candidateId: rankings[0]!.candidateId,
+          confidence: rankings[0]!.confidence,
+          explanation: "The first candidate has the strongest visible evidence",
+        },
+      } as const;
+      const rankingHash = sha256(canonicalCompletionJson(document));
+      const pending = await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+        ranking: {
+          provider: "codex",
+          model: "completion-ranking-model",
+          reasoningEffort: "medium",
+          document,
+          rankingHash,
+        },
+      });
+      await expect(store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+        ranking: {
+          provider: "codex",
+          model: "completion-ranking-model",
+          reasoningEffort: "medium",
+          document,
+          rankingHash,
+        },
+      })).resolves.toMatchObject({
+        proposal: { id: fixture.proposal.proposalId },
+        ranking: { rankingHash },
+      });
+      await expect(store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+        ranking: {
+          provider: "codex",
+          model: "completion-ranking-model",
+          reasoningEffort: "medium",
+          document: {
+            ...document,
+            recommendation: {
+              ...document.recommendation,
+              explanation: "A different replay payload",
+            },
+          },
+          rankingHash,
+        },
+      })).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect(pending.ranking).toMatchObject({
+        provider: "codex",
+        model: "completion-ranking-model",
+        reasoningEffort: "medium",
+        document,
+        orderedCandidateIds: rankings.map((ranking) => ranking.candidateId),
+        recommendation: document.recommendation,
+        rankingHash,
+      });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+
+      const selected = fixture.proposal.candidates.at(-1)!;
+      expect(selected.candidateId).not.toBe(document.recommendation.candidateId);
+      await expect(store.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        {
+          candidateId: selected.candidateId,
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: selected.candidateHash,
+          actorId: "ranking-reviewer",
+        },
+      )).resolves.toMatchObject({
+        changed: true,
+        detail: { decision: { candidateId: selected.candidateId } },
+      });
+
+      const database = new Database(store.databasePath);
+      try {
+        expect(() => database.prepare(`
+          UPDATE completion_proposal_ranking
+          SET ranking_json = ? WHERE proposal_id = ?
+        `).run(canonicalCompletionJson({
+          ...document,
+          recommendation: {
+            ...document.recommendation,
+            explanation: "Tampered explanation",
+          },
+        }), fixture.proposal.proposalId)).toThrow(/immutable/u);
+        database.exec("DROP TRIGGER completion_proposal_ranking_immutable_update");
+        database.prepare(`
+          UPDATE completion_proposal_ranking
+          SET ranking_json = ? WHERE proposal_id = ?
+        `).run(canonicalCompletionJson({
+          ...document,
+          recommendation: {
+            ...document.recommendation,
+            explanation: "Tampered explanation",
+          },
+        }), fixture.proposal.proposalId);
+      } finally {
+        database.close();
+      }
+      await expect(store.getCompletionProposalDetail(fixture.proposal.proposalId))
+        .rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("detects Completion candidate file tampering and protects immutable rows", async () => {
+    const { directory, store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      const detail = await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      const database = new Database(store.databasePath);
+      try {
+        expect(() => database.prepare(`
+          UPDATE completion_proposal SET proposal_hash = ? WHERE id = ?
+        `).run(`sha256:${"0".repeat(64)}`, fixture.proposal.proposalId))
+          .toThrow(/immutable/u);
+      } finally {
+        database.close();
+      }
+      await writeFile(
+        join(directory, detail.candidates[0]!.texture.storagePath),
+        "tampered candidate texture",
+        "utf8",
+      );
+      await expect(store.getCompletionProposalDetail(fixture.proposal.proposalId))
+        .rejects.toMatchObject({ code: "SNAPSHOT_CORRUPT", statusCode: 409 });
+    } finally {
+      store.close();
+    }
+  });
 });
 
 const TEST_CREATED_AT = "2026-08-11T01:00:00.000Z";
+
+interface CompletionFixture {
+  readonly jobId: string;
+  readonly projectId: string;
+  readonly branchId: string;
+  readonly sourceRevisionId: string;
+  readonly targetComponentId: string;
+  readonly occludingComponentId: string;
+  readonly visibleTarget: SurfaceTexel;
+  readonly proposal: CompletionProposal;
+}
+
+async function createCompletionFixture(
+  store: RevisionStore,
+  representation: "skin_texel" | "latent_component",
+  rankingMode: "host_only" | "ai" = "host_only",
+): Promise<CompletionFixture> {
+  const targetComponentId = representation === "skin_texel"
+    ? "outfit.completion.base"
+    : "outfit.completion.outer";
+  const occludingComponentId = "hair.completion.occluder";
+  const image = createRgbaImage(64, 64);
+  const visibleTarget = completionTexel(
+    representation === "skin_texel"
+      ? "torso.base.front"
+      : "torso.outer.front",
+    0,
+    2,
+  );
+  const hidden = representation === "skin_texel"
+    ? [
+        completionTexel("torso.base.front", 1, 2),
+        completionTexel("torso.base.front", 2, 2),
+      ]
+    : [completionTexel("torso.outer.back", 2, 2)];
+  const occluders = representation === "skin_texel"
+    ? [
+        completionTexel("torso.outer.front", 1, 2),
+        completionTexel("torso.outer.front", 2, 2),
+      ]
+    : hidden;
+  setPixel(
+    image,
+    visibleTarget.atlasX,
+    visibleTarget.atlasY,
+    [31, 61, 91, 255],
+  );
+  for (const texel of occluders) {
+    setPixel(image, texel.atlasX, texel.atlasY, [8, 18, 28, 255]);
+  }
+  const imported = await store.importProject({
+    name: `Completion ${representation}`,
+    skinPng: encodeSkinPng(image),
+    armType: "slim",
+  });
+  const targetRevision = await store.applyManualOperation(imported.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: targetComponentId,
+        displayName: "Completion target",
+        category: "upper_clothing",
+      },
+      spans: pixelIdsToSpans(
+        [visibleTarget.pixelId],
+        getSkinLayout("slim"),
+      ),
+    },
+  });
+  const source = await store.applyManualOperation(targetRevision.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: occludingComponentId,
+        displayName: "Completion occluder",
+        category: "hair",
+      },
+      spans: pixelIdsToSpans(
+        occluders.map((texel) => texel.pixelId),
+        getSkinLayout("slim"),
+      ),
+    },
+  });
+  const snapshot = await store.verifyRevisionSnapshot(source.revision.id);
+  const sourceImage = decodeSkinPng(snapshot.files["skin.png"].bytes);
+  const semanticState = await store.readRevisionSemanticState(source.revision.id);
+  const originDocument = JSON.parse(
+    Buffer.from(snapshot.files["origin.json"]!.bytes).toString("utf8"),
+  ) as PixelOriginDocument;
+  const proposalId = `completionproposal_${representation}_${rankingMode}`;
+  const proposal = generateCompletionProposalCandidates({
+    proposalId,
+    sourceRevisionId: source.revision.id,
+    sourceResultHash: source.revision.resultHash,
+    sourceSkinHash: snapshot.files["skin.png"].sha256,
+    image: sourceImage,
+    semanticState,
+    originDocument,
+    targetComponentId,
+    occludingComponentIds: [occludingComponentId],
+    representation,
+    hashCanonical: sha256,
+  });
+  if (proposal.candidates.length === 0) {
+    throw new Error(`Completion fixture ${representation} produced no candidates`);
+  }
+  const jobId = `aijob_completion_${representation}_${rankingMode}`;
+  insertCompletionJob(store, {
+    jobId,
+    projectId: imported.project.id,
+    sourceRevisionId: source.revision.id,
+    targetComponentId,
+    occludingComponentIds: [occludingComponentId],
+    representation,
+    rankingMode,
+  });
+  return {
+    jobId,
+    projectId: imported.project.id,
+    branchId: imported.branch.id,
+    sourceRevisionId: source.revision.id,
+    targetComponentId,
+    occludingComponentId,
+    visibleTarget,
+    proposal,
+  };
+}
+
+function completionTexel(
+  surface: SurfaceKey,
+  localU: number,
+  localV: number,
+): SurfaceTexel {
+  const texel = buildSurfaceTexels(
+    createRgbaImage(64, 64),
+    getSkinLayout("slim"),
+  ).find(
+    (candidate) =>
+      candidate.surface === surface &&
+      candidate.localU === localU &&
+      candidate.localV === localV,
+  );
+  if (!texel) throw new Error(`Missing Completion texel ${surface}`);
+  return texel;
+}
+
+function insertCompletionJob(
+  store: RevisionStore,
+  input: {
+    readonly jobId: string;
+    readonly projectId: string;
+    readonly sourceRevisionId: string;
+    readonly targetComponentId: string;
+    readonly occludingComponentIds: readonly string[];
+    readonly representation: "skin_texel" | "latent_component";
+    readonly rankingMode: "host_only" | "ai";
+  },
+): void {
+  const database = new Database(store.databasePath);
+  try {
+    const provider = input.rankingMode === "ai" ? "codex" : "host";
+    const model = input.rankingMode === "ai"
+      ? "completion-ranking-model"
+      : "completion-candidates-v1";
+    database.prepare(`
+      INSERT INTO ai_job (
+        id, job_kind, project_id, input_revision_id, result_revision_id,
+        retry_of_job_id, status, provider, model, skill_name, skill_version,
+        prompt_version, input_hash, output_hash, options_json,
+        review_items_json, proposal_summary, cancel_requested, created_at,
+        started_at, finished_at, error_json, composition_id,
+        advisory_result_json
+      ) VALUES (
+        ?, 'completion_proposal', ?, ?, NULL, NULL, 'validating',
+        ?, ?, 'completion-candidates', '1.0',
+        'completion-candidates-v1', NULL, NULL, ?, '[]', NULL, 0, ?, ?,
+        NULL, NULL, NULL, NULL
+      )
+    `).run(
+      input.jobId,
+      input.projectId,
+      input.sourceRevisionId,
+      provider,
+      model,
+      JSON.stringify({
+        mode: "completion_proposal",
+        provider,
+        model,
+        rankingMode: input.rankingMode,
+        ...(input.rankingMode === "ai" ? { reasoningEffort: "medium" } : {}),
+        targetComponentId: input.targetComponentId,
+        occludingComponentIds: input.occludingComponentIds,
+        representation: input.representation,
+      }),
+      TEST_CREATED_AT,
+      TEST_CREATED_AT,
+    );
+  } finally {
+    database.close();
+  }
+}
+
+function finishCompletionJob(
+  store: RevisionStore,
+  jobId: string,
+  proposalHash: string,
+): void {
+  const database = new Database(store.databasePath);
+  try {
+    database.prepare(`
+      UPDATE ai_job
+      SET status = 'succeeded', output_hash = ?, finished_at = ?
+      WHERE id = ?
+    `).run(proposalHash, TEST_CREATED_AT, jobId);
+  } finally {
+    database.close();
+  }
+}
 
 interface SemanticFollowupSuggestionFixture {
   readonly id: string;

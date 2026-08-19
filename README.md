@@ -2,7 +2,7 @@
 
 MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles, M12 added a responsive workflow index for navigating the long-form Studio, M13 made semantic JSON transport single-pass by default while retaining strict host validation and opt-in native structured output, M14 added reversible, result-Revision-scoped catalog archiving without deleting or merging immutable history and library assets, M15 added a player-first clean-analysis flow with deterministic cross-body classification review and immutable catalog variants, M16 makes pixel transfers explicit, prevents provenance-losing reanalysis, and enforces immutable Revision/Part history in SQLite, M17 adds deterministic CandidateRegion evidence plus paired all-surface visual grounding without changing the exact candidate partition or granting the model pixel authority, and M18 adds exact per-pixel origin records plus Part 2.0 artifacts as the required foundation for later hidden-content completion.
+The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles, M12 added a responsive workflow index for navigating the long-form Studio, M13 made semantic JSON transport single-pass by default while retaining strict host validation and opt-in native structured output, M14 added reversible, result-Revision-scoped catalog archiving without deleting or merging immutable history and library assets, M15 added a player-first clean-analysis flow with deterministic cross-body classification review and immutable catalog variants, M16 makes pixel transfers explicit, prevents provenance-losing reanalysis, and enforces immutable Revision/Part history in SQLite, M17 adds deterministic CandidateRegion evidence plus paired all-surface visual grounding without changing the exact candidate partition or granting the model pixel authority, M18 adds exact per-pixel origin records plus Part 2.0 artifacts, and M19 adds an independent, explicit-decision Completion Proposal service for inferred content hidden by hair or accessories.
 
 The current Studio can:
 
@@ -68,12 +68,24 @@ The current Studio can:
 - export the live composition preview and commit a validated `compose` Revision;
 - rebuild the checked-in Alex/Slim mix pixel-exactly from all six real skins.
 
+M19 service work is complete. Its deterministic host can create
+review-only hidden-content candidates without changing the source Revision;
+optional AI support may order only those existing candidate IDs. Accepting a safe
+`skin_texel` candidate creates a `completion_accept` Revision, while accepting a
+same-layer `latent_component` candidate creates an unpublished Part 2.0 variant
+and leaves the source skin unchanged. The service contract, persistence,
+immutable review assets, acceptance/rejection paths, and restart/cancellation
+behavior are verified; the player-facing, feature-gated workspace belongs to
+M20, and default availability remains gated by M21 evaluation. See
+[`docs/hidden-content-completion.md`](docs/hidden-content-completion.md).
+
 ## Requirements
 
 - Node.js 24
 - pnpm 10.13.1
 - A browser with WebGL support
-- An installed and authenticated Codex CLI for optional AI-assisted analysis or replacement recommendation
+- An installed and authenticated Codex CLI for optional AI-assisted analysis,
+  replacement recommendation, or Completion candidate ranking
 
 ## Start the Studio
 
@@ -117,4 +129,4 @@ scripts/                  Deterministic fixture tooling
 tests/fixtures/skins/     Versioned Minecraft skin fixtures
 ```
 
-The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), immutable component repair in [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), composition restoration in [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), immutable component repair in [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), composition restoration in [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md), hidden-content Completion in [`docs/hidden-content-completion.md`](docs/hidden-content-completion.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).

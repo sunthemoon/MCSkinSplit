@@ -1,4 +1,5 @@
 export * from "./errors";
+export * from "./completion-storage";
 export * from "./hash";
 export * from "./part-storage";
 export * from "./part-edit-storage";

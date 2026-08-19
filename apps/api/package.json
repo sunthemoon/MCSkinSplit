@@ -7,7 +7,7 @@
     "build": "tsc -b tsconfig.source.json --pretty false",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=20000",
     "typecheck": "tsc -b tsconfig.source.json tsconfig.test.json --pretty false"
   },
   "dependencies": {

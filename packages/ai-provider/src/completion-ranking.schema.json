@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcskinsplit.local/schemas/completion-ranking.schema.json",
+  "title": "MCSkinSplit Completion candidate ranking",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "jobId",
+    "proposalId",
+    "proposalHash",
+    "sourceRevisionId",
+    "sourceResultHash",
+    "sourceSkinHash",
+    "rankings",
+    "recommendation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "jobId": { "type": "string", "minLength": 3, "maxLength": 120 },
+    "proposalId": { "type": "string", "minLength": 3, "maxLength": 120 },
+    "proposalHash": { "$ref": "#/$defs/hash" },
+    "sourceRevisionId": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "sourceResultHash": { "$ref": "#/$defs/hash" },
+    "sourceSkinHash": { "$ref": "#/$defs/hash" },
+    "rankings": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/ranking" }
+    },
+    "recommendation": { "$ref": "#/$defs/recommendation" }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^completioncandidate_[0-9a-f]{64}$"
+    },
+    "explanation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ranking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "confidence", "explanation"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/candidateId" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "explanation": { "$ref": "#/$defs/explanation" }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "candidateId", "confidence", "explanation"],
+      "properties": {
+        "status": { "enum": ["recommend", "defer"] },
+        "candidateId": {
+          "oneOf": [
+            { "$ref": "#/$defs/candidateId" },
+            { "type": "null" }
+          ]
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "explanation": { "$ref": "#/$defs/explanation" }
+      }
+    }
+  }
+}

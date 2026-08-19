@@ -1,11 +1,15 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   AnalysisProposal,
+  CompletionRankingProposal,
   ProviderAnalysisInput,
   ProviderAnalysisResult,
+  ProviderCompletionRankingInput,
+  ProviderCompletionRankingResult,
   ProviderReplacementInput,
   ProviderReplacementResult,
   ReplacementPlanProposal,
@@ -16,8 +20,17 @@ import {
   AI_SKILL_VERSION,
   AiProviderError,
 } from "@mc-skin-split/ai-provider";
-import { PROMPT_VERSION } from "@mc-skin-split/skin-analysis-pack";
 import {
+  COMPLETION_RANKING_PACK_SCHEMA_VERSION,
+  COMPLETION_RANKING_PROMPT_VERSION,
+  PROMPT_VERSION,
+} from "@mc-skin-split/skin-analysis-pack";
+import {
+  COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+  COMPLETION_PROPOSAL_SCHEMA_VERSION,
+  canonicalCompletionJson,
+  decodeSkinPng,
+  generateCompletionProposalCandidates,
   summarizePixelOrigins,
   summarizePixelOriginsForMask,
 } from "@mc-skin-split/skin-core";
@@ -30,6 +43,10 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AiJobManager,
+  COMPLETION_JOB_PROMPT_VERSION,
+  COMPLETION_JOB_PROVIDER,
+  COMPLETION_JOB_SKILL_NAME,
+  COMPLETION_RANKING_JOB_SKILL_NAME,
   type AiJobManagerOptions,
 } from "../src/ai-job-manager";
 
@@ -1022,6 +1039,607 @@ describe("AiJobManager", () => {
     expect(store.listRevisions(imported.project.id)).toHaveLength(2);
   });
 
+  it("generates review-only completion candidates and accepts one idempotently", async () => {
+    const provider = new ScriptedProvider("unused-completion-provider", () => {
+      throw new Error("Completion host flow must not invoke the semantic provider");
+    });
+    const { manager, store, imported } = await setup([provider]);
+    const source = await createCompletionFixture(store, imported);
+    const revisionCount = store.listRevisions(imported.project.id).length;
+
+    await expect(manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder", "hair.occluder"],
+    })).rejects.toMatchObject({
+      code: "INVALID_COMPLETION_PROPOSAL",
+      statusCode: 400,
+    });
+
+    const queued = await manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder"],
+      representation: "latent_component",
+    });
+    const finished = await manager.waitForJob(queued.id);
+
+    expect(finished).toMatchObject({
+      kind: "completion_proposal",
+      status: "succeeded",
+      resultRevisionId: null,
+      compositionId: null,
+      options: {
+        rankingMode: "host_only",
+        representation: "latent_component",
+      },
+    });
+    expect(provider.calls).toBe(0);
+    expect(manager.getJobDetail(queued.id).runs).toEqual([]);
+    expect(manager.getJobDetail(queued.id).events.map((event) => event.eventType))
+      .toEqual(expect.arrayContaining([
+        "candidate_generation_started",
+        "completion_candidates_generated",
+        "validating",
+        "succeeded",
+      ]));
+
+    const listed = await manager.listCompletionProposals({
+      sourceRevisionId: source.revision.id,
+    });
+    expect(listed).toHaveLength(1);
+    const detail = await manager.getCompletionProposalDetail(
+      listed[0]!.proposal.id,
+    );
+    expect(detail).toMatchObject({
+      status: "awaiting_decision",
+      proposal: {
+        jobId: queued.id,
+        representation: "latent_component",
+      },
+      ranking: null,
+      decision: null,
+      result: null,
+    });
+    expect(detail.candidates.length).toBeGreaterThan(0);
+    expect(
+      detail.candidates.every((candidate) =>
+        candidate.representation === "latent_component"),
+    ).toBe(true);
+    const candidate = detail.candidates[0]!;
+    const decisionInput = {
+      candidateId: candidate.id,
+      expectedSourceResultHash: detail.proposal.sourceResultHash,
+      expectedProposalHash: detail.proposal.proposalHash,
+      expectedEvidenceHash: detail.proposal.evidenceHash,
+      expectedCandidateHash: candidate.candidateHash,
+      actorId: "completion-reviewer",
+      summary: "接受测试候选",
+    } as const;
+    const accepted = await manager.acceptCompletionCandidate(
+      detail.proposal.id,
+      decisionInput,
+    );
+    expect(accepted).toMatchObject({
+      changed: true,
+      detail: {
+        status: "accepted",
+        decision: { action: "accept", candidateId: candidate.id },
+        result: {
+          representation: "latent_component",
+          revision: null,
+          latentPart: { id: expect.any(String) },
+          publishedAt: null,
+        },
+      },
+    });
+    expect(store.listRevisions(imported.project.id)).toHaveLength(revisionCount);
+
+    const repeated = await manager.acceptCompletionCandidate(
+      detail.proposal.id,
+      decisionInput,
+    );
+    expect(repeated.changed).toBe(false);
+    expect(repeated.detail.decision?.id).toBe(accepted.detail.decision?.id);
+    expect(
+      manager.getJobDetail(queued.id).events.filter(
+        (event) => event.eventType === "completion_candidate_accepted",
+      ),
+    ).toHaveLength(1);
+    await expect(manager.retryJob(queued.id)).rejects.toMatchObject({
+      code: "COMPLETION_RETRY_UNSUPPORTED",
+      statusCode: 409,
+    });
+  });
+
+  it("persists validated AI candidate ordering without accepting a candidate", async () => {
+    const provider = new ScriptedCompletionRankingProvider(
+      "completion-ranker",
+      validCompletionRankingProposal,
+    );
+    const { manager, store, imported } = await setup([provider], {
+      completionRanking: {
+        provider: provider.providerName,
+        model: "completion-ranking-model",
+        reasoningEffort: "high",
+      },
+    });
+    const source = await createCompletionFixture(store, imported);
+    const revisionCount = store.listRevisions(imported.project.id).length;
+
+    const queued = await manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder"],
+      representation: "latent_component",
+    });
+    const finished = await manager.waitForJob(queued.id);
+    const jobDetail = manager.getJobDetail(queued.id);
+
+    expect(finished.error).toBeNull();
+    expect(finished).toMatchObject({
+      kind: "completion_proposal",
+      status: "succeeded",
+      provider: provider.providerName,
+      model: "completion-ranking-model",
+      resultRevisionId: null,
+      advisoryResult: null,
+      reviewItems: [],
+      options: {
+        rankingMode: "ai",
+        reasoningEffort: "high",
+      },
+    });
+    expect(provider.rankingCalls).toBe(1);
+    expect(jobDetail.runs).toHaveLength(1);
+    expect(jobDetail.runs[0]).toMatchObject({ status: "succeeded", attempt: 1 });
+    expect(jobDetail.runs[0]!.assets.map((asset) => asset.fileRole).sort()).toEqual([
+      "input_manifest",
+      "raw_events",
+      "raw_output",
+      "stderr",
+      "validator_report",
+    ]);
+
+    const proposals = await manager.listCompletionProposals({ jobId: queued.id });
+    expect(proposals).toHaveLength(1);
+    const detail = await manager.getCompletionProposalDetail(
+      proposals[0]!.proposal.id,
+    );
+    expect(detail).toMatchObject({
+      status: "awaiting_decision",
+      decision: null,
+      result: null,
+      ranking: {
+        provider: provider.providerName,
+        model: "completion-ranking-model",
+        reasoningEffort: "high",
+        document: {
+          jobId: queued.id,
+          proposalId: detail.proposal.id,
+          proposalHash: detail.proposal.proposalHash,
+          recommendation: { status: "recommend" },
+        },
+      },
+    });
+    expect(detail.ranking?.orderedCandidateIds).toEqual(
+      detail.ranking?.document.rankings.map(({ candidateId }) => candidateId),
+    );
+    expect(new Set(detail.ranking?.orderedCandidateIds)).toEqual(
+      new Set(detail.candidates.map((candidate) => candidate.id)),
+    );
+    expect(store.listRevisions(imported.project.id)).toHaveLength(revisionCount);
+    expect(detail.ranking?.recommendation.candidateId).toBe(
+      detail.ranking?.orderedCandidateIds[0],
+    );
+  });
+
+  it("fails invalid AI ranking without a proposal and retries with stored config", async () => {
+    const observedPacks: ProviderCompletionRankingInput["pack"][] = [];
+    let calls = 0;
+    const provider = new ScriptedCompletionRankingProvider(
+      "completion-retry-ranker",
+      (input) => {
+        calls += 1;
+        observedPacks.push(input.pack);
+        const valid = validCompletionRankingProposal(input);
+        return calls === 1 ? { ...valid, jobId: "wrong_job" } : valid;
+      },
+    );
+    const { manager, store, imported } = await setup([provider], {
+      completionRanking: {
+        provider: provider.providerName,
+        model: "immutable-ranking-model",
+        reasoningEffort: "xhigh",
+      },
+      maxRepairAttempts: 0,
+    });
+    const source = await createCompletionFixture(store, imported);
+
+    const first = await manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder"],
+      representation: "latent_component",
+    });
+    const failed = await manager.waitForJob(first.id);
+
+    expect(failed).toMatchObject({
+      status: "failed",
+      error: { code: "AI_COMPLETION_RANKING_INVALID" },
+      options: {
+        rankingMode: "ai",
+        provider: provider.providerName,
+        model: "immutable-ranking-model",
+        reasoningEffort: "xhigh",
+      },
+    });
+    expect(await store.getCompletionProposalByJobId(first.id)).toBeNull();
+    expect(await manager.listCompletionProposals({ jobId: first.id })).toEqual([]);
+    expect(manager.getJobDetail(first.id).runs[0]).toMatchObject({
+      status: "failed",
+      attempt: 1,
+    });
+
+    const retry = await manager.retryJob(first.id);
+    const succeeded = await manager.waitForJob(retry.id);
+    expect(succeeded.error).toBeNull();
+    expect(succeeded).toMatchObject({
+      status: "succeeded",
+      retryOfJobId: first.id,
+      provider: provider.providerName,
+      model: "immutable-ranking-model",
+      options: { rankingMode: "ai", reasoningEffort: "xhigh" },
+    });
+    expect(provider.rankingCalls).toBe(2);
+    expect(observedPacks).toHaveLength(2);
+    expect(observedPacks[1]!.evidence.proposalId).not.toBe(
+      observedPacks[0]!.evidence.proposalId,
+    );
+    expect(observedPacks[1]!.evidence.proposalHash).toBe(
+      observedPacks[0]!.evidence.proposalHash,
+    );
+    expect(
+      observedPacks[1]!.completionProposal.candidates.map(
+        (candidate) => candidate.candidateHash,
+      ),
+    ).toEqual(
+      observedPacks[0]!.completionProposal.candidates.map(
+        (candidate) => candidate.candidateHash,
+      ),
+    );
+    expect(
+      observedPacks[1]!.completionProposal.candidates.map(
+        (candidate) => candidate.candidateId,
+      ),
+    ).not.toEqual(
+      observedPacks[0]!.completionProposal.candidates.map(
+        (candidate) => candidate.candidateId,
+      ),
+    );
+    expect(await manager.listCompletionProposals({ jobId: retry.id }))
+      .toHaveLength(1);
+  });
+
+  it("keeps provider failure diagnostics without exposing a completion proposal", async () => {
+    const provider = new ScriptedCompletionRankingProvider(
+      "failing-completion-ranker",
+      () => {
+        throw new AiProviderError(
+          "COMPLETION_PROVIDER_FAILED",
+          "Completion provider failed",
+          { exitCode: 17 },
+          {
+            rawEvents: `${JSON.stringify({ type: "provider.failure" })}\n`,
+            stderr: "ranking provider stderr",
+          },
+        );
+      },
+    );
+    const { manager, store, imported } = await setup([provider], {
+      completionRanking: {
+        provider: provider.providerName,
+        model: "failing-ranking-model",
+        reasoningEffort: "medium",
+      },
+      maxRepairAttempts: 0,
+    });
+    const source = await createCompletionFixture(store, imported);
+
+    const queued = await manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder"],
+      representation: "latent_component",
+    });
+    const failed = await manager.waitForJob(queued.id);
+    const detail = manager.getJobDetail(queued.id);
+
+    expect(failed).toMatchObject({
+      status: "failed",
+      error: {
+        code: "COMPLETION_PROVIDER_FAILED",
+        details: { exitCode: 17 },
+      },
+    });
+    expect(await store.getCompletionProposalByJobId(queued.id)).toBeNull();
+    expect(await manager.listCompletionProposals({ jobId: queued.id })).toEqual([]);
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({
+      status: "failed",
+      error: { code: "COMPLETION_PROVIDER_FAILED" },
+    });
+    expect(detail.runs[0]!.assets.map((asset) => asset.fileRole).sort()).toEqual([
+      "input_manifest",
+      "raw_events",
+      "stderr",
+    ]);
+  });
+
+  it("keeps a post-persist cancellation hidden and retryable", async () => {
+    const provider = new ScriptedCompletionRankingProvider(
+      "post-persist-cancel-ranker",
+      validCompletionRankingProposal,
+    );
+    const { manager, store, imported } = await setup([provider], {
+      completionRanking: {
+        provider: provider.providerName,
+        model: "post-persist-cancel-model",
+        reasoningEffort: "high",
+      },
+    });
+    const source = await createCompletionFixture(store, imported);
+    const createProposal = store.createCompletionProposal.bind(store);
+    let notifyProposalPersisted!: () => void;
+    let releaseProposalReturn!: () => void;
+    let persistedProposalId = "";
+    const proposalPersisted = new Promise<void>((resolve) => {
+      notifyProposalPersisted = resolve;
+    });
+    const proposalReturnRelease = new Promise<void>((resolve) => {
+      releaseProposalReturn = resolve;
+    });
+    store.createCompletionProposal = async (input) => {
+      const detail = await createProposal(input);
+      persistedProposalId = detail.proposal.id;
+      notifyProposalPersisted();
+      await proposalReturnRelease;
+      return detail;
+    };
+    cleanups.push(() => {
+      store.createCompletionProposal = createProposal;
+      releaseProposalReturn();
+    });
+
+    const queued = await manager.startCompletionProposal(source.revision.id, {
+      targetComponentId: "clothing.completion",
+      occludingComponentIds: ["hair.occluder"],
+      representation: "latent_component",
+    });
+    await proposalPersisted;
+    expect(persistedProposalId).not.toBe("");
+    expect(manager.cancelJob(queued.id)).toMatchObject({
+      status: "validating",
+      cancelRequested: true,
+      outputHash: null,
+    });
+    releaseProposalReturn();
+
+    const cancelled = await manager.waitForJob(queued.id);
+    store.createCompletionProposal = createProposal;
+    const cancelledDetail = manager.getJobDetail(queued.id);
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      cancelRequested: true,
+      outputHash: null,
+      error: { code: "AI_CANCELLED" },
+    });
+    expect(cancelledDetail.runs).toHaveLength(1);
+    expect(cancelledDetail.runs[0]).toMatchObject({
+      status: "cancelled",
+      error: { code: "AI_CANCELLED" },
+    });
+    expect(cancelledDetail.events.map((event) => event.eventType)).not.toContain(
+      "succeeded",
+    );
+    const hidden = await store.getCompletionProposalByJobId(queued.id);
+    expect(hidden).toMatchObject({
+      jobStatus: "cancelled",
+      visible: false,
+      ranking: {
+        provider: provider.providerName,
+        model: "post-persist-cancel-model",
+        reasoningEffort: "high",
+      },
+    });
+    expect(await manager.listCompletionProposals({ jobId: queued.id })).toEqual([]);
+    await expect(manager.getCompletionProposalDetail(persistedProposalId)).rejects
+      .toMatchObject({ code: "COMPLETION_PROPOSAL_NOT_FOUND" });
+
+    const retry = await manager.retryJob(queued.id);
+    const retried = await manager.waitForJob(retry.id);
+    expect(retried).toMatchObject({
+      status: "succeeded",
+      retryOfJobId: queued.id,
+      options: { rankingMode: "ai", reasoningEffort: "high" },
+    });
+    expect(provider.rankingCalls).toBe(2);
+    expect(await manager.listCompletionProposals({ jobId: retry.id })).toHaveLength(1);
+    expect(await manager.listCompletionProposals({ jobId: queued.id })).toEqual([]);
+  });
+
+  it("recovers only complete host proposals after a post-persist restart", async () => {
+    const provider = new ScriptedProvider("recovery-host-provider", () => {
+      throw new Error("Recovery must not invoke the semantic provider");
+    });
+    const { manager, store, imported } = await setup([provider]);
+    const source = await createCompletionFixture(store, imported);
+    const complete = await createInterruptedCompletionFixture(
+      manager,
+      store,
+      source.revision.id,
+      "host_only",
+    );
+    const corrupt = await createInterruptedCompletionFixture(
+      manager,
+      store,
+      source.revision.id,
+      "host_only",
+    );
+    const incomplete = await createInterruptedCompletionFixture(
+      manager,
+      store,
+      source.revision.id,
+      "host_only",
+      false,
+    );
+    await writeFile(
+      resolve(
+        store.dataDirectory,
+        corrupt.detail!.proposal.allowedMask.storagePath,
+      ),
+      new Uint8Array([0]),
+    );
+    await manager.close();
+
+    const recoveredManager = restartManager(store, [provider]);
+    const recovered = await recoveredManager.waitForJob(complete.job.id);
+
+    expect(recovered).toMatchObject({
+      status: "succeeded",
+      outputHash: complete.proposal!.proposalHash,
+      resultRevisionId: null,
+      error: null,
+    });
+    expect(recoveredManager.getJobDetail(complete.job.id).events.map(
+      (event) => event.eventType,
+    )).toEqual(expect.arrayContaining([
+      "completion_recovery_verified",
+      "succeeded",
+    ]));
+    expect(await recoveredManager.listCompletionProposals({
+      jobId: complete.job.id,
+    })).toHaveLength(1);
+    expect(recoveredManager.getJobDetail(complete.job.id).runs).toEqual([]);
+    expect(recoveredManager.getJobDetail(corrupt.job.id).job).toMatchObject({
+      status: "failed",
+      outputHash: null,
+      error: { code: "WORKER_RESTARTED" },
+    });
+    expect(recoveredManager.getJobDetail(incomplete.job.id).job).toMatchObject({
+      status: "failed",
+      outputHash: null,
+      error: { code: "WORKER_RESTARTED" },
+    });
+  });
+
+  it("recovers a complete AI-ranked proposal and its interrupted Run", async () => {
+    const provider = new ScriptedCompletionRankingProvider(
+      "recovery-ranking-provider",
+      validCompletionRankingProposal,
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const source = await createCompletionFixture(store, imported);
+    const interrupted = await createInterruptedCompletionFixture(
+      manager,
+      store,
+      source.revision.id,
+      "ai",
+    );
+    await manager.close();
+
+    const recoveredManager = restartManager(store, [provider]);
+    const recovered = await recoveredManager.waitForJob(interrupted.job.id);
+    const detail = recoveredManager.getJobDetail(interrupted.job.id);
+
+    expect(recovered).toMatchObject({
+      status: "succeeded",
+      provider: provider.providerName,
+      model: "recovery-ranking-model",
+      outputHash: interrupted.proposal!.proposalHash,
+      options: { rankingMode: "ai", reasoningEffort: "high" },
+      error: null,
+    });
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({
+      status: "succeeded",
+      attempt: 1,
+      error: null,
+    });
+    expect(provider.rankingCalls).toBe(0);
+    const proposal = await recoveredManager.getCompletionProposalDetail(
+      interrupted.proposal!.proposalId,
+    );
+    expect(proposal).toMatchObject({
+      visible: true,
+      status: "awaiting_decision",
+      ranking: {
+        provider: provider.providerName,
+        model: "recovery-ranking-model",
+        reasoningEffort: "high",
+      },
+      decision: null,
+      result: null,
+    });
+  });
+
+  it("honors a persisted cancellation instead of recovering success", async () => {
+    const provider = new ScriptedCompletionRankingProvider(
+      "recovery-cancel-ranker",
+      validCompletionRankingProposal,
+    );
+    const { manager, store, imported } = await setup([provider]);
+    const source = await createCompletionFixture(store, imported);
+    const interrupted = await createInterruptedCompletionFixture(
+      manager,
+      store,
+      source.revision.id,
+      "ai",
+    );
+    expect(manager.jobStore.requestCancellation(interrupted.job.id)).toMatchObject({
+      status: "validating",
+      cancelRequested: true,
+    });
+    await manager.close();
+
+    const recoveredManager = restartManager(store, [provider]);
+    const cancelled = await recoveredManager.waitForJob(interrupted.job.id);
+    const detail = recoveredManager.getJobDetail(interrupted.job.id);
+
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      cancelRequested: true,
+      outputHash: null,
+      error: { code: "AI_CANCELLED" },
+    });
+    expect(detail.runs).toHaveLength(1);
+    expect(detail.runs[0]).toMatchObject({
+      status: "cancelled",
+      error: { code: "AI_CANCELLED" },
+    });
+    expect(detail.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining(["cancel_requested", "cancelled"]),
+    );
+    expect(detail.events.map((event) => event.eventType)).not.toContain(
+      "completion_recovery_verified",
+    );
+    expect(detail.events.map((event) => event.eventType)).not.toContain(
+      "succeeded",
+    );
+    expect(provider.rankingCalls).toBe(0);
+    const hidden = await store.getCompletionProposalByJobId(interrupted.job.id);
+    expect(hidden).toMatchObject({
+      jobStatus: "cancelled",
+      visible: false,
+      ranking: {
+        provider: provider.providerName,
+        model: "recovery-ranking-model",
+        reasoningEffort: "high",
+      },
+    });
+    expect(await recoveredManager.listCompletionProposals({
+      jobId: interrupted.job.id,
+    })).toEqual([]);
+    await expect(recoveredManager.getCompletionProposalDetail(
+      interrupted.proposal.proposalId,
+    )).rejects.toMatchObject({ code: "COMPLETION_PROPOSAL_NOT_FOUND" });
+  });
+
   it("persists a validated restoration recommendation as advisory evidence only", async () => {
     const provider = new ScriptedReplacementProvider(
       "replacement-provider",
@@ -1429,9 +2047,51 @@ class ScriptedReplacementProvider implements SkinSemanticAiProvider {
   }
 }
 
+class ScriptedCompletionRankingProvider implements SkinSemanticAiProvider {
+  rankingCalls = 0;
+
+  constructor(
+    readonly providerName: string,
+    private readonly response: (
+      input: ProviderCompletionRankingInput,
+    ) => unknown | Promise<unknown>,
+  ) {}
+
+  async analyze(): Promise<ProviderAnalysisResult> {
+    throw new Error("Semantic analysis was not expected in this test");
+  }
+
+  async rankCompletion(
+    input: ProviderCompletionRankingInput,
+  ): Promise<ProviderCompletionRankingResult> {
+    this.rankingCalls += 1;
+    input.onProgress?.({
+      kind: "session",
+      status: "started",
+      message: "Completion ranking session started",
+    });
+    input.onProgress?.({
+      kind: "output",
+      status: "completed",
+      message: "Completion ranking output generated",
+    });
+    return {
+      proposal: await this.response(input),
+      rawEvents:
+        `${JSON.stringify({ type: "thread.started", thread_id: `completion_thread_${this.rankingCalls}` })}\n`,
+      stderr: "",
+      threadId: `completion_thread_${this.rankingCalls}`,
+      usage: { input_tokens: 14 * this.rankingCalls, output_tokens: 7 },
+    };
+  }
+}
+
 async function setup(
   providers: readonly SkinSemanticAiProvider[],
-  options: Pick<AiJobManagerOptions, "semanticFollowupAssessor"> = {},
+  options: Pick<
+    AiJobManagerOptions,
+    "completionRanking" | "maxRepairAttempts" | "semanticFollowupAssessor"
+  > = {},
 ): Promise<{
   readonly manager: AiJobManager;
   readonly store: RevisionStore;
@@ -1459,6 +2119,186 @@ async function setup(
     await rm(dataDirectory, { recursive: true, force: true });
   });
   return { manager, store, imported };
+}
+
+function restartManager(
+  store: RevisionStore,
+  providers: readonly SkinSemanticAiProvider[],
+): AiJobManager {
+  const manager = new AiJobManager({
+    revisionStore: store,
+    providers,
+    dataDirectory: store.dataDirectory,
+    skillDirectory,
+  });
+  cleanups.push(async () => await manager.close());
+  return manager;
+}
+
+async function createInterruptedCompletionFixture(
+  manager: AiJobManager,
+  store: RevisionStore,
+  sourceRevisionId: string,
+  rankingMode: "host_only" | "ai",
+  persist = true,
+) {
+  const revision = store.getRevision(sourceRevisionId);
+  const [skinPng, semanticState, originDocument] = await Promise.all([
+    store.readRevisionSkinPng(revision.id),
+    store.readRevisionSemanticState(revision.id),
+    store.readRevisionOrigin(revision.id),
+  ]);
+  if (!originDocument) throw new Error("Completion recovery fixture needs origin");
+  const rankingProvider = manager.listCompletionRankingProviders()[0];
+  if (rankingMode === "ai" && !rankingProvider) {
+    throw new Error("Completion recovery fixture needs a ranking provider");
+  }
+  const options = rankingMode === "ai"
+    ? {
+        mode: "completion_proposal" as const,
+        provider: rankingProvider!,
+        model: "recovery-ranking-model",
+        reasoningEffort: "high" as const,
+        rankingMode: "ai" as const,
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "latent_component" as const,
+      }
+    : {
+        mode: "completion_proposal" as const,
+        provider: COMPLETION_JOB_PROVIDER,
+        model: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+        rankingMode: "host_only" as const,
+        targetComponentId: "clothing.completion",
+        occludingComponentIds: ["hair.occluder"],
+        representation: "latent_component" as const,
+      };
+  const job = manager.jobStore.createJob({
+    kind: "completion_proposal",
+    projectId: revision.projectId,
+    inputRevisionId: revision.id,
+    options,
+    skillName: rankingMode === "ai"
+      ? COMPLETION_RANKING_JOB_SKILL_NAME
+      : COMPLETION_JOB_SKILL_NAME,
+    skillVersion: rankingMode === "ai"
+      ? COMPLETION_RANKING_PACK_SCHEMA_VERSION
+      : COMPLETION_PROPOSAL_SCHEMA_VERSION,
+    promptVersion: rankingMode === "ai"
+      ? COMPLETION_RANKING_PROMPT_VERSION
+      : COMPLETION_JOB_PROMPT_VERSION,
+  });
+  manager.jobStore.transitionJob(job.id, "preparing", "Preparing fixture");
+  manager.jobStore.transitionJob(job.id, "running", "Generating fixture");
+  const proposal = generateCompletionProposalCandidates({
+    proposalId: `completion_${job.id.slice("aijob_".length)}`,
+    sourceRevisionId: revision.id,
+    sourceResultHash: revision.resultHash,
+    sourceSkinHash: semanticState.document.source.sourceHash,
+    image: decodeSkinPng(skinPng),
+    semanticState,
+    originDocument,
+    targetComponentId: options.targetComponentId,
+    occludingComponentIds: options.occludingComponentIds,
+    representation: options.representation,
+    hashCanonical: completionTestHash,
+  });
+  manager.jobStore.updateInputHash(
+    job.id,
+    rankingMode === "ai"
+      ? completionTestHash(`recovery-pack:${job.id}`)
+      : proposal.evidenceHash,
+  );
+  manager.jobStore.transitionJob(job.id, "validating", "Persisting fixture");
+
+  let run = null;
+  let ranking:
+    | {
+        readonly provider: string;
+        readonly model: string;
+        readonly reasoningEffort: "high";
+        readonly document: CompletionRankingProposal;
+        readonly rankingHash: string;
+      }
+    | undefined;
+  if (rankingMode === "ai") {
+    const runId = `airun_${job.id.slice("aijob_".length)}`;
+    run = manager.jobStore.createRun(
+      job.id,
+      manager.runStorage.workspaceDirectory(runId),
+      runId,
+    );
+    for (const fileRole of [
+      "input_manifest",
+      "raw_events",
+      "raw_output",
+      "stderr",
+      "validator_report",
+    ] as const) {
+      manager.jobStore.recordRunAsset({
+        runId: run.id,
+        fileRole,
+        storagePath: `runs/${run.id}/${fileRole}`,
+        mimeType: fileRole === "stderr" ? "text/plain" : "application/json",
+        byteSize: 1,
+        sha256: completionTestHash(fileRole),
+      });
+    }
+    const candidateIds = proposal.candidates.map(
+      (candidate) => candidate.candidateId,
+    );
+    const document: CompletionRankingProposal = {
+      schemaVersion: "1.0",
+      jobId: job.id,
+      proposalId: proposal.proposalId,
+      proposalHash: proposal.proposalHash,
+      sourceRevisionId: proposal.sourceRevisionId,
+      sourceResultHash: proposal.sourceResultHash,
+      sourceSkinHash: proposal.sourceSkinHash,
+      rankings: candidateIds.map((candidateId) => ({
+        candidateId,
+        confidence: 0.8,
+        explanation: "Visible continuity supports this order.",
+      })),
+      recommendation: candidateIds[0]
+        ? {
+            status: "recommend",
+            candidateId: candidateIds[0],
+            confidence: 0.8,
+            explanation: "Visible continuity is strongest for the first item.",
+          }
+        : {
+            status: "defer",
+            candidateId: null,
+            confidence: 0.2,
+            explanation: "Evidence is insufficient for a recommendation.",
+          },
+    };
+    ranking = {
+      provider: options.provider,
+      model: options.model,
+      reasoningEffort: "high",
+      document,
+      rankingHash: completionTestHash(canonicalCompletionJson(document)),
+    };
+  }
+  const detail = persist
+    ? await store.createCompletionProposal({
+        jobId: job.id,
+        proposal,
+        ...(ranking ? { ranking } : {}),
+      })
+    : null;
+  return {
+    job: manager.jobStore.getJob(job.id),
+    proposal,
+    detail,
+    run,
+  };
+}
+
+function completionTestHash(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function validProposal(
@@ -1521,6 +2361,41 @@ function semanticAnalysisOptions(
   };
 }
 
+function validCompletionRankingProposal(
+  input: ProviderCompletionRankingInput,
+): CompletionRankingProposal {
+  const candidateIds = input.pack.evidence.candidates
+    .map(({ candidateId }) => candidateId)
+    .reverse();
+  return {
+    schemaVersion: "1.0",
+    jobId: input.jobId,
+    proposalId: input.pack.evidence.proposalId,
+    proposalHash: input.pack.evidence.proposalHash,
+    sourceRevisionId: input.pack.evidence.sourceRevisionId,
+    sourceResultHash: input.pack.evidence.sourceResultHash,
+    sourceSkinHash: input.pack.evidence.sourceSkinHash,
+    rankings: candidateIds.map((candidateId, index) => ({
+      candidateId,
+      confidence: Math.max(0.5, 0.9 - index * 0.1),
+      explanation: "Visible continuity supports this relative position.",
+    })),
+    recommendation: candidateIds[0]
+      ? {
+          status: "recommend",
+          candidateId: candidateIds[0],
+          confidence: 0.85,
+          explanation: "The strongest visible continuity evidence is ranked first.",
+        }
+      : {
+          status: "defer",
+          candidateId: null,
+          confidence: 0.2,
+          explanation: "There is not enough visible continuity evidence to recommend one.",
+        },
+  };
+}
+
 async function classifyHeadPixel(
   store: RevisionStore,
   imported: ImportProjectResult,
@@ -1534,6 +2409,34 @@ async function classifyHeadPixel(
         category: "hair",
       },
       spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+    },
+  });
+}
+
+async function createCompletionFixture(
+  store: RevisionStore,
+  imported: ImportProjectResult,
+) {
+  const target = await store.applyManualOperation(imported.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: "clothing.completion",
+        displayName: "Completion clothing",
+        category: "upper_clothing",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+    },
+  });
+  return await store.applyManualOperation(target.revision.id, {
+    operation: {
+      type: "assign_pixels",
+      target: {
+        instanceId: "hair.occluder",
+        displayName: "Completion occluder",
+        category: "hair",
+      },
+      spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
     },
   });
 }

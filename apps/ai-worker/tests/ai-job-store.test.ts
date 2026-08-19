@@ -23,6 +23,204 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
+describe("AiJobStore completion proposals", () => {
+  it("persists the isolated host job shape and filters it by kind", async () => {
+    const { jobStore, imported } = await setup();
+    const job = jobStore.createJob({
+      kind: "completion_proposal",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      skillName: "mc-skin-completion-host",
+      skillVersion: "1.0",
+      promptVersion: "completion-host-v1",
+      options: {
+        mode: "completion_proposal",
+        provider: "deterministic_host",
+        model: "completion-candidates-v1",
+        rankingMode: "host_only",
+        targetComponentId: "clothing.main",
+        occludingComponentIds: ["hair.main"],
+        representation: "auto",
+      },
+    });
+
+    expect(job).toMatchObject({
+      kind: "completion_proposal",
+      resultRevisionId: null,
+      compositionId: null,
+      reviewItems: [],
+      advisoryResult: null,
+      options: {
+        rankingMode: "host_only",
+        representation: "auto",
+      },
+    });
+    expect(jobStore.listJobs({ kind: "completion_proposal" })).toEqual([job]);
+    expect(jobStore.listEvents(job.id)[0]).toMatchObject({
+      eventType: "queued",
+      data: { kind: "completion_proposal" },
+    });
+
+    jobStore.transitionJob(job.id, "preparing", "preparing");
+    jobStore.transitionJob(job.id, "running", "running", { inputHash: hash });
+    jobStore.transitionJob(job.id, "validating", "validating");
+    const failed = jobStore.transitionJob(job.id, "failed", "failed", {
+      error: { code: "TEST_FAILURE", message: "test failure" },
+    });
+    expect(failed.status).toBe("failed");
+  });
+
+  it("refuses every success transition after cancellation is requested", async () => {
+    const { jobStore, imported } = await setup();
+    const job = jobStore.createJob({
+      kind: "completion_proposal",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      skillName: "mc-skin-completion-host",
+      skillVersion: "1.0",
+      promptVersion: "completion-host-v1",
+      options: {
+        mode: "completion_proposal",
+        provider: "deterministic_host",
+        model: "completion-candidates-v1",
+        rankingMode: "host_only",
+        targetComponentId: "clothing.main",
+        occludingComponentIds: ["hair.main"],
+        representation: "auto",
+      },
+    });
+    jobStore.transitionJob(job.id, "preparing", "preparing");
+    jobStore.transitionJob(job.id, "running", "running", { inputHash: hash });
+    jobStore.transitionJob(job.id, "validating", "validating");
+    expect(jobStore.requestCancellation(job.id)).toMatchObject({
+      status: "validating",
+      cancelRequested: true,
+    });
+
+    expect(() =>
+      jobStore.transitionJob(job.id, "succeeded", "succeeded", {
+        outputHash: hash,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "AI_CANCELLED" }));
+    expect(jobStore.getJob(job.id)).toMatchObject({
+      status: "validating",
+      cancelRequested: true,
+      outputHash: null,
+    });
+    expect(jobStore.listEvents(job.id).map((event) => event.eventType)).not
+      .toContain("succeeded");
+  });
+
+  it("rechecks cancellation after another Store commits success", async () => {
+    const { revisionStore, jobStore, imported } = await setup();
+    const competingStore = new AiJobStore({
+      databasePath: revisionStore.databasePath,
+    });
+    cleanups.push(() => competingStore.close());
+    const job = jobStore.createJob({
+      kind: "semantic_analysis",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      skillName: AI_SKILL_NAME,
+      skillVersion: AI_SKILL_VERSION,
+      promptVersion: PROMPT_VERSION,
+      options: {
+        mode: "full",
+        semanticBaseline: "empty",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: false,
+      },
+    });
+    jobStore.transitionJob(job.id, "preparing", "preparing");
+    jobStore.transitionJob(job.id, "running", "running", { inputHash: hash });
+    jobStore.transitionJob(job.id, "validating", "validating");
+
+    const getJob = jobStore.getJob.bind(jobStore);
+    let successInjected = false;
+    jobStore.getJob = (jobId) => {
+      const observed = getJob(jobId);
+      if (jobId === job.id && !successInjected) {
+        successInjected = true;
+        competingStore.transitionJob(job.id, "succeeded", "succeeded", {
+          outputHash: hash,
+          reviewItems: [],
+          proposalSummary: "Competing Store committed success",
+        });
+      }
+      return observed;
+    };
+    cleanups.push(() => {
+      jobStore.getJob = getJob;
+    });
+
+    const result = jobStore.requestCancellation(job.id);
+
+    expect(successInjected).toBe(true);
+    expect(result).toMatchObject({
+      status: "succeeded",
+      cancelRequested: false,
+      outputHash: hash,
+    });
+    expect(competingStore.getJob(job.id)).toMatchObject({
+      status: "succeeded",
+      cancelRequested: false,
+    });
+    expect(jobStore.listEvents(job.id).map((event) => event.eventType)).not
+      .toContain("cancel_requested");
+  });
+
+  it("rejects malformed completion options and direct Revision output", async () => {
+    const { jobStore, imported } = await setup();
+    expect(() =>
+      jobStore.createJob({
+        kind: "completion_proposal",
+        projectId: imported.project.id,
+        inputRevisionId: imported.revision.id,
+        skillName: "mc-skin-completion-host",
+        skillVersion: "1.0",
+        promptVersion: "completion-host-v1",
+        options: {
+          mode: "completion_proposal",
+          provider: "deterministic_host",
+          model: "completion-candidates-v1",
+          rankingMode: "host_only",
+          targetComponentId: "clothing.main",
+          occludingComponentIds: ["hair.main", "hair.main"],
+          representation: "auto",
+        },
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
+
+    const job = jobStore.createJob({
+      kind: "completion_proposal",
+      projectId: imported.project.id,
+      inputRevisionId: imported.revision.id,
+      skillName: "mc-skin-completion-host",
+      skillVersion: "1.0",
+      promptVersion: "completion-host-v1",
+      options: {
+        mode: "completion_proposal",
+        provider: "completion-ranker",
+        model: "completion-ranker-v1",
+        rankingMode: "ai",
+        reasoningEffort: "medium",
+        targetComponentId: "clothing.main",
+        occludingComponentIds: ["hair.main"],
+        representation: "latent_component",
+      },
+    });
+    expect(() =>
+      jobStore.transitionJob(job.id, "failed", "failed", {
+        resultRevisionId: imported.revision.id,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_AI_JOB" }));
+  });
+});
+
 describe("AiJobStore restoration recommendations", () => {
   it("persists a strict advisory result and supports kind/composition filters", async () => {
     const { revisionStore, jobStore, imported } = await setup();

@@ -6,6 +6,7 @@ import type {
 import type {
   AnalysisPack,
   AnalysisReasoningEffort,
+  CompletionRankingPack,
   ReplacementPlanningPack,
 } from "@mc-skin-split/skin-analysis-pack";
 
@@ -222,6 +223,87 @@ export interface SkinSemanticAiProvider {
   recommendReplacement?(
     input: ProviderReplacementInput,
   ): Promise<ProviderReplacementResult>;
+  rankCompletion?(
+    input: ProviderCompletionRankingInput,
+  ): Promise<ProviderCompletionRankingResult>;
+}
+
+export interface CompletionCandidateRanking {
+  readonly candidateId: string;
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface CompletionRankingRecommendation {
+  readonly status: "recommend" | "defer";
+  readonly candidateId: string | null;
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface CompletionRankingProposal {
+  readonly schemaVersion: "1.0";
+  readonly jobId: string;
+  readonly proposalId: string;
+  readonly proposalHash: string;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly rankings: readonly CompletionCandidateRanking[];
+  readonly recommendation: CompletionRankingRecommendation;
+}
+
+export interface CompletionRankingValidationIssue {
+  readonly code: string;
+  readonly path: string;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export interface CompletionRankingValidationReport {
+  readonly schemaVersion: "1.0";
+  readonly validatorVersion: "completion-ranking-validator-v1";
+  readonly valid: boolean;
+  readonly errors: readonly CompletionRankingValidationIssue[];
+  readonly stats: {
+    readonly candidateCount: number;
+    readonly rankingCount: number;
+    readonly recommendationCount: number;
+    readonly deferred: boolean;
+  };
+}
+
+export type CompletionRankingValidationResult =
+  | {
+      readonly proposal: CompletionRankingProposal;
+      readonly report: CompletionRankingValidationReport & {
+        readonly valid: true;
+      };
+    }
+  | {
+      readonly proposal: CompletionRankingProposal | null;
+      readonly report: CompletionRankingValidationReport & {
+        readonly valid: false;
+      };
+    };
+
+export interface ProviderCompletionRankingInput {
+  readonly jobId: string;
+  readonly attempt: number;
+  readonly model: string;
+  readonly reasoningEffort: AnalysisReasoningEffort;
+  readonly pack: CompletionRankingPack;
+  readonly repairReport?: CompletionRankingValidationReport;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (event: ProviderProgressEvent) => void;
+}
+
+export interface ProviderCompletionRankingResult {
+  readonly proposal: unknown;
+  readonly rawEvents: string;
+  readonly stderr: string;
+  readonly threadId?: string;
+  readonly usage?: Readonly<Record<string, unknown>>;
 }
 
 export interface ReplacementPlanDecision {

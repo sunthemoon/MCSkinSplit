@@ -6,33 +6,55 @@ import {
   AI_SKILL_VERSION,
   ANALYSIS_PROPOSAL_SCHEMA,
   AiProviderError,
+  COMPLETION_RANKING_SCHEMA,
   REPLACEMENT_PLAN_SCHEMA,
   REPLACEMENT_PLANNER_SKILL_NAME,
   REPLACEMENT_PLANNER_SKILL_VERSION,
   validateAnalysisProposal,
+  validateCompletionRankingProposal,
   validateReplacementPlanProposal,
+  type CompletionRankingValidationReport,
   type ProposalValidationReport,
   type ProviderProgressEvent,
   type ReplacementPlanValidationReport,
   type SkinSemanticAiProvider,
 } from "@mc-skin-split/ai-provider";
 import {
+  ANALYSIS_REASONING_EFFORTS,
   PROMPT_VERSION,
+  COMPLETION_RANKING_PACK_SCHEMA_VERSION,
+  COMPLETION_RANKING_PROMPT_VERSION,
   REPLACEMENT_PLANNING_PROMPT_VERSION,
   SEMANTIC_FOLLOWUP_ALGORITHM_VERSION,
   assessSemanticFollowup,
   buildAnalysisPack,
+  buildCompletionRankingPack,
   buildReplacementPlanningPack,
   createAnalysisDocuments,
   verifyAnalysisPackIntegrity,
+  verifyCompletionRankingPackIntegrity,
   verifyReplacementPlanningPackIntegrity,
   type PublicRestorationCandidateCatalog,
 } from "@mc-skin-split/skin-analysis-pack";
-import { decodeSkinPng, getSkinLayout } from "@mc-skin-split/skin-core";
+import {
+  COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+  COMPLETION_PROPOSAL_SCHEMA_VERSION,
+  MAX_COMPLETION_OCCLUDING_COMPONENTS,
+  canonicalCompletionJson,
+  decodeSkinPng,
+  generateCompletionProposalCandidates,
+  getSkinLayout,
+  type CompletionSourceSnapshot,
+} from "@mc-skin-split/skin-core";
 import {
   RevisionStore,
   RevisionStoreError,
+  type AcceptCompletionCandidateInput,
+  type CompletionProposalDetail,
+  type CompletionProposalListQuery,
+  type CompletionProposalRankingInput,
   type OperationSnapshot,
+  type RejectCompletionProposalInput,
   type SkinPart,
   type SkinRevision,
 } from "@mc-skin-split/skin-revision";
@@ -44,17 +66,40 @@ import {
 import { AiRunStorage } from "./run-storage";
 import type {
   AiAnalysisOptions,
+  AiCompletionProposalOptions,
   AiJob,
   AiJobDetail,
   AiJobError,
   AiJobListFilters,
   AiRestorationRecommendationOptions,
   AiRun,
+  AiRunFileRole,
   SemanticAnalysisFollowup,
   SemanticAnalysisAiJob,
+  CompletionProposalAiJob,
+  StartCompletionProposalInput,
   StartAiRestorationRecommendationInput,
   StoredSemanticFollowup,
 } from "./types";
+
+export const COMPLETION_JOB_PROVIDER = "deterministic_host" as const;
+export const COMPLETION_JOB_SKILL_NAME = "mc-skin-completion-host" as const;
+export const COMPLETION_JOB_PROMPT_VERSION = "completion-host-v1" as const;
+export const COMPLETION_RANKING_JOB_SKILL_NAME =
+  "mc-skin-completion-ranker" as const;
+const COMPLETION_RANKING_RUN_FILE_ROLES = [
+  "input_manifest",
+  "raw_events",
+  "raw_output",
+  "stderr",
+  "validator_report",
+] as const satisfies readonly AiRunFileRole[];
+
+export interface CompletionRankingConfiguration {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: AiAnalysisOptions["reasoningEffort"];
+}
 
 export interface AiJobManagerOptions {
   readonly revisionStore: RevisionStore;
@@ -66,6 +111,7 @@ export interface AiJobManagerOptions {
   readonly maxRepairAttempts?: number;
   readonly recoverInterruptedJobs?: boolean;
   readonly semanticFollowupAssessor?: typeof assessSemanticFollowup;
+  readonly completionRanking?: CompletionRankingConfiguration;
 }
 
 export class AiJobManager {
@@ -76,6 +122,7 @@ export class AiJobManager {
   readonly replacementSkillDirectory: string;
   readonly maxRepairAttempts: number;
   private readonly semanticFollowupAssessor: typeof assessSemanticFollowup;
+  private readonly completionRanking: CompletionRankingConfiguration | null;
   private readonly providers = new Map<string, SkinSemanticAiProvider>();
   private readonly active = new Map<
     string,
@@ -89,6 +136,7 @@ export class AiJobManager {
     }
   >();
   private readonly ownsJobStore: boolean;
+  private readonly recoveryPromise: Promise<void>;
   private closed = false;
 
   constructor(options: AiJobManagerOptions) {
@@ -118,6 +166,9 @@ export class AiJobManager {
     this.maxRepairAttempts = options.maxRepairAttempts ?? 1;
     this.semanticFollowupAssessor =
       options.semanticFollowupAssessor ?? assessSemanticFollowup;
+    this.completionRanking = options.completionRanking
+      ? normalizeCompletionRankingConfiguration(options.completionRanking)
+      : null;
     if (
       !Number.isInteger(this.maxRepairAttempts) ||
       this.maxRepairAttempts < 0 ||
@@ -132,7 +183,12 @@ export class AiJobManager {
       this.providers.set(provider.providerName, provider);
     }
     if (this.providers.size === 0) throw new TypeError("At least one AI provider is required");
-    if (options.recoverInterruptedJobs ?? true) this.jobStore.failInterruptedJobs();
+    if (this.completionRanking) {
+      this.requireCompletionRankingProvider(this.completionRanking.provider);
+    }
+    this.recoveryPromise = options.recoverInterruptedJobs ?? true
+      ? this.recoverInterruptedJobs()
+      : Promise.resolve();
   }
 
   listProviders(): readonly string[] {
@@ -146,10 +202,19 @@ export class AiJobManager {
       .sort();
   }
 
+  listCompletionRankingProviders(): readonly string[] {
+    return [...this.providers.values()]
+      .filter((provider) => typeof provider.rankCompletion === "function")
+      .map((provider) => provider.providerName)
+      .sort();
+  }
+
   async startAnalysis(
     sourceRevisionId: string,
     options: AiAnalysisOptions,
   ): Promise<AiJob> {
+    this.assertOpen();
+    await this.recoveryPromise;
     this.assertOpen();
     this.requireProvider(options.provider);
     const revision = this.revisionStore.getRevision(sourceRevisionId);
@@ -191,6 +256,8 @@ export class AiJobManager {
     compositionId: string,
     input: StartAiRestorationRecommendationInput,
   ): Promise<AiJob> {
+    this.assertOpen();
+    await this.recoveryPromise;
     this.assertOpen();
     this.requireReplacementProvider(input.provider);
     const composition = this.revisionStore.getComposition(compositionId);
@@ -234,6 +301,71 @@ export class AiJobManager {
     return job;
   }
 
+  async startCompletionProposal(
+    sourceRevisionId: string,
+    input: StartCompletionProposalInput,
+  ): Promise<CompletionProposalAiJob> {
+    this.assertOpen();
+    await this.recoveryPromise;
+    this.assertOpen();
+    const options = normalizeCompletionProposalOptions(
+      input,
+      this.completionRanking,
+    );
+    const revision = this.revisionStore.getRevision(sourceRevisionId);
+    const [state, originDocument] = await Promise.all([
+      this.revisionStore.readRevisionSemanticState(revision.id),
+      this.revisionStore.readRevisionOrigin(revision.id),
+    ]);
+    if (!originDocument) {
+      throw new AiJobStoreError(
+        "COMPLETION_SOURCE_ORIGIN_REQUIRED",
+        "隐藏内容候选需要带逐像素来源的 Revision",
+        409,
+        { sourceRevisionId: revision.id },
+      );
+    }
+    const componentIds = new Set(
+      state.document.components.map((component) => component.instanceId),
+    );
+    if (!componentIds.has(options.targetComponentId)) {
+      throw new AiJobStoreError(
+        "INVALID_COMPLETION_PROPOSAL",
+        "目标组件不属于来源 Revision",
+        400,
+        { targetComponentId: options.targetComponentId },
+      );
+    }
+    const missingOccluders = options.occludingComponentIds.filter(
+      (componentId) => !componentIds.has(componentId),
+    );
+    if (missingOccluders.length > 0) {
+      throw new AiJobStoreError(
+        "INVALID_COMPLETION_PROPOSAL",
+        "遮挡组件不属于来源 Revision",
+        400,
+        { occludingComponentIds: missingOccluders },
+      );
+    }
+    const job = this.jobStore.createJob({
+      kind: "completion_proposal",
+      projectId: revision.projectId,
+      inputRevisionId: revision.id,
+      options,
+      skillName: options.rankingMode === "ai"
+        ? COMPLETION_RANKING_JOB_SKILL_NAME
+        : COMPLETION_JOB_SKILL_NAME,
+      skillVersion: options.rankingMode === "ai"
+        ? COMPLETION_RANKING_PACK_SCHEMA_VERSION
+        : COMPLETION_PROPOSAL_SCHEMA_VERSION,
+      promptVersion: options.rankingMode === "ai"
+        ? COMPLETION_RANKING_PROMPT_VERSION
+        : COMPLETION_JOB_PROMPT_VERSION,
+    });
+    this.schedule(job.id);
+    return job;
+  }
+
   async retryJob(
     jobId: string,
     overrides: Partial<
@@ -248,6 +380,8 @@ export class AiJobManager {
     > = {},
   ): Promise<AiJob> {
     this.assertOpen();
+    await this.recoveryPromise;
+    this.assertOpen();
     const source = this.jobStore.getJob(jobId);
     if (!isTerminal(source.status)) {
       throw new AiJobStoreError(
@@ -255,6 +389,63 @@ export class AiJobManager {
         "运行中的 AI Job 不能创建重试",
         409,
       );
+    }
+    if (source.kind === "completion_proposal") {
+      if (source.status === "succeeded") {
+        throw new AiJobStoreError(
+          "COMPLETION_RETRY_UNSUPPORTED",
+          "已完成的隐藏内容候选具有不可变提案，请直接使用现有结果",
+          409,
+          {
+            jobId: source.id,
+            sourceRevisionId: source.inputRevisionId,
+            requiredAction: "use_existing_proposal",
+          },
+        );
+      }
+      if (Object.values(overrides).some((value) => value !== undefined)) {
+        throw new AiJobStoreError(
+          "INVALID_AI_JOB",
+          "确定性隐藏内容候选重试不接受 AI 分析选项",
+          400,
+        );
+      }
+      const currentContract = source.options.rankingMode === "host_only"
+        ? source.skillName === COMPLETION_JOB_SKILL_NAME &&
+          source.skillVersion === COMPLETION_PROPOSAL_SCHEMA_VERSION &&
+          source.promptVersion === COMPLETION_JOB_PROMPT_VERSION &&
+          source.provider === COMPLETION_JOB_PROVIDER &&
+          source.model === COMPLETION_CANDIDATE_ALGORITHM_VERSION
+        : source.skillName === COMPLETION_RANKING_JOB_SKILL_NAME &&
+          source.skillVersion === COMPLETION_RANKING_PACK_SCHEMA_VERSION &&
+          source.promptVersion === COMPLETION_RANKING_PROMPT_VERSION;
+      if (!currentContract) {
+        throw new AiJobStoreError(
+          "COMPLETION_RETRY_CONTRACT_STALE",
+          "历史隐藏内容候选合同已变化，请从来源 Revision 新建候选",
+          409,
+          {
+            jobId: source.id,
+            sourceRevisionId: source.inputRevisionId,
+            requiredAction: "start_fresh_completion_proposal",
+          },
+        );
+      }
+      if (source.options.rankingMode === "ai") {
+        this.requireCompletionRankingProvider(source.provider);
+      }
+      const retry = this.jobStore.createJob({
+        kind: "completion_proposal",
+        projectId: source.projectId,
+        inputRevisionId: source.inputRevisionId,
+        options: source.options,
+        skillName: source.skillName,
+        skillVersion: source.skillVersion,
+        promptVersion: source.promptVersion,
+        retryOfJobId: source.id,
+      });
+      this.schedule(retry.id);
+      return retry;
     }
     if (source.kind === "restoration_recommendation") {
       if (
@@ -376,10 +567,89 @@ export class AiJobManager {
     };
   }
 
+  async listCompletionProposals(query: CompletionProposalListQuery = {}) {
+    await this.recoveryPromise;
+    const proposals = await this.revisionStore.listCompletionProposals(query);
+    return proposals.filter((summary) => {
+      const job = this.jobStore.getJob(summary.proposal.jobId);
+      return job.kind === "completion_proposal" &&
+        job.status === "succeeded" &&
+        job.outputHash === summary.proposal.proposalHash;
+    });
+  }
+
+  async getCompletionProposalDetail(proposalId: string) {
+    await this.recoveryPromise;
+    const detail = await this.revisionStore.getCompletionProposalDetail(proposalId);
+    const job = this.jobStore.getJob(detail.proposal.jobId);
+    if (
+      job.kind !== "completion_proposal" ||
+      job.status !== "succeeded" ||
+      job.outputHash !== detail.proposal.proposalHash
+    ) {
+      throw new AiJobStoreError(
+        "COMPLETION_PROPOSAL_NOT_FOUND",
+        `隐藏内容候选提案不存在：${proposalId}`,
+        404,
+      );
+    }
+    return detail;
+  }
+
+  async acceptCompletionCandidate(
+    proposalId: string,
+    input: Omit<AcceptCompletionCandidateInput, "action">,
+  ) {
+    this.assertOpen();
+    await this.recoveryPromise;
+    this.assertOpen();
+    const outcome = await this.revisionStore.acceptCompletionCandidate(
+      proposalId,
+      input,
+    );
+    if (outcome.changed) {
+      this.jobStore.appendEvent(
+        outcome.detail.proposal.jobId,
+        "completion_candidate_accepted",
+        "隐藏内容候选已由用户接受",
+        {
+          proposalId,
+          candidateId: input.candidateId,
+          representation: outcome.detail.proposal.representation,
+        },
+      );
+    }
+    return outcome;
+  }
+
+  async rejectCompletionProposal(
+    proposalId: string,
+    input: Omit<RejectCompletionProposalInput, "action">,
+  ) {
+    this.assertOpen();
+    await this.recoveryPromise;
+    this.assertOpen();
+    const outcome = await this.revisionStore.rejectCompletionProposal(
+      proposalId,
+      input,
+    );
+    if (outcome.changed) {
+      this.jobStore.appendEvent(
+        outcome.detail.proposal.jobId,
+        "completion_proposal_rejected",
+        "隐藏内容候选提案已由用户拒绝",
+        { proposalId },
+      );
+    }
+    return outcome;
+  }
+
   async applySemanticFollowup(
     jobId: string,
     suggestionId: string,
   ): Promise<AiJobDetail> {
+    this.assertOpen();
+    await this.recoveryPromise;
     this.assertOpen();
     const normalizedSuggestionId = suggestionId.trim();
     return this.runSemanticFollowupAction(
@@ -575,6 +845,8 @@ export class AiJobManager {
 
   async dismissSemanticFollowup(jobId: string): Promise<AiJobDetail> {
     this.assertOpen();
+    await this.recoveryPromise;
+    this.assertOpen();
     return this.runSemanticFollowupAction(jobId, "dismiss", async () => {
       const job = requireSemanticAnalysisJob(this.jobStore.getJob(jobId));
       const followup = this.jobStore.getSemanticFollowup(job.id);
@@ -616,6 +888,7 @@ export class AiJobManager {
   }
 
   async waitForJob(jobId: string): Promise<AiJob> {
+    await this.recoveryPromise;
     await this.active.get(jobId)?.promise;
     return this.jobStore.getJob(jobId);
   }
@@ -721,10 +994,134 @@ export class AiJobManager {
       context.suggestionId === suggestionId;
   }
 
+  private recoverInterruptedJobs(): Promise<void> {
+    const candidates = this.jobStore
+      .listJobs({ kind: "completion_proposal" })
+      .filter(
+        (job): job is CompletionProposalAiJob =>
+          job.kind === "completion_proposal" && job.status === "validating",
+      );
+    this.jobStore.failInterruptedJobs(candidates.map((job) => job.id));
+    return Promise.all(
+      candidates.map((job) => this.recoverInterruptedCompletionJob(job)),
+    ).then(() => undefined);
+  }
+
+  private async recoverInterruptedCompletionJob(
+    interruptedJob: CompletionProposalAiJob,
+  ): Promise<void> {
+    try {
+      if (interruptedJob.cancelRequested) {
+        this.cancelInterruptedCompletionJob(interruptedJob.id);
+        return;
+      }
+      const detail = await this.revisionStore.getCompletionProposalByJobId(
+        interruptedJob.id,
+      );
+      if (!detail) throw new Error("Completion proposal was not persisted");
+      assertCompletionRecoveryContract(interruptedJob, detail);
+
+      const current = requireCompletionProposalJob(
+        this.jobStore.getJob(interruptedJob.id),
+      );
+      if (current.status !== "validating") return;
+      if (current.cancelRequested) {
+        this.cancelInterruptedCompletionJob(current.id);
+        return;
+      }
+      this.recoverCompletionRun(current);
+      this.jobStore.appendEvent(
+        current.id,
+        "completion_recovery_verified",
+        "已验证中断前保存的隐藏内容候选",
+        {
+          proposalId: detail.proposal.id,
+          proposalHash: detail.proposal.proposalHash,
+          rankingMode: current.options.rankingMode,
+        },
+      );
+      this.jobStore.transitionJob(
+        current.id,
+        "succeeded",
+        "已从完整持久化候选恢复任务",
+        {
+          outputHash: detail.proposal.proposalHash,
+          proposalSummary: detail.candidateCount > 0
+            ? `已恢复 ${detail.candidateCount} 个仅供审核的隐藏内容候选`
+            : "已恢复候选检查结果；没有可支持的补全候选",
+        },
+      );
+    } catch {
+      const current = requireCompletionProposalJob(
+        this.jobStore.getJob(interruptedJob.id),
+      );
+      if (!isTerminal(current.status)) {
+        if (current.cancelRequested) {
+          this.cancelInterruptedCompletionJob(current.id);
+        } else {
+          this.jobStore.failInterruptedJob(current.id);
+        }
+      }
+    }
+  }
+
+  private cancelInterruptedCompletionJob(jobId: string): void {
+    const current = requireCompletionProposalJob(this.jobStore.getJob(jobId));
+    if (isTerminal(current.status)) return;
+    const error: AiJobError = {
+      code: "AI_CANCELLED",
+      message: "用户取消了隐藏内容候选生成",
+    };
+    for (const run of this.jobStore.listRuns(current.id)) {
+      if (run.status === "running") {
+        this.jobStore.finishRun({
+          runId: run.id,
+          status: "cancelled",
+          error,
+        });
+      }
+    }
+    this.jobStore.transitionJob(
+      current.id,
+      "cancelled",
+      "隐藏内容候选生成已取消",
+      { error },
+    );
+  }
+
+  private recoverCompletionRun(job: CompletionProposalAiJob): void {
+    const runs = this.jobStore.listRuns(job.id);
+    if (job.options.rankingMode === "host_only") {
+      if (runs.length !== 0) {
+        throw new Error("Host-only completion recovery has unexpected AI Runs");
+      }
+      return;
+    }
+    const latest = runs.at(-1);
+    if (
+      !latest ||
+      (latest.status !== "running" && latest.status !== "succeeded") ||
+      runs.slice(0, -1).some((run) => run.status !== "failed")
+    ) {
+      throw new Error("AI completion recovery Run history is incomplete");
+    }
+    const roles = this.jobStore
+      .listRunAssets(latest.id)
+      .map((asset) => asset.fileRole)
+      .sort();
+    if (!sameStrings(roles, [...COMPLETION_RANKING_RUN_FILE_ROLES].sort())) {
+      throw new Error("AI completion recovery Run assets are incomplete");
+    }
+    if (latest.status === "running") {
+      this.jobStore.finishRun({ runId: latest.id, status: "succeeded" });
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     for (const active of this.active.values()) active.controller.abort();
+    await Promise.allSettled([this.recoveryPromise]);
     await Promise.allSettled(
       [...this.active.values()].map((active) => active.promise),
     );
@@ -744,11 +1141,371 @@ export class AiJobManager {
 
   private async executeJob(jobId: string, signal: AbortSignal): Promise<void> {
     const job = this.jobStore.getJob(jobId);
+    if (job.kind === "completion_proposal") {
+      await this.executeCompletionProposalJob(jobId, signal);
+      return;
+    }
     if (job.kind === "restoration_recommendation") {
       await this.executeRestorationRecommendationJob(jobId, signal);
       return;
     }
     await this.executeSemanticAnalysisJob(jobId, signal);
+  }
+
+  private async executeCompletionProposalJob(
+    jobId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let currentRun: AiRun | null = null;
+    try {
+      this.assertNotCancelled(jobId, signal);
+      let job = requireCompletionProposalJob(
+        this.jobStore.transitionJob(
+          jobId,
+          "preparing",
+          "正在读取来源像素、语义组件与逐像素来源",
+        ),
+      );
+      const sourceRevision = this.revisionStore.getRevision(
+        job.inputRevisionId,
+      );
+      const [skinPng, semanticState, originDocument] = await Promise.all([
+        this.revisionStore.readRevisionSkinPng(sourceRevision.id),
+        this.revisionStore.readRevisionSemanticState(sourceRevision.id),
+        this.revisionStore.readRevisionOrigin(sourceRevision.id),
+      ]);
+      if (!originDocument) {
+        throw new AiJobStoreError(
+          "COMPLETION_SOURCE_ORIGIN_REQUIRED",
+          "隐藏内容候选需要带逐像素来源的 Revision",
+          409,
+          { sourceRevisionId: sourceRevision.id },
+        );
+      }
+      const source: CompletionSourceSnapshot = {
+        sourceRevisionId: sourceRevision.id,
+        sourceResultHash: sourceRevision.resultHash,
+        sourceSkinHash: semanticState.document.source.sourceHash,
+        image: decodeSkinPng(skinPng),
+        semanticState,
+        originDocument,
+      };
+      this.assertNotCancelled(jobId, signal);
+      job = requireCompletionProposalJob(
+        this.jobStore.transitionJob(
+          job.id,
+          "running",
+          "正在生成确定性隐藏内容候选",
+        ),
+      );
+      this.jobStore.appendEvent(
+        job.id,
+        "candidate_generation_started",
+        "Host 已开始生成受限像素候选",
+        {
+          targetComponentId: job.options.targetComponentId,
+          occludingComponentIds: job.options.occludingComponentIds,
+          requestedRepresentation: job.options.representation,
+        },
+      );
+      const proposal = generateCompletionProposalCandidates({
+        proposalId: `completion_${cryptoRandomSuffix()}`,
+        ...source,
+        targetComponentId: job.options.targetComponentId,
+        occludingComponentIds: job.options.occludingComponentIds,
+        representation: job.options.representation,
+        hashCanonical: completionHash,
+      });
+      this.jobStore.appendEvent(
+        job.id,
+        "completion_candidates_generated",
+        proposal.candidates.length > 0
+          ? "确定性隐藏内容候选已生成"
+          : "没有足够证据生成隐藏内容候选",
+        {
+          proposalId: proposal.proposalId,
+          candidateCount: proposal.candidates.length,
+          representation: proposal.representation,
+          allowedGeneratedPixelCount: proposal.allowedGeneratedPixelCount,
+          reviewOnly: true,
+        },
+      );
+      this.assertNotCancelled(jobId, signal);
+      job = requireCompletionProposalJob(
+        this.jobStore.transitionJob(
+          job.id,
+          "validating",
+          job.options.rankingMode === "ai"
+            ? "确定性候选已锁定；正在准备 AI 排序"
+            : "正在校验并保存候选证据",
+        ),
+      );
+
+      let ranking: CompletionProposalRankingInput | undefined;
+      let successfulProviderResult:
+        | {
+            readonly threadId?: string;
+            readonly usage?: Readonly<Record<string, unknown>>;
+          }
+        | undefined;
+
+      if (job.options.rankingMode === "host_only") {
+        job = requireCompletionProposalJob(
+          this.jobStore.updateInputHash(job.id, proposal.evidenceHash),
+        );
+      } else {
+        const rankingOptions = job.options;
+        const provider = this.requireCompletionRankingProvider(job.provider);
+        let repairReport: CompletionRankingValidationReport | undefined;
+        const maximumAttempts = this.maxRepairAttempts + 1;
+
+        for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+          this.assertNotCancelled(jobId, signal);
+          const provisionalRunId = `airun_${cryptoRandomSuffix()}`;
+          const provisionalWorkspace =
+            this.runStorage.workspaceDirectory(provisionalRunId);
+          currentRun = this.jobStore.createRun(
+            job.id,
+            provisionalWorkspace,
+            provisionalRunId,
+          );
+          const workspace = await this.runStorage.createWorkspace(currentRun.id);
+          if (workspace !== currentRun.workspacePath) {
+            throw new Error("AI Run workspace identity mismatch");
+          }
+          const pack = await buildCompletionRankingPack({
+            workspaceDirectory: workspace,
+            proposalSchema: COMPLETION_RANKING_SCHEMA,
+            jobId: job.id,
+            completionProposal: proposal,
+            source,
+            provider: job.provider,
+            model: job.model,
+            reasoningEffort: rankingOptions.reasoningEffort,
+          });
+          if (attempt === 1) {
+            job = requireCompletionProposalJob(
+              this.jobStore.updateInputHash(job.id, pack.inputHash),
+            );
+          } else if (job.inputHash !== pack.inputHash) {
+            throw new Error(
+              "Repair completion ranking pack changed its deterministic input hash",
+            );
+          }
+          if (repairReport) {
+            await this.runStorage.writeJson(
+              currentRun.id,
+              pack.paths.previousValidatorReport,
+              repairReport,
+            );
+          }
+          job = requireCompletionProposalJob(
+            this.jobStore.transitionJob(
+              job.id,
+              "running",
+              attempt === 1
+                ? "AI 正在对确定性候选排序"
+                : "AI 正在修复无效候选排序",
+            ),
+          );
+          const progressRun = currentRun;
+          const providerResult = await provider.rankCompletion({
+            jobId: job.id,
+            attempt,
+            model: job.model,
+            reasoningEffort: rankingOptions.reasoningEffort,
+            pack,
+            ...(repairReport ? { repairReport } : {}),
+            signal,
+            onProgress: (event) => {
+              try {
+                this.jobStore.appendEvent(
+                  jobId,
+                  `provider_${event.kind}`,
+                  event.message,
+                  providerProgressEventData(progressRun.id, attempt, event),
+                );
+              } catch {
+                // Progress telemetry must never decide the ranking result.
+              }
+            },
+          });
+          await verifyCompletionRankingPackIntegrity(pack);
+          await Promise.all([
+            this.runStorage.writeJson(
+              currentRun.id,
+              pack.paths.proposal,
+              providerResult.proposal,
+            ),
+            this.runStorage.writeText(
+              currentRun.id,
+              "logs/codex-events.jsonl",
+              providerResult.rawEvents,
+            ),
+            this.runStorage.writeText(
+              currentRun.id,
+              "logs/codex-stderr.log",
+              providerResult.stderr,
+            ),
+          ]);
+          job = requireCompletionProposalJob(
+            this.jobStore.transitionJob(
+              job.id,
+              "validating",
+              "正在校验候选排序与来源绑定",
+            ),
+          );
+          const validation = validateCompletionRankingProposal({
+            proposal: providerResult.proposal,
+            pack,
+          });
+          await this.runStorage.writeJson(
+            currentRun.id,
+            pack.paths.validatorReport,
+            validation.report,
+          );
+          const assets = await this.inspectRecommendationRunAssets(
+            currentRun.id,
+            pack.paths,
+          );
+          for (const asset of assets) {
+            this.jobStore.recordRunAsset({
+              runId: currentRun.id,
+              fileRole: asset.fileRole,
+              storagePath: asset.storagePath,
+              mimeType: asset.mimeType,
+              byteSize: asset.byteSize,
+              sha256: asset.sha256,
+            });
+          }
+
+          if (validation.report.valid && validation.proposal) {
+            const validatedProposal = validation.proposal;
+            ranking = {
+              provider: job.provider,
+              model: job.model,
+              reasoningEffort: rankingOptions.reasoningEffort,
+              document: validatedProposal,
+              rankingHash: completionHash(
+                canonicalCompletionJson(validatedProposal),
+              ),
+            };
+            successfulProviderResult = providerResult;
+            break;
+          }
+
+          const validationError: AiJobError = {
+            code: "AI_COMPLETION_RANKING_INVALID",
+            message:
+              `AI 候选排序未通过校验（${validation.report.errors.length} 项）`,
+            details: { validatorReport: validation.report },
+          };
+          this.jobStore.finishRun({
+            runId: currentRun.id,
+            status: "failed",
+            ...(providerResult.threadId
+              ? { threadId: providerResult.threadId }
+              : {}),
+            ...(providerResult.usage ? { usage: providerResult.usage } : {}),
+            error: validationError,
+          });
+          currentRun = null;
+          repairReport = validation.report;
+          if (attempt < maximumAttempts) continue;
+          throw new AiJobStoreError(
+            validationError.code,
+            validationError.message,
+            422,
+            validationError.details,
+          );
+        }
+        if (!ranking || !currentRun || !successfulProviderResult) {
+          throw new Error("Validated completion ranking result is missing");
+        }
+      }
+
+      this.assertNotCancelled(jobId, signal);
+      const detail = await this.revisionStore.createCompletionProposal({
+        jobId: job.id,
+        proposal,
+        ...(ranking ? { ranking } : {}),
+      });
+      this.assertNotCancelled(jobId, signal);
+      if (
+        detail.proposal.jobId !== job.id ||
+        detail.proposal.proposalHash !== proposal.proposalHash ||
+        detail.proposal.sourceRevisionId !== job.inputRevisionId ||
+        (ranking !== undefined) !== (detail.ranking !== null) ||
+        (ranking &&
+          detail.ranking &&
+          (detail.ranking.rankingHash !== ranking.rankingHash ||
+            detail.ranking.provider !== ranking.provider ||
+            detail.ranking.model !== ranking.model ||
+            detail.ranking.reasoningEffort !== ranking.reasoningEffort))
+      ) {
+        throw new AiJobStoreError(
+          "COMPLETION_PROPOSAL_CORRUPT",
+          "持久化候选与 Worker 生成结果不一致",
+          500,
+          { proposalId: proposal.proposalId },
+        );
+      }
+      if (currentRun && successfulProviderResult) {
+        this.jobStore.finishRun({
+          runId: currentRun.id,
+          status: "succeeded",
+          ...(successfulProviderResult.threadId
+            ? { threadId: successfulProviderResult.threadId }
+            : {}),
+          ...(successfulProviderResult.usage
+            ? { usage: successfulProviderResult.usage }
+            : {}),
+        });
+        currentRun = null;
+      }
+      this.jobStore.transitionJob(
+        job.id,
+        "succeeded",
+        proposal.candidates.length === 0
+          ? "候选检查已完成；没有可支持的补全候选"
+          : ranking
+            ? "隐藏内容候选及 AI 排序已验证；等待用户审核"
+            : "隐藏内容候选已验证；等待用户审核",
+        {
+          outputHash: proposal.proposalHash,
+          proposalSummary:
+            proposal.candidates.length > 0
+              ? `已生成 ${proposal.candidates.length} 个仅供审核的隐藏内容候选`
+              : "没有足够的可见证据生成隐藏内容候选",
+        },
+      );
+    } catch (error) {
+      const failure = errorToJobError(error);
+      if (currentRun?.status === "running") {
+        if (
+          error instanceof AiProviderError &&
+          failure.code !== "AI_CANCELLED"
+        ) {
+          await this.persistProviderFailureAssets(currentRun.id, error);
+        }
+        this.jobStore.finishRun({
+          runId: currentRun.id,
+          status: failure.code === "AI_CANCELLED" ? "cancelled" : "failed",
+          error: failure,
+        });
+      }
+      const job = this.jobStore.getJob(jobId);
+      if (!isTerminal(job.status)) {
+        this.jobStore.transitionJob(
+          job.id,
+          failure.code === "AI_CANCELLED" ? "cancelled" : "failed",
+          failure.code === "AI_CANCELLED"
+            ? "隐藏内容候选生成已取消"
+            : "隐藏内容候选生成失败",
+          { error: failure },
+        );
+      }
+    }
   }
 
   private async executeSemanticAnalysisJob(
@@ -1605,6 +2362,22 @@ export class AiJobManager {
       Required<Pick<SkinSemanticAiProvider, "recommendReplacement">>;
   }
 
+  private requireCompletionRankingProvider(
+    providerName: string,
+  ): SkinSemanticAiProvider & Required<Pick<SkinSemanticAiProvider, "rankCompletion">> {
+    const provider = this.requireProvider(providerName);
+    if (!provider.rankCompletion) {
+      throw new AiJobStoreError(
+        "AI_PROVIDER_CAPABILITY_UNAVAILABLE",
+        `AI Provider 不支持隐藏内容候选排序：${providerName}`,
+        400,
+        { provider: providerName },
+      );
+    }
+    return provider as SkinSemanticAiProvider &
+      Required<Pick<SkinSemanticAiProvider, "rankCompletion">>;
+  }
+
   private assertOpen(): void {
     if (this.closed) {
       throw new AiJobStoreError("AI_WORKER_CLOSED", "AI Worker 已关闭", 503);
@@ -1696,6 +2469,106 @@ function normalizeOptions(options: AiAnalysisOptions): AiAnalysisOptions {
     focus: [...new Set(options.focus)].sort(),
     createRevisionOnSuccess: options.createRevisionOnSuccess,
   };
+}
+
+function normalizeCompletionProposalOptions(
+  input: StartCompletionProposalInput,
+  ranking: CompletionRankingConfiguration | null,
+): AiCompletionProposalOptions {
+  const targetComponentId = normalizeCompletionComponentId(
+    input.targetComponentId,
+    "targetComponentId",
+  );
+  if (!Array.isArray(input.occludingComponentIds)) {
+    throw new AiJobStoreError(
+      "INVALID_COMPLETION_PROPOSAL",
+      "occludingComponentIds 必须是数组",
+      400,
+    );
+  }
+  const normalizedOccludingComponentIds = input.occludingComponentIds.map(
+    (componentId) =>
+      normalizeCompletionComponentId(componentId, "occludingComponentIds"),
+  );
+  const occludingComponentIds = [...normalizedOccludingComponentIds].sort();
+  if (
+    occludingComponentIds.length < 1 ||
+    occludingComponentIds.length > MAX_COMPLETION_OCCLUDING_COMPONENTS ||
+    new Set(occludingComponentIds).size !== occludingComponentIds.length ||
+    occludingComponentIds.includes(targetComponentId)
+  ) {
+    throw new AiJobStoreError(
+      "INVALID_COMPLETION_PROPOSAL",
+      `遮挡组件必须包含 1-${MAX_COMPLETION_OCCLUDING_COMPONENTS} 个不同于目标的组件`,
+      400,
+    );
+  }
+  const representation = input.representation ?? "auto";
+  if (
+    representation !== "auto" &&
+    representation !== "skin_texel" &&
+    representation !== "latent_component"
+  ) {
+    throw new AiJobStoreError(
+      "INVALID_COMPLETION_PROPOSAL",
+      "隐藏内容表示类型无效",
+      400,
+    );
+  }
+  const common = {
+    mode: "completion_proposal",
+    targetComponentId,
+    occludingComponentIds,
+    representation,
+  } as const;
+  return ranking
+    ? { ...common, ...ranking, rankingMode: "ai" }
+    : {
+        ...common,
+        provider: COMPLETION_JOB_PROVIDER,
+        model: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+        rankingMode: "host_only",
+      };
+}
+
+function normalizeCompletionRankingConfiguration(
+  value: CompletionRankingConfiguration,
+): CompletionRankingConfiguration {
+  const provider = value.provider.trim();
+  const model = value.model.trim();
+  if (!provider || provider.length > 80) {
+    throw new TypeError("completionRanking.provider must contain 1-80 characters");
+  }
+  if (!model || model.length > 120) {
+    throw new TypeError("completionRanking.model must contain 1-120 characters");
+  }
+  if (!ANALYSIS_REASONING_EFFORTS.includes(value.reasoningEffort)) {
+    throw new TypeError("completionRanking.reasoningEffort is invalid");
+  }
+  return { provider, model, reasoningEffort: value.reasoningEffort };
+}
+
+function normalizeCompletionComponentId(value: string, label: string): string {
+  if (typeof value !== "string") {
+    throw new AiJobStoreError(
+      "INVALID_COMPLETION_PROPOSAL",
+      `${label} 包含无效组件 ID`,
+      400,
+    );
+  }
+  const normalized = value.trim();
+  if (
+    !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u.test(normalized) ||
+    normalized === "unknown" ||
+    normalized.length > 100
+  ) {
+    throw new AiJobStoreError(
+      "INVALID_COMPLETION_PROPOSAL",
+      `${label} 包含无效组件 ID`,
+      400,
+    );
+  }
+  return normalized;
 }
 
 function publicSemanticFollowup(
@@ -1830,8 +2703,126 @@ function requireSemanticAnalysisJob(job: AiJob): SemanticAnalysisAiJob {
   return job;
 }
 
+function requireCompletionProposalJob(job: AiJob): CompletionProposalAiJob {
+  if (job.kind !== "completion_proposal") {
+    throw new Error("Completion proposal job identity changed");
+  }
+  return job;
+}
+
+function assertCompletionRecoveryContract(
+  job: CompletionProposalAiJob,
+  detail: CompletionProposalDetail,
+): void {
+  const proposal = detail.proposal;
+  const document = detail.document;
+  if (
+    job.status !== "validating" ||
+    job.outputHash !== null ||
+    detail.jobStatus !== "validating" ||
+    detail.visible ||
+    detail.status !== "awaiting_decision" ||
+    detail.decision !== null ||
+    detail.result !== null ||
+    proposal.jobId !== job.id ||
+    proposal.projectId !== job.projectId ||
+    proposal.sourceRevisionId !== job.inputRevisionId ||
+    proposal.id !== document.proposalId ||
+    proposal.sourceRevisionId !== document.sourceRevisionId ||
+    proposal.sourceResultHash !== document.sourceResultHash ||
+    proposal.sourceSkinHash !== document.sourceSkinHash ||
+    proposal.targetComponentId !== document.targetComponentId ||
+    proposal.representation !== document.representation ||
+    proposal.evidenceHash !== document.evidenceHash ||
+    proposal.proposalHash !== document.proposalHash ||
+    job.options.targetComponentId !== document.targetComponentId ||
+    job.options.representation !== document.requestedRepresentation ||
+    !sameStrings(
+      [...job.options.occludingComponentIds].sort(),
+      [...document.occludingComponentIds].sort(),
+    ) ||
+    detail.candidateCount !== document.candidates.length ||
+    detail.candidateCount !== detail.candidates.length ||
+    !sameStrings(
+      detail.candidates.map((candidate) => candidate.id).sort(),
+      document.candidates.map((candidate) => candidate.candidateId).sort(),
+    )
+  ) {
+    throw new Error("Completion recovery Proposal contract mismatch");
+  }
+  const documentCandidates = new Map(
+    document.candidates.map((candidate) => [candidate.candidateId, candidate]),
+  );
+  if (
+    detail.candidates.some((candidate) => {
+      const source = documentCandidates.get(candidate.id);
+      return !source ||
+        source.candidateHash !== candidate.candidateHash ||
+        source.evidenceHash !== candidate.evidenceHash ||
+        source.representation !== candidate.representation;
+    })
+  ) {
+    throw new Error("Completion recovery Candidate contract mismatch");
+  }
+
+  if (job.options.rankingMode === "host_only") {
+    if (
+      detail.ranking !== null ||
+      job.provider !== COMPLETION_JOB_PROVIDER ||
+      job.model !== COMPLETION_CANDIDATE_ALGORITHM_VERSION ||
+      job.skillName !== COMPLETION_JOB_SKILL_NAME ||
+      job.skillVersion !== COMPLETION_PROPOSAL_SCHEMA_VERSION ||
+      job.promptVersion !== COMPLETION_JOB_PROMPT_VERSION ||
+      job.inputHash !== document.evidenceHash
+    ) {
+      throw new Error("Completion recovery host contract mismatch");
+    }
+    return;
+  }
+
+  const ranking = detail.ranking;
+  if (
+    !ranking ||
+    !isSha256(job.inputHash) ||
+    job.skillName !== COMPLETION_RANKING_JOB_SKILL_NAME ||
+    job.skillVersion !== COMPLETION_RANKING_PACK_SCHEMA_VERSION ||
+    job.promptVersion !== COMPLETION_RANKING_PROMPT_VERSION ||
+    ranking.jobId !== job.id ||
+    ranking.proposalId !== proposal.id ||
+    ranking.provider !== job.provider ||
+    ranking.model !== job.model ||
+    ranking.reasoningEffort !== job.options.reasoningEffort ||
+    ranking.document.jobId !== job.id ||
+    ranking.document.proposalId !== proposal.id ||
+    ranking.document.proposalHash !== proposal.proposalHash ||
+    ranking.document.sourceRevisionId !== proposal.sourceRevisionId ||
+    ranking.document.sourceResultHash !== proposal.sourceResultHash ||
+    ranking.document.sourceSkinHash !== proposal.sourceSkinHash ||
+    !sameStrings(
+      [...ranking.orderedCandidateIds].sort(),
+      detail.candidates.map((candidate) => candidate.id).sort(),
+    )
+  ) {
+    throw new Error("Completion recovery AI ranking contract mismatch");
+  }
+}
+
+function sameStrings(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return left.length === right.length &&
+    left.every((value, index) => value === right[index]);
+}
+
+function isSha256(value: string | null): value is string {
+  return value !== null && /^sha256:[0-9a-f]{64}$/u.test(value);
+}
+
 function aiTaskName(job: Pick<AiJob, "kind">): string {
-  return job.kind === "restoration_recommendation" ? "AI 换装建议" : "AI 分析";
+  if (job.kind === "restoration_recommendation") return "AI 换装建议";
+  if (job.kind === "completion_proposal") return "隐藏内容候选生成";
+  return "AI 分析";
 }
 
 function toPublicRestorationCandidateCatalog(
@@ -1930,6 +2921,10 @@ function sanitizeProviderCommandSummary(value: string | undefined): string | und
 
 function cryptoRandomSuffix(): string {
   return randomUUID().replaceAll("-", "");
+}
+
+function completionHash(canonicalJson: string): string {
+  return `sha256:${createHash("sha256").update(canonicalJson).digest("hex")}`;
 }
 
 function objectRecord(value: unknown): Readonly<Record<string, unknown>> | null {

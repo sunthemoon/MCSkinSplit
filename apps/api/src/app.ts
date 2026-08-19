@@ -12,11 +12,13 @@ import {
   AiJobStoreError,
   type AiAnalysisOptions,
   type AiJobKind,
+  type StartCompletionProposalInput,
   type StartAiRestorationRecommendationInput,
   type AnalysisReasoningEffort,
 } from "@mc-skin-split/ai-worker";
 import {
   AGGREGATE_KINDS,
+  MAX_COMPLETION_OCCLUDING_COMPONENTS,
   SEMANTIC_CATEGORIES,
   SkinPngError,
   summarizePixelOrigins,
@@ -32,6 +34,10 @@ import {
   RevisionStore,
   RevisionStoreError,
   type BranchFromRevisionInput,
+  type CompletionCandidateFileName,
+  type CompletionProposalDetail,
+  type CompletionProposalSummary,
+  type StoredCompletionCandidate,
   type PartBundle,
   type RevertRevisionInput,
   type SerializedPartRepairOperation,
@@ -39,6 +45,7 @@ import {
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
+  type FastifyReply,
   type FastifyServerOptions,
 } from "fastify";
 
@@ -115,6 +122,14 @@ interface CompositionLayerParams extends CompositionParams {
 
 interface AiJobParams {
   readonly jobId: string;
+}
+
+interface CompletionProposalParams {
+  readonly proposalId: string;
+}
+
+interface CompletionCandidateParams extends CompletionProposalParams {
+  readonly candidateId: string;
 }
 
 interface CreateProjectBody {
@@ -303,6 +318,33 @@ interface ApplySemanticFollowupBody {
   readonly suggestionId: string;
 }
 
+interface StartCompletionProposalBody extends StartCompletionProposalInput {}
+
+interface CompletionProposalsQuery {
+  readonly projectId?: string;
+  readonly revisionId?: string;
+  readonly jobId?: string;
+  readonly representation?: "skin_texel" | "latent_component";
+  readonly status?: "awaiting_decision" | "accepted" | "rejected" | "all";
+}
+
+interface AcceptCompletionCandidateBody {
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string;
+  readonly actorId?: string;
+  readonly summary?: string;
+}
+
+interface RejectCompletionProposalBody {
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly actorId?: string;
+  readonly reason?: string;
+}
+
 export function buildApi(options: ApiOptions = {}): FastifyInstance {
   const app = Fastify({
     bodyLimit: MAX_SKIN_BYTES,
@@ -321,6 +363,10 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   const defaultAiReasoningEffort = readReasoningEffort(
     process.env.AI_REASONING_EFFORT,
     "medium",
+  );
+  const completionRankingEnabled = readBoolean(
+    process.env.AI_COMPLETION_RANKING,
+    false,
   );
   const aiJobManager =
     options.aiJobManager ??
@@ -358,6 +404,23 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
         0,
         3,
       ),
+      ...(completionRankingEnabled
+        ? {
+            completionRanking: {
+              provider:
+                process.env.AI_COMPLETION_RANKING_PROVIDER?.trim() ||
+                "codex-exec",
+              model:
+                process.env.AI_COMPLETION_RANKING_MODEL?.trim() ||
+                process.env.AI_MODEL?.trim() ||
+                CODEX_CONFIG_DEFAULT_MODEL,
+              reasoningEffort: readReasoningEffort(
+                process.env.AI_COMPLETION_RANKING_REASONING_EFFORT,
+                defaultAiReasoningEffort,
+              ),
+            },
+          }
+        : {}),
       ...(process.env.MC_SKIN_AI_SKILL_DIR?.trim()
         ? { skillDirectory: resolve(process.env.MC_SKIN_AI_SKILL_DIR) }
         : {}),
@@ -438,6 +501,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     providers: aiJobManager.listProviders(),
     restorationRecommendationProviders:
       aiJobManager.listRestorationRecommendationProviders(),
+    completionRankingProviders: aiJobManager.listCompletionRankingProviders(),
     defaultModel:
       process.env.AI_MODEL?.trim() || CODEX_CONFIG_DEFAULT_MODEL,
     defaultReasoningEffort: defaultAiReasoningEffort,
@@ -1187,6 +1251,169 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     },
   );
 
+  app.post<{ Params: RevisionParams; Body: StartCompletionProposalBody }>(
+    "/api/revisions/:revisionId/completion-proposals",
+    { schema: { body: startCompletionProposalSchema } },
+    async (request, reply) => {
+      const job = await aiJobManager.startCompletionProposal(
+        request.params.revisionId,
+        request.body,
+      );
+      return reply.status(202).send({ job });
+    },
+  );
+
+  app.get<{ Querystring: CompletionProposalsQuery }>(
+    "/api/completion-proposals",
+    { schema: { querystring: completionProposalsQuerySchema } },
+    async (request) => ({
+      proposals: (await aiJobManager.listCompletionProposals({
+        ...(request.query.projectId
+          ? { projectId: request.query.projectId }
+          : {}),
+        ...(request.query.revisionId
+          ? { sourceRevisionId: request.query.revisionId }
+          : {}),
+        ...(request.query.jobId ? { jobId: request.query.jobId } : {}),
+        ...(request.query.representation
+          ? { representation: request.query.representation }
+          : {}),
+        ...(request.query.status ? { status: request.query.status } : {}),
+      })).map(publicCompletionProposalSummary),
+    }),
+  );
+
+  app.get<{ Params: CompletionProposalParams }>(
+    "/api/completion-proposals/:proposalId",
+    async (request) =>
+      publicCompletionProposalDetail(
+        await aiJobManager.getCompletionProposalDetail(
+          request.params.proposalId,
+        ),
+      ),
+  );
+
+  app.get<{ Params: CompletionProposalParams }>(
+    "/api/completion-proposals/:proposalId/allowed-mask.png",
+    async (request, reply) => {
+      const detail = await aiJobManager.getCompletionProposalDetail(
+        request.params.proposalId,
+      );
+      const bytes = await store.readCompletionAllowedMaskPng(
+        detail.proposal.id,
+      );
+      return immutableCompletionAsset(
+        reply,
+        bytes,
+        detail.proposal.allowedMask.sha256,
+        "image/png",
+      );
+    },
+  );
+
+  const sendCompletionCandidateAsset = async (
+    params: CompletionCandidateParams,
+    fileName: CompletionCandidateFileName,
+    reply: FastifyReply,
+  ) => {
+    const detail = await aiJobManager.getCompletionProposalDetail(
+      params.proposalId,
+    );
+    const candidate = detail.candidates.find(
+      (item) => item.id === params.candidateId,
+    );
+    if (!candidate) {
+      throw new AiJobStoreError(
+        "COMPLETION_CANDIDATE_NOT_FOUND",
+        `隐藏内容候选不存在：${params.candidateId}`,
+        404,
+      );
+    }
+    const stored = await store.verifyCompletionCandidateStorage(candidate.id);
+    const file = stored.files[fileName];
+    return immutableCompletionAsset(
+      reply,
+      file.bytes,
+      file.sha256,
+      fileName.endsWith(".png") ? "image/png" : "application/json",
+    );
+  };
+
+  app.get<{ Params: CompletionCandidateParams }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/candidate.json",
+    async (request, reply) =>
+      await sendCompletionCandidateAsset(
+        request.params,
+        "candidate.json",
+        reply,
+      ),
+  );
+
+  app.get<{ Params: CompletionCandidateParams }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/texture.png",
+    async (request, reply) =>
+      await sendCompletionCandidateAsset(request.params, "texture.png", reply),
+  );
+
+  app.get<{ Params: CompletionCandidateParams }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/write-mask.png",
+    async (request, reply) =>
+      await sendCompletionCandidateAsset(
+        request.params,
+        "write-mask.png",
+        reply,
+      ),
+  );
+
+  app.get<{ Params: CompletionCandidateParams }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/generated-mask.png",
+    async (request, reply) =>
+      await sendCompletionCandidateAsset(
+        request.params,
+        "generated-mask.png",
+        reply,
+      ),
+  );
+
+  app.post<{
+    Params: CompletionCandidateParams;
+    Body: AcceptCompletionCandidateBody;
+  }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/accept",
+    { schema: { body: acceptCompletionCandidateSchema } },
+    async (request, reply) => {
+      const outcome = await aiJobManager.acceptCompletionCandidate(
+        request.params.proposalId,
+        {
+          candidateId: request.params.candidateId,
+          ...request.body,
+        },
+      );
+      return reply.status(outcome.changed ? 201 : 200).send({
+        changed: outcome.changed,
+        ...publicCompletionProposalDetail(outcome.detail),
+      });
+    },
+  );
+
+  app.post<{
+    Params: CompletionProposalParams;
+    Body: RejectCompletionProposalBody;
+  }>(
+    "/api/completion-proposals/:proposalId/reject",
+    { schema: { body: rejectCompletionProposalSchema } },
+    async (request, reply) => {
+      const outcome = await aiJobManager.rejectCompletionProposal(
+        request.params.proposalId,
+        request.body,
+      );
+      return reply.status(outcome.changed ? 201 : 200).send({
+        changed: outcome.changed,
+        ...publicCompletionProposalDetail(outcome.detail),
+      });
+    },
+  );
+
   app.post<{
     Params: CompositionParams;
     Body: StartAiRestorationRecommendationBody;
@@ -1213,7 +1440,11 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
             revisionId: { type: "string", minLength: 1, maxLength: 120 },
             kind: {
               type: "string",
-              enum: ["semantic_analysis", "restoration_recommendation"],
+              enum: [
+                "semantic_analysis",
+                "restoration_recommendation",
+                "completion_proposal",
+              ],
             },
             compositionId: { type: "string", minLength: 1, maxLength: 120 },
           },
@@ -1880,6 +2111,89 @@ const clearRestorationPlanSchema = {
   },
 } as const;
 
+const completionComponentIdSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 100,
+  pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+  not: { const: "unknown" },
+} as const;
+
+const startCompletionProposalSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["targetComponentId", "occludingComponentIds"],
+  properties: {
+    targetComponentId: completionComponentIdSchema,
+    occludingComponentIds: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_COMPLETION_OCCLUDING_COMPONENTS,
+      uniqueItems: true,
+      items: completionComponentIdSchema,
+    },
+    representation: {
+      type: "string",
+      enum: ["auto", "skin_texel", "latent_component"],
+    },
+  },
+} as const;
+
+const completionProposalsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    projectId: { type: "string", minLength: 1, maxLength: 120 },
+    revisionId: { type: "string", minLength: 1, maxLength: 120 },
+    jobId: { type: "string", minLength: 1, maxLength: 120 },
+    representation: {
+      type: "string",
+      enum: ["skin_texel", "latent_component"],
+    },
+    status: {
+      type: "string",
+      enum: ["awaiting_decision", "accepted", "rejected", "all"],
+    },
+  },
+} as const;
+
+const completionDecisionCommonProperties = {
+  expectedSourceResultHash: candidateSetHashSchema,
+  expectedProposalHash: candidateSetHashSchema,
+  expectedEvidenceHash: candidateSetHashSchema,
+  actorId: { type: "string", minLength: 1, maxLength: 120 },
+} as const;
+
+const acceptCompletionCandidateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "expectedSourceResultHash",
+    "expectedProposalHash",
+    "expectedEvidenceHash",
+    "expectedCandidateHash",
+  ],
+  properties: {
+    ...completionDecisionCommonProperties,
+    expectedCandidateHash: candidateSetHashSchema,
+    summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const rejectCompletionProposalSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "expectedSourceResultHash",
+    "expectedProposalHash",
+    "expectedEvidenceHash",
+  ],
+  properties: {
+    ...completionDecisionCommonProperties,
+    reason: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
 const startAiAnalysisSchema = {
   type: "object",
   additionalProperties: false,
@@ -2023,6 +2337,70 @@ function getErrorCode(error: unknown): string {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求无法完成";
+}
+
+function publicCompletionProposalDetail(detail: CompletionProposalDetail) {
+  return {
+    ...publicCompletionProposalSummary(detail),
+    candidates: detail.candidates.map(publicCompletionCandidate),
+  };
+}
+
+function immutableCompletionAsset(
+  reply: FastifyReply,
+  bytes: Uint8Array,
+  sha256: string,
+  mimeType: "application/json" | "image/png",
+) {
+  const etag = `"${sha256}"`;
+  reply
+    .type(mimeType)
+    .header("Cache-Control", "private, max-age=31536000, immutable")
+    .header("ETag", etag);
+  if (matchesIfNoneMatch(reply.request.headers["if-none-match"], etag)) {
+    return reply.status(304).send();
+  }
+  return reply.send(Buffer.from(bytes));
+}
+
+function matchesIfNoneMatch(
+  header: string | readonly string[] | undefined,
+  etag: string,
+): boolean {
+  if (header === undefined) return false;
+  const expected = etag.replace(/^W\//u, "");
+  const values = Array.isArray(header) ? header : [header];
+  return values
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .some((value) => value === "*" || value.replace(/^W\//u, "") === expected);
+}
+
+function publicCompletionProposalSummary(summary: CompletionProposalSummary) {
+  return {
+    proposal: {
+      ...summary.proposal,
+      allowedGeneratedPixelCount: summary.proposal.allowedSpans.reduce(
+        (count, span) => count + span.x1 - span.x0 + 1,
+        0,
+      ),
+    },
+    jobStatus: summary.jobStatus,
+    visible: summary.visible,
+    status: summary.status,
+    candidateCount: summary.candidateCount,
+    ranking: summary.ranking,
+    decision: summary.decision,
+    result: summary.result,
+  };
+}
+
+function publicCompletionCandidate(candidate: StoredCompletionCandidate) {
+  return {
+    ...candidate,
+    reviewRequired: true as const,
+    automaticAcceptanceAllowed: false as const,
+  };
 }
 
 function bundlePngEtag(bundle: PartBundle, variant: string): string {

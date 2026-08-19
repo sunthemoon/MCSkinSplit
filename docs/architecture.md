@@ -13,6 +13,7 @@ Browser UI
     -> Composition restoration service (M9)
     -> Restoration recommendation job service (M10)
     -> Semantic follow-up service (M15)
+    -> Hidden-content Completion service (M19)
 
 Deterministic skin core
   -> PNG RGBA decoder
@@ -20,6 +21,7 @@ Deterministic skin core
   -> Atlas/surface round trip
   -> masks, spans, semantic operations, and parts
   -> exact single-part repair operations and mask derivation
+  -> bounded hidden-content candidates and decision transformations
 
 Skin compositor
   -> ordered part layers over an immutable base
@@ -35,6 +37,7 @@ AI worker
   -> proposal returned to revision service
   -> separate restoration-recommendation workspace and exact candidate-ID validator
   -> deterministic post-segmentation assessment and explicit follow-up actions
+  -> deterministic Completion candidates plus optional ID-only ranking
 
 Part repair service
   -> append-only part-edit Revisions
@@ -56,6 +59,12 @@ Semantic follow-up service
   -> deterministic cross-body classification suggestions over exact candidate spans
   -> user-confirmed immutable semantic Revision on a dedicated Branch
   -> original catalog result plus optional verified classification-repair variant
+
+Hidden-content Completion service
+  -> source/evidence/hash-bound proposal and candidate assets
+  -> explicit accept or reject; no automatic acceptance
+  -> safe skin-texel Revision or source-preserving latent Part result
+  -> append-only decision/result audit and separate latent publication state
 ```
 
 ## M0 decisions
@@ -404,15 +413,66 @@ The detailed contract is in
 - M18 does not generate hidden pixels. Completion candidates and acceptance remain
   isolated in M19, using `generated_completion` only after an explicit decision.
 
+## M19 decisions
+
+Status: **Complete**. The core and service contracts below passed full repository
+verification plus isolated `skin_texel` and `latent_component` service flows.
+The browser workspace remains intentionally assigned to M20.
+
+- Completion uses independent proposal, candidate, optional ranking, decision,
+  result, and latent-publication records. It does not overload semantic follow-up,
+  Composition restoration, or Part Edit storage. A proposal is visible only after
+  its `completion_proposal` Job succeeds and its output hash matches the stored
+  proposal.
+- The host derives the allowed range from the exact source Revision and generates
+  bounded candidates from opposite-layer underlay, bilateral mirror, same-surface
+  continuation, opposite/neighbor references, or pattern continuation. Unsupported
+  evidence produces no candidate instead of an invented fallback.
+- The optional dedicated ranking task receives immutable previews and hash-bound
+  candidate metadata. Its validated output is an exact ordering of stored
+  candidate IDs plus either a first-ID recommendation or defer. It cannot author
+  coordinates, masks, colors, textures, candidates, or decisions, and no proposal
+  is persisted if configured ranking fails.
+- Every candidate is review-only and disallows automatic acceptance. Reject writes
+  one immutable audit decision without a Revision or Part. Accept binds the source,
+  proposal, evidence, and candidate hashes and creates one immutable Completion
+  Result.
+- `skin_texel` is restricted to a transparent, unowned Base texel below an Outer
+  occluder and supported by visible target evidence. Base occluders never justify
+  writing an Outer texel above visible artwork. Accept creates a
+  `completion_accept` Revision, assigns the new texels to the target component,
+  and performs a compare-and-swap Branch/Project HEAD update.
+- Same-layer occlusion uses `latent_component`. Accept combines the visible target
+  with inferred hidden pixels in a verified Part 2.0 while leaving the source
+  Revision and skin hash unchanged. The Part remains outside normal library lists
+  until an independent publication action; M19 exposes no public publish route.
+- Inferred pixels use intrinsic `generated_completion`, including mirrored or
+  sampled values; copied-from lineage is additional derivation metadata. Actual
+  user edits use `manual_authored`. Existing visible pixels copied into a latent
+  Part retain their intrinsic origin and immediate source lineage.
+- Decision freshness is checked both before and inside the write transaction.
+  Acceptance additionally requires the exact source Branch HEAD. An exact repeated
+  decision is idempotent; a different repeated action or candidate conflicts.
+- A cancellation recorded before Job success wins even after Proposal persistence,
+  leaving that append-only Proposal hidden. Startup recovers a validating Job only
+  after the complete Proposal/Candidate/ranking and Job contract revalidate;
+  incomplete or corrupt state remains failed rather than becoming visible.
+- M19 has no default Studio entry. M20 owns the feature-gated player review and
+  candidate-editing experience, while M21 owns offline evaluation and the default
+  release gate.
+
+The service and HTTP contract is documented in
+[`hidden-content-completion.md`](hidden-content-completion.md).
+
 ## Package boundaries
 
 ```text
-apps/web                 UI, editors, six-stage AI review, compositor, repair, restoration, and preview adapters
-apps/api                 HTTP API, revision, AI follow-up, composition, repair, restoration, and recommendation orchestration
-apps/ai-worker           persistent semantic/recommendation jobs, follow-up actions, validation, and audit assets
-packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, and restoration (M1-M9)
-packages/skin-revision   immutable snapshots, catalog variants, parts, repair histories, AI audit, and compositions
+apps/web                 UI, editors, six-stage AI review, compositor, repair, restoration, and preview adapters; M19 adds no Completion UI
+apps/api                 HTTP API plus revision, AI, composition, repair, restoration, recommendation, and Completion orchestration
+apps/ai-worker           persistent semantic/recommendation/Completion jobs, follow-up actions, validation, and audit assets
+packages/skin-core       PNG, UV, pixels, semantic edits, parts, repair, restoration, and deterministic Completion candidates
+packages/skin-revision   immutable snapshots, catalog variants, parts, repair histories, AI audit, compositions, and Completion records/results
 packages/skin-compositor ordered layers, restoration, and deterministic conflict evaluation (M6/M9)
-packages/skin-analysis-pack deterministic model inputs, evidence graph/grounding, candidate catalogs, follow-up assessment, and manifests (M5/M10/M15/M17)
-packages/ai-provider     replaceable model execution and task-specific validation (M5/M10/M17)
+packages/skin-analysis-pack deterministic model inputs, evidence graph/grounding, candidate catalogs, follow-up assessment, Completion ranking packs, and manifests
+packages/ai-provider     replaceable model execution and task-specific semantic/replacement/Completion-ranking validation
 ```

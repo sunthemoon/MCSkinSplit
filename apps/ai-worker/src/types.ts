@@ -8,7 +8,10 @@ import type { AnalysisReasoningEffort } from "@mc-skin-split/skin-analysis-pack"
 import type { SemanticFollowupAssessment } from "@mc-skin-split/skin-analysis-pack";
 export { ANALYSIS_REASONING_EFFORTS } from "@mc-skin-split/skin-analysis-pack";
 export type { AnalysisReasoningEffort } from "@mc-skin-split/skin-analysis-pack";
-import type { SemanticCategory } from "@mc-skin-split/skin-core";
+import type {
+  CompletionRequestedRepresentation,
+  SemanticCategory,
+} from "@mc-skin-split/skin-core";
 
 export const AI_JOB_STATUSES = [
   "queued",
@@ -21,7 +24,10 @@ export const AI_JOB_STATUSES = [
 ] as const;
 
 export type AiJobStatus = (typeof AI_JOB_STATUSES)[number];
-export type AiJobKind = "semantic_analysis" | "restoration_recommendation";
+export type AiJobKind =
+  | "semantic_analysis"
+  | "restoration_recommendation"
+  | "completion_proposal";
 export type AiRunStatus = "running" | "succeeded" | "failed" | "cancelled";
 export type AiRunFileRole =
   | "input_manifest"
@@ -56,6 +62,39 @@ export interface AiRestorationRecommendationOptions {
   readonly manualRgba?: readonly [number, number, number, number];
 }
 
+interface AiCompletionProposalOptionsBase {
+  readonly mode: "completion_proposal";
+  /** Candidate construction is host-authoritative even if ranking is added later. */
+  readonly provider: string;
+  readonly model: string;
+  readonly targetComponentId: string;
+  readonly occludingComponentIds: readonly string[];
+  readonly representation: CompletionRequestedRepresentation;
+}
+
+export interface AiHostCompletionProposalOptions
+  extends AiCompletionProposalOptionsBase {
+  readonly rankingMode: "host_only";
+  readonly reasoningEffort?: never;
+}
+
+export interface AiRankedCompletionProposalOptions
+  extends AiCompletionProposalOptionsBase {
+  readonly rankingMode: "ai";
+  readonly reasoningEffort: AnalysisReasoningEffort;
+}
+
+export type AiCompletionProposalOptions =
+  | AiHostCompletionProposalOptions
+  | AiRankedCompletionProposalOptions;
+
+export type StartCompletionProposalInput = Pick<
+  AiCompletionProposalOptions,
+  "targetComponentId" | "occludingComponentIds"
+> & {
+  readonly representation?: CompletionRequestedRepresentation;
+};
+
 export type StartAiRestorationRecommendationInput = Omit<
   AiRestorationRecommendationOptions,
   "mode" | "compositionId"
@@ -63,7 +102,8 @@ export type StartAiRestorationRecommendationInput = Omit<
 
 export type AiJobOptions =
   | AiAnalysisOptions
-  | AiRestorationRecommendationOptions;
+  | AiRestorationRecommendationOptions
+  | AiCompletionProposalOptions;
 
 export interface AiJobError {
   readonly code: string;
@@ -114,7 +154,19 @@ export interface RestorationRecommendationAiJob extends AiJobBase {
   readonly advisoryResult: ReplacementPlanProposal | null;
 }
 
-export type AiJob = SemanticAnalysisAiJob | RestorationRecommendationAiJob;
+export interface CompletionProposalAiJob extends AiJobBase {
+  readonly kind: "completion_proposal";
+  readonly resultRevisionId: null;
+  readonly compositionId: null;
+  readonly options: AiCompletionProposalOptions;
+  readonly reviewItems: readonly [];
+  readonly advisoryResult: null;
+}
+
+export type AiJob =
+  | SemanticAnalysisAiJob
+  | RestorationRecommendationAiJob
+  | CompletionProposalAiJob;
 
 export interface AiRun {
   readonly id: string;
@@ -224,9 +276,17 @@ export interface CreateRestorationRecommendationAiJobInput
   readonly options: AiRestorationRecommendationOptions;
 }
 
+export interface CreateCompletionProposalAiJobInput
+  extends CreateAiJobInputBase {
+  readonly kind: "completion_proposal";
+  readonly compositionId?: never;
+  readonly options: AiCompletionProposalOptions;
+}
+
 export type CreateAiJobInput =
   | CreateSemanticAnalysisAiJobInput
-  | CreateRestorationRecommendationAiJobInput;
+  | CreateRestorationRecommendationAiJobInput
+  | CreateCompletionProposalAiJobInput;
 
 export interface AiJobListFilters {
   readonly inputRevisionId?: string;
