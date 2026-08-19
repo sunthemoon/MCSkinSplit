@@ -86,6 +86,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 13,
+    name: "immutable revision and part history guards",
+    sql: readFileSync(
+      new URL("./migrations/013_immutable_history_guards.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

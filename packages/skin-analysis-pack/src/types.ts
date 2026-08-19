@@ -8,8 +8,8 @@ import type {
 } from "@mc-skin-split/skin-core";
 
 export const CANDIDATE_REGION_ALGORITHM_VERSION = "bounded-color80-surface-cc-v2";
-export const TAXONOMY_VERSION = "coarse-v1";
-export const PROMPT_VERSION = "semantic-proposal-v4-tool-free";
+export const TAXONOMY_VERSION = "coarse-v2-no-unknown-components";
+export const PROMPT_VERSION = "semantic-proposal-v5-bounded-transfers";
 export type SemanticAnalysisBaseline = "empty" | "current";
 export const ANALYSIS_REASONING_EFFORTS = [
   "low",

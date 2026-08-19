@@ -47,16 +47,21 @@ file/script access is explicitly available.
    a small `pixelOverrides` decision cannot be made from the compact summary.
 7. Assign candidate regions to coarse semantic component instances. Join
    disconnected regions only when they visibly belong to one item.
-8. Use `pixelOverrides` only for a small mixed region. Put each uncertain region in
-   either `unassignedCandidateRegionIds` or one precise `reviewItems` entry, never
-   both.
-9. Write a JSON object conforming to
+8. Use `pixelOverrides` only for a small mixed region. Each added pixel must be
+   removed exactly once from the component that owns its candidate region; never
+   add from an unassigned or review region. Unmatched removals become Unknown.
+   Use no more than 32 total add/remove spans and 64 unique override pixels in one
+   proposal.
+9. Put each uncertain region in either `unassignedCandidateRegionIds` or one
+   precise `reviewItems` entry, never both. Every region belongs to exactly one
+   ownership bucket.
+10. Write a JSON object conforming to
    `schema/analysis-proposal.schema.json` at
    `output/analysis-proposal.json`. Do not wrap it in Markdown.
-10. Run `node .agents/skills/mc-skin-segmenter/scripts/validate-proposal.mjs job.json`.
-11. If validation fails, use `logs/validator-report.json` to repair the proposal
+11. Run `node .agents/skills/mc-skin-segmenter/scripts/validate-proposal.mjs job.json`.
+12. If validation fails, use `logs/validator-report.json` to repair the proposal
     once. Stop after a valid proposal or a clear failure.
-12. Return the same proposal JSON as the final response.
+13. Return the same proposal JSON as the final response.
 
 ## Classification rules
 
@@ -82,7 +87,8 @@ The supported categories are `skin`, `face`, `eye`, `mouth`, `face_detail`,
 `hair`, `head_accessory`, `face_accessory`, `upper_clothing`, `lower_clothing`,
 `one_piece_clothing`, `sleeve`, `glove`, `legwear`, `shoe`, `neck_accessory`,
 `body_accessory`, `waist_accessory`, `arm_accessory`, `leg_accessory`,
-`back_accessory`, `other_accessory`, and `unknown`.
+`back_accessory`, and `other_accessory`. Unknown is a host-derived mask for pixels
+not assigned to a component; it is not a component category.
 
 ## Boundaries
 
@@ -92,5 +98,6 @@ The supported categories are `skin`, `face`, `eye`, `mouth`, `face_detail`,
 - Do not access a database, another Project, parent directory, network resource,
   or application source file.
 - Do not create a Revision. The host validates and commits a successful proposal.
-- Prefer `unknown` and review items over unsupported certainty.
+- Prefer `unassignedCandidateRegionIds` or one review item over unsupported
+  certainty; the host derives the Unknown mask from unowned pixels.
 - Keep notes operational and short; do not include private reasoning.

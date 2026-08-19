@@ -4,7 +4,11 @@ import { resolve, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { createCandidateRegionSummary } from "@mc-skin-split/skin-analysis-pack";
 import { SEMANTIC_CATEGORIES } from "@mc-skin-split/skin-core";
-import { ANALYSIS_PROPOSAL_SCHEMA } from "./schema";
+import {
+  ANALYSIS_PROPOSAL_SCHEMA,
+  MAX_PROPOSAL_OVERRIDE_PIXELS,
+  MAX_PROPOSAL_OVERRIDE_SPANS,
+} from "./schema";
 import type {
   ProviderAnalysisInput,
   ProviderAnalysisResult,
@@ -18,6 +22,9 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 const MAX_PROGRESS_LINE_CHARS = 1024 * 1024;
 export const CODEX_CONFIG_DEFAULT_MODEL = "codex-config-default";
+const ANALYSIS_COMPONENT_CATEGORIES = SEMANTIC_CATEGORIES.filter(
+  (category) => category !== "unknown",
+);
 
 const TOOL_FREE_ISOLATION_CONFIG = [
   'approval_policy="never"',
@@ -481,14 +488,20 @@ Propose labels only: never invent colors or pixels. Every candidate ID must appe
 exactly once across all ownership buckets: in one component, in
 unassignedCandidateRegionIds, or in exactly one review item. Never repeat an ID
 across buckets or review items. Use only candidate IDs listed in the summary, and
-use pixelOverrides only for small visually-supported boundaries.
+use pixelOverrides only for small visually-supported boundaries. Overrides are
+component-to-component transfers: every added pixel must be removed exactly once
+from the component that owns its candidate region. Never add a pixel whose region
+is unassigned or under review. A removal without an addition becomes Unknown.
+Across the entire proposal use at most ${MAX_PROPOSAL_OVERRIDE_SPANS} add/remove
+spans and ${MAX_PROPOSAL_OVERRIDE_PIXELS} unique override pixels.
 Keep modelAssessment.armType equal to the authoritative job armType. Components
 may cross surfaces and body parts when the attached views show one continuous
 item. In particular, long hair can continue from the head onto torso front, back,
 left, or right surfaces; body-part boundaries are not category rules.
 Use stable lowercase instance IDs, confidence in [0,1], and concise notes.
 
-Allowed categories: ${SEMANTIC_CATEGORIES.join(", ")}.
+Allowed component categories: ${ANALYSIS_COMPONENT_CATEGORIES.join(", ")}.
+Unknown is an output mask derived by the host, not a component category.
 Candidate summary rows are [id, dominantColor, pixelCount, x, y, width, height].
 Coordinates use a top-left origin; Base and Outer are distinct layers; UV seams do
 not imply semantic seams. Prefer coarse categories, separate face/hair and

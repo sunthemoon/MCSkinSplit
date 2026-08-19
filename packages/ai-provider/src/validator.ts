@@ -15,11 +15,16 @@ import type { AnalysisPack } from "@mc-skin-split/skin-analysis-pack";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import {
   ANALYSIS_PROPOSAL_SCHEMA,
+  LEGACY_ANALYSIS_PROPOSAL_SCHEMA,
+  LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION,
+  MAX_PROPOSAL_OVERRIDE_PIXELS,
+  MAX_PROPOSAL_OVERRIDE_SPANS,
   PROPOSAL_VALIDATOR_VERSION,
 } from "./schema";
 import type {
   AnalysisProposal,
   AnalysisProposalComponent,
+  AnalysisProposalV1_1,
   ProposalValidationIssue,
   ProposalValidationReport,
   ProposalValidationResult,
@@ -30,7 +35,15 @@ const ajv = new Ajv2020({
   allowUnionTypes: true,
   strict: true,
 });
-const validateSchema = ajv.compile(ANALYSIS_PROPOSAL_SCHEMA);
+const validateCurrentSchema = ajv.compile(ANALYSIS_PROPOSAL_SCHEMA);
+const validateLegacySchema = ajv.compile(LEGACY_ANALYSIS_PROPOSAL_SCHEMA);
+
+/** Shape-only reader for persisted proposal artifacts from schema 1.0 or 1.1. */
+export function isAnalysisProposalArtifact(input: unknown): input is AnalysisProposal {
+  return proposalSchemaVersion(input) === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION
+    ? validateLegacySchema(input)
+    : validateCurrentSchema(input);
+}
 
 export function validateAnalysisProposal(input: {
   readonly proposal: unknown;
@@ -52,14 +65,28 @@ export function validateAnalysisProposal(input: {
     unknownPixelCount: candidatePixelIds.size,
     needsReviewComponentCount: 0,
     reviewItemCount: 0,
+    overrideUniquePixelCount: 0,
+    overrideSpanCount: 0,
   };
 
+  const validateSchema = proposalSchemaVersion(input.proposal) === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION
+    ? validateLegacySchema
+    : validateCurrentSchema;
   if (!validateSchema(input.proposal)) {
     errors.push(...schemaIssues(validateSchema.errors ?? []));
     return invalidResult(null, errors, warnings, emptyStats);
   }
 
-  const proposal = input.proposal as unknown as AnalysisProposal;
+  const artifact = input.proposal as unknown as AnalysisProposal;
+  if (artifact.schemaVersion === LEGACY_ANALYSIS_PROPOSAL_SCHEMA_VERSION) {
+    errors.push(issue(
+      "LEGACY_PROPOSAL_READ_ONLY",
+      "/schemaVersion",
+      "1.0 提案仅用于读取历史记录；新的 AI 提交必须使用 1.1 契约",
+    ));
+    return invalidResult(artifact, errors, warnings, emptyStats);
+  }
+  const proposal = artifact as AnalysisProposalV1_1;
   if (proposal.sourceRevisionId !== input.pack.job.sourceRevisionId) {
     errors.push(issue("SOURCE_REVISION_MISMATCH", "/sourceRevisionId", "提案来源 Revision 与任务不一致"));
   }
@@ -78,9 +105,6 @@ export function validateAnalysisProposal(input: {
       errors.push(issue("DUPLICATE_COMPONENT_ID", `${path}/instanceId`, `组件 ID 重复：${component.instanceId}`));
     }
     componentIds.add(component.instanceId);
-    if (component.category === "unknown") {
-      errors.push(issue("UNKNOWN_COMPONENT_CATEGORY", `${path}/category`, "不确定区域应留在 unknown mask，而不是创建 unknown 组件"));
-    }
     for (const regionId of component.candidateRegionIds) {
       claimRegion(regionId, `component:${component.instanceId}`, path, regionById, bucketByRegion, errors);
     }
@@ -100,6 +124,13 @@ export function validateAnalysisProposal(input: {
   }
 
   validateRelations(proposal, componentIds, errors);
+  const overrideValidation = validateProposalPixelOverrides({
+    proposal,
+    candidatePixelIds,
+    regionById,
+    bucketByRegion,
+    errors,
+  });
   const layout = getSkinLayout(input.pack.job.armType);
   const occupiedBy = new Map<number, string>();
   const normalizedComponents: SemanticComponent[] = [];
@@ -113,12 +144,11 @@ export function validateAnalysisProposal(input: {
       const region = regionById.get(regionId);
       if (region) for (const pixelId of region.pixelIds) pixels.add(pixelId);
     }
-    for (const pixelId of proposalSpansToPixelIds(component.pixelOverrides.remove, `${path}/pixelOverrides/remove`, candidatePixelIds, errors)) {
-      if (!pixels.delete(pixelId)) {
-        errors.push(issue("INVALID_REMOVE_OVERRIDE", `${path}/pixelOverrides/remove`, `移除像素不属于组件候选区域：${pixelId}`));
-      }
+    const overrides = overrideValidation.byComponent.get(component.instanceId);
+    for (const pixelId of overrides?.remove ?? []) {
+      pixels.delete(pixelId);
     }
-    for (const pixelId of proposalSpansToPixelIds(component.pixelOverrides.add, `${path}/pixelOverrides/add`, candidatePixelIds, errors)) {
+    for (const pixelId of overrides?.add ?? []) {
       pixels.add(pixelId);
     }
     if (pixels.size === 0) {
@@ -162,6 +192,8 @@ export function validateAnalysisProposal(input: {
     unknownPixelCount: maskToPixelIds(unknownMask).length,
     needsReviewComponentCount: normalizedComponents.filter((component) => component.reviewState === "needs_review").length,
     reviewItemCount: proposal.reviewItems.length,
+    overrideUniquePixelCount: overrideValidation.uniquePixelCount,
+    overrideSpanCount: overrideValidation.spanCount,
   };
   if (errors.length > 0) return invalidResult(proposal, errors, warnings, stats);
 
@@ -193,6 +225,141 @@ export function validateAnalysisProposal(input: {
   }
   const report = reportOf(true, errors, warnings, stats) as ProposalValidationReport & { valid: true };
   return { proposal, state: completeState, report };
+}
+
+interface NormalizedPixelOverrides {
+  readonly add: readonly number[];
+  readonly remove: readonly number[];
+}
+
+interface PixelOverrideValidation {
+  readonly byComponent: ReadonlyMap<string, NormalizedPixelOverrides>;
+  readonly uniquePixelCount: number;
+  readonly spanCount: number;
+}
+
+function validateProposalPixelOverrides(input: {
+  readonly proposal: AnalysisProposalV1_1;
+  readonly candidatePixelIds: ReadonlySet<number>;
+  readonly regionById: ReadonlyMap<
+    string,
+    AnalysisPack["candidateRegions"]["regions"][number]
+  >;
+  readonly bucketByRegion: ReadonlyMap<string, string>;
+  readonly errors: ProposalValidationIssue[];
+}): PixelOverrideValidation {
+  const pixelRegionIds = new Map<number, string>();
+  for (const region of input.regionById.values()) {
+    for (const pixelId of region.pixelIds) pixelRegionIds.set(pixelId, region.id);
+  }
+
+  const result = new Map<string, NormalizedPixelOverrides>();
+  const removedByPixel = new Map<number, string>();
+  const addedByPixel = new Map<number, string>();
+  const uniqueOverridePixels = new Set<number>();
+  let overrideSpanCount = 0;
+
+  for (const [index, component] of input.proposal.components.entries()) {
+    const path = `/components/${index}/pixelOverrides`;
+    overrideSpanCount +=
+      component.pixelOverrides.add.length + component.pixelOverrides.remove.length;
+    const remove = proposalSpansToPixelIds(
+      component.pixelOverrides.remove,
+      `${path}/remove`,
+      input.candidatePixelIds,
+      input.errors,
+    );
+    const add = proposalSpansToPixelIds(
+      component.pixelOverrides.add,
+      `${path}/add`,
+      input.candidatePixelIds,
+      input.errors,
+    );
+    result.set(component.instanceId, { add, remove });
+
+    for (const pixelId of remove) {
+      uniqueOverridePixels.add(pixelId);
+      const regionId = pixelRegionIds.get(pixelId);
+      const owner = regionId ? input.bucketByRegion.get(regionId) : undefined;
+      const expectedOwner = `component:${component.instanceId}`;
+      if (owner !== expectedOwner) {
+        input.errors.push(issue(
+          "INVALID_REMOVE_OVERRIDE",
+          `${path}/remove`,
+          `移除像素不属于组件候选区域：${pixelId}`,
+          { pixelId, owner: owner ?? null, expectedOwner },
+        ));
+        continue;
+      }
+      removedByPixel.set(pixelId, component.instanceId);
+    }
+
+    for (const pixelId of add) {
+      uniqueOverridePixels.add(pixelId);
+      const regionId = pixelRegionIds.get(pixelId);
+      const owner = regionId ? input.bucketByRegion.get(regionId) : undefined;
+      if (!owner?.startsWith("component:")) {
+        input.errors.push(issue(
+          "ADD_OVERRIDE_SOURCE_NOT_COMPONENT",
+          `${path}/add`,
+          `新增像素必须来自另一个已分类组件，不能来自留空或审核区域：${pixelId}`,
+          { pixelId, owner: owner ?? null },
+        ));
+      } else if (owner === `component:${component.instanceId}`) {
+        input.errors.push(issue(
+          "SELF_TRANSFER_OVERRIDE",
+          `${path}/add`,
+          `组件不能把自己候选区域内的像素移除后再加回：${pixelId}`,
+          { pixelId, owner },
+        ));
+      }
+      const previousDestination = addedByPixel.get(pixelId);
+      if (previousDestination) {
+        input.errors.push(issue(
+          "DUPLICATE_ADD_OVERRIDE",
+          `${path}/add`,
+          `同一像素不能新增到多个组件：${pixelId}`,
+          { pixelId, previousDestination, destination: component.instanceId },
+        ));
+      } else {
+        addedByPixel.set(pixelId, component.instanceId);
+      }
+    }
+  }
+
+  if (overrideSpanCount > MAX_PROPOSAL_OVERRIDE_SPANS) {
+    input.errors.push(issue(
+      "OVERRIDE_SPAN_LIMIT_EXCEEDED",
+      "/components",
+      `像素调整 span 总数不得超过 ${MAX_PROPOSAL_OVERRIDE_SPANS}`,
+      { actual: overrideSpanCount, maximum: MAX_PROPOSAL_OVERRIDE_SPANS },
+    ));
+  }
+  if (uniqueOverridePixels.size > MAX_PROPOSAL_OVERRIDE_PIXELS) {
+    input.errors.push(issue(
+      "OVERRIDE_PIXEL_LIMIT_EXCEEDED",
+      "/components",
+      `像素调整的唯一像素总数不得超过 ${MAX_PROPOSAL_OVERRIDE_PIXELS}`,
+      { actual: uniqueOverridePixels.size, maximum: MAX_PROPOSAL_OVERRIDE_PIXELS },
+    ));
+  }
+
+  for (const [pixelId, destination] of addedByPixel) {
+    const source = removedByPixel.get(pixelId);
+    if (!source) {
+      input.errors.push(issue(
+        "UNPAIRED_ADD_OVERRIDE",
+        "/components",
+        `新增像素没有来自候选区域所属组件的配对移除：${pixelId}`,
+        { pixelId, destination },
+      ));
+    }
+  }
+  return {
+    byComponent: result,
+    uniquePixelCount: uniqueOverridePixels.size,
+    spanCount: overrideSpanCount,
+  };
 }
 
 function normalizeComponent(
@@ -227,7 +394,7 @@ function normalizeComponent(
 }
 
 function validateRelations(
-  proposal: AnalysisProposal,
+  proposal: AnalysisProposalV1_1,
   componentIds: ReadonlySet<string>,
   errors: ProposalValidationIssue[],
 ): void {
@@ -300,6 +467,14 @@ function schemaIssues(errors: readonly ErrorObject[]): ProposalValidationIssue[]
       params: error.params,
     }),
   );
+}
+
+function proposalSchemaVersion(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const schemaVersion = (value as Readonly<Record<string, unknown>>).schemaVersion;
+  return typeof schemaVersion === "string" ? schemaVersion : null;
 }
 
 function invalidResult(

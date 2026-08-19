@@ -39,6 +39,9 @@ import Fastify, {
 } from "fastify";
 
 const MAX_SKIN_BYTES = 1024 * 1024;
+const ANALYSIS_FOCUS_CATEGORIES = SEMANTIC_CATEGORIES.filter(
+  (category) => category !== "unknown",
+);
 
 interface ApiOptions {
   readonly dataDirectory?: string;
@@ -1089,7 +1092,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     "/api/revisions/:revisionId/ai-analysis",
     { schema: { body: startAiAnalysisSchema } },
     async (request, reply) => {
-      const job = aiJobManager.startAnalysis(
+      const job = await aiJobManager.startAnalysis(
         request.params.revisionId,
         request.body,
       );
@@ -1817,8 +1820,8 @@ const startAiAnalysisSchema = {
     focus: {
       type: "array",
       uniqueItems: true,
-      maxItems: SEMANTIC_CATEGORIES.length,
-      items: { type: "string", enum: SEMANTIC_CATEGORIES },
+      maxItems: ANALYSIS_FOCUS_CATEGORIES.length,
+      items: { type: "string", enum: ANALYSIS_FOCUS_CATEGORIES },
     },
     createRevisionOnSuccess: { type: "boolean" },
   },

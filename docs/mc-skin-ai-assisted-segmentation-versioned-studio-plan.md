@@ -377,9 +377,10 @@ plugins、MCP 与多代理等能力，附加经过确定性生成的皮肤视图
 stderr。默认单次响应通过 `--output-last-message` 捕获，最终 JSON 由宿主 Schema
 与像素归属 Validator 严格校验。兼容端点可通过 `AI_USE_OUTPUT_SCHEMA=true`
 显式加入 `--output-schema`；该模式发生结构化传输失败时才允许移除参数重试，
-并继续执行同一宿主校验。当前 Skill 版本为 `1.2.0`，prompt 版本为
-`semantic-proposal-v4-tool-free`；v4 明确允许长发从头部延伸到躯干表面，并记录
-干净/现有语义基线。
+并继续执行同一宿主校验。当前 Skill 版本为 `1.3.0`，prompt 版本为
+`semantic-proposal-v5-bounded-transfers`，proposal Schema 为 `1.1`，Validator
+为 `semantic-proposal-validator-v2`；v5 保留长发跨躯干与干净/现有语义基线，
+并要求所有少量像素调整采用有界、显式的组件间转移。
 
 ### 方案 C：Responses API，部署型补充
 
@@ -2587,6 +2588,48 @@ feat(web): add responsive workflow navigation
 
 ---
 
+## M16：有界语义转移与不可变历史防护
+
+目标：先修复既有 AI 合同内部矛盾，并在逐像素 provenance 上线前阻止
+已知补绘/生成来源被重新识别为原始像素；同时把服务层 append-only 约束
+下沉到 SQLite。
+
+实现：
+
+1. 新语义提案使用 Schema `1.1`。`unknown` 不再是组件类别，每个
+   CandidateRegion 必须且只能进入一个组件、unassigned 或一个 review item。
+   历史 Schema `1.0` 资产保持只读可解析，不能作为当前 Job 的新结果提交。
+2. `pixelOverrides` 在整个提案中最多覆盖 64 个唯一像素和 32 个 spans。
+   每个 add 都必须对应 CandidateRegion 原所属组件的显式 remove；禁止从
+   unassigned/review 暗中取像素、禁止 self-transfer 和重复目标。未配对的
+   remove 合法地把边界像素送回 Unknown。
+3. Validator v2 在报告中记录 override 唯一像素数与 span 数。Prompt v5、
+   Skill 1.3、taxonomy v2、Schema 1.1 和 Validator v2 作为同一版本合同写入
+   新 Job。Retry 仅允许 stored Skill/Prompt 与当前合同完全一致的 Job；旧
+   合同返回 409 并要求从来源 Revision 发起一次新的分析。
+4. 会提交 Revision 的语义分析在创建 Job、执行、模型调用前和提交前重复
+   检查来源。当前组件含 generated 标记，或有效内容祖先存在
+   `apply_part`、`compose`、`palette_change` 时返回 409；Revert 按其内容
+   目标继续追溯。普通 Import 与只改变分类/Mask 的人工语义 Revision 仍可
+   分析；显式 read-only Job 仍可检查生成/混搭来源，但不能创建 Revision。
+5. Migration 013 为 Revision、Operation、Revision-bound Asset、Part 内容与
+   文件、PartEdit Revision、Bundle 内容与成员安装 18 个 no-update/no-delete
+   trigger。Snapshot asset 与 Part file 只允许在创建事务中完成一次严格的
+   `NULL -> owner` 绑定；Branch/Project HEAD、PartEdit Project 状态及库资产
+   active/retired 生命周期保持可更新。
+
+边界：
+
+- 这是组件/操作级的保守保护。只有 M18 建立逐像素 origin 后，才能对
+  applied-Part/Composition 中已证明为 source-visible 的部分放宽重分析。
+- M16 不生成被遮挡像素，不新增 3D/CandidateRegion 邻接图，也不改变现有
+  M15 分类修复流程。
+
+详细证据与后续顺序见
+[`audit/current-state-audit.md`](audit/current-state-audit.md)。
+
+---
+
 # 27. Codex 分会话执行建议
 
 不要在单个超长 Session 中一次实现全部阶段。
@@ -2611,7 +2654,8 @@ feat(web): add responsive workflow navigation
 | S14 | M13 语义 JSON 单次传输与诚实诊断 | S13 |
 | S15 | M14 分析结果目录可逆归档 | S8、S12、S14 |
 | S16 | M15 玩家优先干净识别与分类修复 | S14、S15 |
-| S17 | 综合测试与审核 | 全部 |
+| S17 | M16 有界语义转移与不可变历史防护 | S16 |
+| S18 | 综合测试与审核 | 全部 |
 
 每个 Session：
 

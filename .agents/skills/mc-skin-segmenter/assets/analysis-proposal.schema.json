@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mcskinsplit.local/schemas/analysis-proposal.schema.json",
+  "$id": "https://mcskinsplit.local/schemas/analysis-proposal.v1.1.schema.json",
   "title": "MCSkinSplit semantic analysis proposal",
   "type": "object",
   "additionalProperties": false,
@@ -14,7 +14,7 @@
     "summary"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.0" },
+    "schemaVersion": { "const": "1.1" },
     "sourceRevisionId": { "type": "string", "minLength": 3, "maxLength": 120 },
     "modelAssessment": {
       "type": "object",
@@ -67,8 +67,7 @@
         "arm_accessory",
         "leg_accessory",
         "back_accessory",
-        "other_accessory",
-        "unknown"
+        "other_accessory"
       ]
     },
     "regionId": {
@@ -137,11 +136,12 @@
         },
         "pixelOverrides": {
           "type": "object",
+          "description": "Small component-to-component pixel transfers. Across the proposal, add and remove contain at most 32 spans and 64 unique pixels. Every added pixel must have one matching removal from the component that owns its candidate region; unmatched removals become Unknown.",
           "additionalProperties": false,
           "required": ["add", "remove"],
           "properties": {
-            "add": { "type": "array", "items": { "$ref": "#/$defs/span" } },
-            "remove": { "type": "array", "items": { "$ref": "#/$defs/span" } }
+            "add": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/span" } },
+            "remove": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/span" } }
           }
         },
         "relations": { "$ref": "#/$defs/relations" },

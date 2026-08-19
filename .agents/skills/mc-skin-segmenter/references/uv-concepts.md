@@ -12,6 +12,10 @@
 - A candidate joins adjacent pixels on one surface when their RGB distance stays
   within the deterministic bound. It may contain mild shading variation, so use
   `pixelOverrides` when a small semantic boundary remains inside one candidate.
+- Overrides transfer a small number of pixels between component-owned candidate
+  regions. Every add needs one matching removal by the source owner. A removal may
+  remain unmatched and then becomes Unknown; unassigned/review pixels cannot be
+  added to a component.
 - `pixel-map.json` maps every valid visible atlas pixel to a surface, local UV,
   layer, body part, face, and exact RGBA value.
 - Base and Outer are separate layers. Similar colors do not prove that two regions

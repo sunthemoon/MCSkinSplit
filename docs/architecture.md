@@ -126,10 +126,10 @@ The detailed contract is in
 - `packages/ai-provider` owns the replaceable model boundary. The default adapter
   starts `codex exec` without a shell in a read-only, tool-free profile, inlines
   the immutable semantic contract, attaches only the prepared skin views, applies
-  timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.2.0`
-  and prompt `semantic-proposal-v4-tool-free` identify the current runtime
-  contract. Prompt v4 adds explicit cross-body long-hair guidance and the clean/
-  current semantic-baseline identity.
+  timeout/cancellation/log limits, and captures JSONL diagnostics. Skill `1.3.0`,
+  prompt `semantic-proposal-v5-bounded-transfers`, proposal Schema `1.1`, and
+  validator v2 identify the current runtime contract. Prompt v5 retains explicit
+  cross-body long-hair guidance and makes every bounded pixel transfer explicit.
 - The model returns only a JSON proposal captured by the provider. It cannot read
   or write the Run workspace. Host-side Ajv and deterministic pixel checks require
   complete, non-overlapping ownership before the proposal is converted to semantic
@@ -313,6 +313,30 @@ The detailed contract is in
 - Follow-up success is classification repair only. `no_repair` means no safe rule-
   based suggestion was found; it does not prove that no content is occluded.
   Generating hidden clothing or hair pixels remains outside M15.
+
+## M16 decisions
+
+- Unknown is an independent ownership mask, not an AI component category. Every
+  CandidateRegion belongs to exactly one component, the unassigned bucket, or one
+  review item.
+- Proposal-wide pixel overrides are limited to 64 unique pixels and 32 spans.
+  An added pixel is valid only when the component owning its Region removes that
+  same pixel; unmatched removals intentionally return pixels to Unknown. Schema
+  1.0 artifacts remain readable, while new validation requires Schema 1.1.
+- The current component-level provenance model cannot safely carry known authored
+  or generated pixels through a fresh AI segmentation. For runs that will create
+  a Revision, the worker rejects generated semantic state and effective
+  `apply_part`, `compose`, or `palette_change` ancestry before Job creation,
+  before provider execution, and before commit. Read-only runs remain available.
+  This commit boundary is deliberately conservative until per-pixel origin exists.
+- Retry never silently upgrades a legacy semantic contract. Stored Skill name,
+  Skill version, and prompt version must match the installed contract; otherwise
+  the caller must start a fresh analysis from the source Revision.
+- Migration 013 enforces append-only Revision, operation, revision-bound asset,
+  Part file/content, Part-edit Revision, and Bundle membership history in SQLite.
+  Snapshot and Part staging files retain one tightly checked `NULL`-to-owner
+  binding transition; project heads, repair-project state, and library lifecycle
+  fields remain mutable.
 
 ## Package boundaries
 

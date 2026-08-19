@@ -43,6 +43,26 @@ const EARLY_V11_SEMANTIC_FOLLOWUP_SQL = readFileSync(
   new URL("./fixtures/early-011-semantic-followup.sql", import.meta.url),
   "utf8",
 );
+const IMMUTABLE_HISTORY_TRIGGER_NAMES = [
+  "skin_revision_immutable_update",
+  "skin_revision_immutable_delete",
+  "skin_operation_immutable_update",
+  "skin_operation_immutable_delete",
+  "skin_asset_revision_binding_guard",
+  "skin_asset_revision_bound_immutable_update",
+  "skin_asset_revision_bound_immutable_delete",
+  "part_asset_content_immutable_update",
+  "part_asset_immutable_delete",
+  "part_file_asset_binding_guard",
+  "part_file_asset_bound_immutable_update",
+  "part_file_asset_bound_immutable_delete",
+  "part_edit_revision_immutable_update",
+  "part_edit_revision_immutable_delete",
+  "part_bundle_content_immutable_update",
+  "part_bundle_immutable_delete",
+  "part_bundle_member_immutable_update",
+  "part_bundle_member_immutable_delete",
+] as const;
 
 const temporaryDirectories: string[] = [];
 
@@ -520,6 +540,7 @@ describe("RevisionStore", () => {
       store.close();
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
+        database.exec("DROP TRIGGER part_edit_revision_immutable_update");
         database
           .prepare("UPDATE part_edit_revision SET summary = ? WHERE id = ?")
           .run("Tampered database summary", created.headRevision.id);
@@ -557,6 +578,7 @@ describe("RevisionStore", () => {
 
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
+        database.exec("DROP TRIGGER part_asset_content_immutable_update");
         const row = database
           .prepare("SELECT manifest_json FROM part_asset WHERE id = ?")
           .get(committed.part.id) as { readonly manifest_json: string };
@@ -861,7 +883,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 12 });
+          .toEqual({ version: 13 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -878,6 +900,212 @@ describe("RevisionStore", () => {
       }
     } finally {
       store.close();
+    }
+  });
+
+  it("binds snapshot assets once and freezes finalized revision history", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      const revision = imported.revision;
+      const assets = store.getRevisionAssets(revision.id);
+      expect(assets.length).toBeGreaterThanOrEqual(3);
+      expect(assets.every((asset) => asset.revisionId === revision.id)).toBe(true);
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        const operation = database.prepare(
+          "SELECT id FROM skin_operation WHERE revision_id = ?",
+        ).get(revision.id) as { readonly id: string };
+        const assetId = assets[0]!.id;
+
+        expect(() => database.prepare(
+          "UPDATE skin_revision SET summary = 'tampered' WHERE id = ?",
+        ).run(revision.id)).toThrow(/skin_revision is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM skin_revision WHERE id = ?",
+        ).run(revision.id)).toThrow(/skin_revision is immutable/u);
+        expect(() => database.prepare(
+          "UPDATE skin_operation SET summary = 'tampered' WHERE id = ?",
+        ).run(operation.id)).toThrow(/skin_operation is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM skin_operation WHERE id = ?",
+        ).run(operation.id)).toThrow(/skin_operation is immutable/u);
+        expect(() => database.prepare(
+          `UPDATE skin_asset
+           SET sha256 = ?
+           WHERE id = ?`,
+        ).run(`sha256:${"f".repeat(64)}`, assetId)).toThrow(
+          /revision-bound skin_asset is immutable/u,
+        );
+        expect(() => database.prepare(
+          "DELETE FROM skin_asset WHERE id = ?",
+        ).run(assetId)).toThrow(/revision-bound skin_asset is immutable/u);
+
+        const orphanId = "asset_orphan_binding";
+        database.prepare(`
+          INSERT INTO skin_asset (
+            id, project_id, revision_id, asset_type, storage_path,
+            mime_type, byte_size, sha256, created_at
+          ) VALUES (?, ?, NULL, 'component_mask', ?, 'image/png', 0, ?, ?)
+        `).run(
+          orphanId,
+          imported.project.id,
+          `projects/${imported.project.id}/revisions/${revision.id}/components/orphan.mask.png`,
+          `sha256:${"0".repeat(64)}`,
+          revision.createdAt,
+        );
+        expect(() => database.prepare(
+          "UPDATE skin_asset SET revision_id = ? WHERE id = ?",
+        ).run(revision.id, orphanId)).toThrow(/invalid skin_asset revision binding/u);
+        expect(database.prepare("DELETE FROM skin_asset WHERE id = ?").run(orphanId).changes)
+          .toBe(1);
+
+        expect(database.prepare(
+          "UPDATE skin_project SET updated_at = updated_at WHERE id = ?",
+        ).run(imported.project.id).changes).toBe(1);
+        expect(database.prepare(
+          "UPDATE skin_branch SET head_revision_id = head_revision_id WHERE id = ?",
+        ).run(imported.branch.id).changes).toBe(1);
+      } finally {
+        database.close();
+      }
+
+      expect(store.getRevision(revision.id)).toMatchObject({
+        id: revision.id,
+        summary: revision.summary,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("freezes Part content while preserving lifecycle and repair-head workflows", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const part = await exportHeadPixelPart(store);
+      const repair = await store.createPartEditProject({ basePartId: part.id });
+      const bundle = await store.exportPartBundle(part.sourceRevisionId, {
+        name: "Immutable hair bundle",
+        kind: "hair",
+        componentIds: [part.sourceComponentId],
+      });
+
+      expect(await store.retirePart(part.id, "immutability lifecycle test"))
+        .toMatchObject({ libraryStatus: "retired" });
+      expect(await store.restorePart(part.id)).toMatchObject({ libraryStatus: "active" });
+      expect(await store.retirePartBundle(bundle.id, "immutability lifecycle test"))
+        .toMatchObject({ libraryStatus: "retired" });
+      expect(await store.restorePartBundle(bundle.id)).toMatchObject({ libraryStatus: "active" });
+
+      const database = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        const fileRows = database.prepare(
+          "SELECT id, part_id FROM part_file_asset WHERE part_id = ? ORDER BY file_role",
+        ).all(part.id) as Array<{ readonly id: string; readonly part_id: string }>;
+        expect(fileRows).toHaveLength(5);
+        expect(fileRows.every((row) => row.part_id === part.id)).toBe(true);
+
+        expect(() => database.prepare(
+          "UPDATE part_asset SET name = 'tampered' WHERE id = ?",
+        ).run(part.id)).toThrow(/part_asset content is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM part_asset WHERE id = ?",
+        ).run(part.id)).toThrow(/part_asset is immutable/u);
+        expect(() => database.prepare(
+          "UPDATE part_file_asset SET byte_size = byte_size + 1 WHERE id = ?",
+        ).run(fileRows[0]!.id)).toThrow(/part-bound part_file_asset is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM part_file_asset WHERE id = ?",
+        ).run(fileRows[0]!.id)).toThrow(/part-bound part_file_asset is immutable/u);
+        expect(() => database.prepare(
+          "UPDATE part_edit_revision SET summary = 'tampered' WHERE id = ?",
+        ).run(repair.headRevision.id)).toThrow(/part_edit_revision is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM part_edit_revision WHERE id = ?",
+        ).run(repair.headRevision.id)).toThrow(/part_edit_revision is immutable/u);
+        expect(() => database.prepare(
+          "UPDATE part_bundle SET name = 'tampered' WHERE id = ?",
+        ).run(bundle.id)).toThrow(/part_bundle content is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM part_bundle WHERE id = ?",
+        ).run(bundle.id)).toThrow(/part_bundle is immutable/u);
+        expect(() => database.prepare(
+          "UPDATE part_bundle_member SET position = position + 1 WHERE bundle_id = ?",
+        ).run(bundle.id)).toThrow(/part_bundle_member is immutable/u);
+        expect(() => database.prepare(
+          "DELETE FROM part_bundle_member WHERE bundle_id = ?",
+        ).run(bundle.id)).toThrow(/part_bundle_member is immutable/u);
+
+        expect(database.prepare(
+          "UPDATE part_edit_project SET updated_at = updated_at WHERE id = ?",
+        ).run(repair.project.id).changes).toBe(1);
+      } finally {
+        database.close();
+      }
+
+      expect(store.getPart(part.id)).toMatchObject({ id: part.id, name: part.name });
+      expect(store.getPartBundle(bundle.id)).toMatchObject({ id: bundle.id, name: bundle.name });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("upgrades a populated v12 database and restores immutable-history guards on reopen", async () => {
+    const { directory, store } = await createStore();
+
+    try {
+      const imported = await importRealSkin(store);
+      store.close();
+
+      const legacy = new Database(join(directory, "mcskinsplit.sqlite"));
+      try {
+        const downgrade = legacy.transaction(() => {
+          dropImmutableHistoryTriggers(legacy);
+          legacy.prepare("DELETE FROM schema_migration WHERE version = 13").run();
+        });
+        downgrade.immediate();
+        expect(legacy.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 12 });
+      } finally {
+        legacy.close();
+      }
+
+      const reopened = new RevisionStore({ dataDirectory: directory });
+      try {
+        const upgraded = new Database(reopened.databasePath);
+        try {
+          expect(upgraded.prepare(
+            "SELECT MAX(version) AS version FROM schema_migration",
+          ).get()).toEqual({ version: 13 });
+          const triggers = upgraded.prepare(`
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'trigger' AND name IN (${IMMUTABLE_HISTORY_TRIGGER_NAMES.map(() => "?").join(", ")})
+            ORDER BY name
+          `).all(...IMMUTABLE_HISTORY_TRIGGER_NAMES) as Array<{ readonly name: string }>;
+          expect(triggers.map((row) => row.name).sort()).toEqual(
+            [...IMMUTABLE_HISTORY_TRIGGER_NAMES].sort(),
+          );
+          expect(() => upgraded.prepare(
+            "UPDATE skin_revision SET summary = 'tampered' WHERE id = ?",
+          ).run(imported.revision.id)).toThrow(/skin_revision is immutable/u);
+        } finally {
+          upgraded.close();
+        }
+        expect(reopened.getRevision(imported.revision.id).id).toBe(imported.revision.id);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The store is intentionally closed before simulating the v12 database.
+      }
     }
   });
 
@@ -960,7 +1188,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 12 });
+          ).get()).toEqual({ version: 13 });
           expect(upgraded.prepare(`
             SELECT job_id, result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -1151,7 +1379,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 12 });
+          ).get()).toEqual({ version: 13 });
           expect(upgraded.prepare(`
             SELECT result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -1719,34 +1947,12 @@ describe("RevisionStore", () => {
       );
       const guardDatabase = new Database(store.databasePath);
       try {
-        guardDatabase.prepare(`
+        expect(() => guardDatabase.prepare(`
           UPDATE skin_revision
           SET actor_id = 'semantic-followup'
           WHERE id IN (?, ?)
-        `).run(unrelatedBranch.revision.id, unrelated.revision.id);
-        guardDatabase.prepare(`
-          UPDATE skin_revision
-          SET metadata_json = ?
-          WHERE id = ?
-        `).run(
-          JSON.stringify({
-            operation: {
-              type: "assign_pixels",
-              target: {
-                instanceId: "hair.main",
-                displayName: "长发",
-                category: "hair",
-              },
-              spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
-            },
-            semanticFollowup: {
-              jobId: "aijob_followup_applied",
-              resultRevisionId: analyzed.revision.id,
-              suggestionId: `followup_${"a".repeat(24)}`,
-              evidenceHash: assessment.evidenceHash,
-            },
-          }),
-          unrelated.revision.id,
+        `).run(unrelatedBranch.revision.id, unrelated.revision.id)).toThrow(
+          /skin_revision is immutable/u,
         );
         expect(() => guardDatabase.prepare(`
           UPDATE semantic_analysis_followup
@@ -3021,10 +3227,17 @@ function insertValidatingSemanticJob(
   }
 }
 
+function dropImmutableHistoryTriggers(database: Database.Database): void {
+  for (const triggerName of IMMUTABLE_HISTORY_TRIGGER_NAMES) {
+    database.exec(`DROP TRIGGER IF EXISTS "${triggerName}"`);
+  }
+}
+
 function downgradeSemanticFollowupToEarlyV11(
   database: Database.Database,
 ): void {
   const downgrade = database.transaction(() => {
+    dropImmutableHistoryTriggers(database);
     database.exec(`
       DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_insert_guard;
       DROP TRIGGER IF EXISTS semantic_analysis_followup_assessment_update_guard;
@@ -3064,7 +3277,7 @@ function downgradeSemanticFollowupToEarlyV11(
       FROM semantic_analysis_followup_v12;
 
       DROP TABLE semantic_analysis_followup_v12;
-      DELETE FROM schema_migration WHERE version = 12;
+      DELETE FROM schema_migration WHERE version >= 12;
     `);
   });
   downgrade.immediate();

@@ -5,6 +5,10 @@ import type {
   AnalysisPack,
   ReplacementPlanningPack,
 } from "@mc-skin-split/skin-analysis-pack";
+import {
+  PROMPT_VERSION,
+  TAXONOMY_VERSION,
+} from "@mc-skin-split/skin-analysis-pack";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AiProviderError,
@@ -193,7 +197,11 @@ describe("CodexExecProvider", () => {
     ]);
     expect(commandInput?.stdin).toContain("Do not call or request any tool");
     expect(commandInput?.stdin).toContain("<candidate_summary>");
-    expect(commandInput?.stdin).toContain("Allowed categories:");
+    expect(commandInput?.stdin).toContain("Allowed component categories:");
+    expect(commandInput?.stdin).toContain("Unknown is an output mask derived by the host");
+    expect(commandInput?.stdin).toContain("at most 32 add/remove");
+    expect(commandInput?.stdin).toContain("64 unique override pixels");
+    expect(commandInput?.stdin).not.toContain("other_accessory, unknown");
     expect(commandInput?.stdin).toContain("<output_schema>");
     expect(commandInput?.stdin).toContain('"pixelOverrides"');
     expect(commandInput?.args).not.toContain("--output-schema");
@@ -918,10 +926,10 @@ function minimalPack(
       focus: [],
       createRevisionOnSuccess: true,
       candidateRegionAlgorithmVersion: "bounded-color80-surface-cc-v2",
-      taxonomyVersion: "coarse-v1",
+      taxonomyVersion: TAXONOMY_VERSION,
       skillName: "mc-skin-segmenter",
       skillVersion: "1.0.0",
-      promptVersion: "semantic-proposal-v4-tool-free",
+      promptVersion: PROMPT_VERSION,
       paths: {
         source: "input/source.png",
         atlas: "input/atlas-16x.png",

@@ -23,9 +23,13 @@ selected Branch HEAD Revision
 The output Revision changes semantic segmentation only. Its `skin.png` is copied
 byte-for-byte from the input Revision.
 
-The current semantic runtime pins `mc-skin-segmenter` Skill `1.2.0` and prompt
-`semantic-proposal-v4-tool-free`. Those values are stored on every new Job so a
-retry remains attributable to the contract that actually ran.
+The current semantic runtime pins `mc-skin-segmenter` Skill `1.3.0`, prompt
+`semantic-proposal-v5-bounded-transfers`, proposal Schema `1.1`, taxonomy
+`coarse-v2-no-unknown-components`, and validator
+`semantic-proposal-validator-v2`. Those values are stored on every new Job so a
+retry remains attributable to the contract that actually ran. Schema `1.0`
+proposal artifacts remain shape-readable for audit, but are read-only and cannot
+be submitted to the current validator.
 
 ## Analysis workspace
 
@@ -65,10 +69,18 @@ in the input hash, and is preserved by an ordinary retry unless the retry reques
 explicitly overrides it. Legacy stored Jobs without the field retain their
 historical current-baseline interpretation; new Jobs default to the clean mode.
 
-Any immutable historical Revision can be analyzed again directly; catalog
-archiving or deletion is not required. When the selected Revision is no longer the
-current Branch HEAD, the service creates a new Branch before appending the new
-analysis result, so the existing history remains unchanged.
+Source-preserving historical Revisions can be analyzed again directly; catalog
+archiving or deletion is not required. Until per-pixel origin metadata exists, a
+run with `createRevisionOnSuccess: true` conservatively rejects a source whose
+current semantic components report generated pixels or whose effective content
+ancestry includes `apply_part`, `compose`, or `palette_change`. `revert` follows
+the Revision that supplied its content, so reverting to a clean import remains
+eligible. This prevents a new AI segmentation from relabeling known authored or
+generated pixels as original. An explicit `createRevisionOnSuccess: false` run may
+still inspect that source because it cannot persist a semantic Revision. When an
+eligible selected Revision is no longer the current Branch HEAD, the service
+creates a new Branch before appending the new analysis result, so the existing
+history remains unchanged.
 
 ## Codex CLI provider
 
@@ -153,16 +165,25 @@ A proposal is accepted only when all of the following hold:
 - JSON matches the repository schema and the source Revision/model metadata;
 - every candidate ID exists and occurs exactly once: in one component, in the
   unassigned bucket, or in exactly one review item;
+- `unknown` is not a component category; unassigned/review pixels become the
+  independent Unknown mask;
 - component IDs are unique and component references point to existing components;
 - `sameOutfitGroup` is treated as an opaque grouping identifier, not a component
   reference;
-- pixel additions/removals stay inside visible valid UV coordinates and do not
-  create overlapping ownership;
+- pixel additions/removals stay inside visible valid UV coordinates, use at most
+  64 unique pixels and 32 spans across the whole proposal, and do not create
+  overlapping ownership;
+- every added pixel is paired with one explicit removal from the component that
+  owns its CandidateRegion; additions from unassigned/review Regions and self-
+  transfers are rejected, while an unmatched removal intentionally returns a
+  boundary pixel to Unknown;
 - component masks plus `unknown` cover every visible valid UV pixel exactly once;
 - confidence below 0.65 produces `needs_review` rather than a confirmed component.
 
 Validation errors are written to the Run log and can be supplied to one repair
-attempt. A repaired proposal must pass the complete validator again.
+attempt. A repaired proposal must pass the complete validator again. Validator v2
+reports the total override span count and unique override pixel count so the
+bounded-transfer behavior remains auditable.
 
 ## Jobs, Runs, and audit assets
 
@@ -182,9 +203,12 @@ Each model attempt is a separate Run. Available audit roles are:
 Failures retain every artifact that was available at failure time. Provider
 timeouts and cancellations carry their captured JSONL/stderr to the worker instead
 of replacing those diagnostics with empty files; if nothing was emitted, an asset
-can still be empty. Retrying creates a new Job against the same historical input
-and records the currently installed Skill/prompt versions. It does not create a
-Revision unless requested and validated.
+can still be empty. Retry is reproducible only for a Job whose stored Skill name,
+Skill version, and prompt version match the installed contract. A mismatch returns
+`AI_ANALYSIS_RETRY_CONTRACT_STALE` and requires starting a fresh analysis; it never
+silently upgrades the old Job. A valid current-contract Retry creates a new Job
+against the same historical input and does not create a Revision unless requested,
+eligible, and validated.
 
 A successful proposal creates a Revision only if the original input is still the
 target Branch HEAD, the source/result hashes match, and the successful Run ID is
@@ -332,7 +356,7 @@ remained auditable; the bounded repair attempt succeeded and created the AI
 Revision.
 
 The browser observations below are historical M13-era evidence for prompt v3, not
-verification of the current `semantic-proposal-v4-tool-free` contract.
+verification of the current `semantic-proposal-v5-bounded-transfers` contract.
 
 On 2026-08-13, a separate real-browser run started from the Studio against
 `9058f3af3ffb104c.png` with `max` reasoning, Skill `1.2.0`, and the historical

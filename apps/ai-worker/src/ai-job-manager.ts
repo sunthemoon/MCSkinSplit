@@ -32,6 +32,9 @@ import { decodeSkinPng, getSkinLayout } from "@mc-skin-split/skin-core";
 import {
   RevisionStore,
   RevisionStoreError,
+  type OperationSnapshot,
+  type SkinPart,
+  type SkinRevision,
 } from "@mc-skin-split/skin-revision";
 import {
   AiJobStore,
@@ -143,24 +146,33 @@ export class AiJobManager {
       .sort();
   }
 
-  startAnalysis(
+  async startAnalysis(
     sourceRevisionId: string,
     options: AiAnalysisOptions,
-  ): AiJob {
+  ): Promise<AiJob> {
     this.assertOpen();
     this.requireProvider(options.provider);
     const revision = this.revisionStore.getRevision(sourceRevisionId);
-    const branch = this.revisionStore.getBranch(revision.branchId);
-    if (
-      options.createRevisionOnSuccess &&
-      branch.headRevisionId !== revision.id
-    ) {
-      throw new AiJobStoreError(
-        "AI_JOB_CONFLICT",
-        "只能分析并提交所选 Branch 的最新 Revision",
-        409,
-        { sourceRevisionId, branchHeadRevisionId: branch.headRevisionId },
-      );
+    if (options.createRevisionOnSuccess) {
+      let branch = this.revisionStore.getBranch(revision.branchId);
+      if (branch.headRevisionId !== revision.id) {
+        throw new AiJobStoreError(
+          "AI_JOB_CONFLICT",
+          "只能分析并提交所选 Branch 的最新 Revision",
+          409,
+          { sourceRevisionId, branchHeadRevisionId: branch.headRevisionId },
+        );
+      }
+      await this.assertSemanticAnalysisSourceEligible(revision.id);
+      branch = this.revisionStore.getBranch(revision.branchId);
+      if (branch.headRevisionId !== revision.id) {
+        throw new AiJobStoreError(
+          "AI_JOB_CONFLICT",
+          "只能分析并提交所选 Branch 的最新 Revision",
+          409,
+          { sourceRevisionId, branchHeadRevisionId: branch.headRevisionId },
+        );
+      }
     }
     const job = this.jobStore.createJob({
       kind: "semantic_analysis",
@@ -279,6 +291,13 @@ export class AiJobManager {
       this.schedule(retry.id);
       return retry;
     }
+    if (
+      source.skillName !== AI_SKILL_NAME ||
+      source.skillVersion !== AI_SKILL_VERSION ||
+      source.promptVersion !== PROMPT_VERSION
+    ) {
+      throw staleSemanticAnalysisRetryContract(source);
+    }
     const options = normalizeOptions({
       ...source.options,
       ...(overrides.provider ? { provider: overrides.provider } : {}),
@@ -295,16 +314,24 @@ export class AiJobManager {
     });
     this.requireProvider(options.provider);
     const revision = this.revisionStore.getRevision(source.inputRevisionId);
-    const branch = this.revisionStore.getBranch(revision.branchId);
-    if (
-      options.createRevisionOnSuccess &&
-      branch.headRevisionId !== revision.id
-    ) {
-      throw new AiJobStoreError(
-        "AI_JOB_CONFLICT",
-        "来源 Revision 已不是 Branch HEAD，请在最新 Revision 新建分析",
-        409,
-      );
+    if (options.createRevisionOnSuccess) {
+      let branch = this.revisionStore.getBranch(revision.branchId);
+      if (branch.headRevisionId !== revision.id) {
+        throw new AiJobStoreError(
+          "AI_JOB_CONFLICT",
+          "来源 Revision 已不是 Branch HEAD，请在最新 Revision 新建分析",
+          409,
+        );
+      }
+      await this.assertSemanticAnalysisSourceEligible(revision.id);
+      branch = this.revisionStore.getBranch(revision.branchId);
+      if (branch.headRevisionId !== revision.id) {
+        throw new AiJobStoreError(
+          "AI_JOB_CONFLICT",
+          "来源 Revision 已不是 Branch HEAD，请在最新 Revision 新建分析",
+          409,
+        );
+      }
     }
     const retry = this.jobStore.createJob({
       kind: "semantic_analysis",
@@ -739,6 +766,10 @@ export class AiJobManager {
         ),
       );
       const provider = this.requireProvider(job.provider);
+      if (job.options.createRevisionOnSuccess) {
+        await this.assertSemanticAnalysisSourceEligible(job.inputRevisionId);
+        this.assertNotCancelled(jobId, signal);
+      }
       const skinPng = await this.revisionStore.readRevisionSkinPng(
         job.inputRevisionId,
       );
@@ -808,6 +839,10 @@ export class AiJobManager {
           ),
         );
         this.assertNotCancelled(jobId, signal);
+        if (job.options.createRevisionOnSuccess) {
+          await this.assertSemanticAnalysisSourceEligible(job.inputRevisionId);
+          this.assertNotCancelled(jobId, signal);
+        }
         const progressRun = currentRun;
         const providerResult = await provider.analyze({
           jobId,
@@ -885,6 +920,8 @@ export class AiJobManager {
           this.assertNotCancelled(jobId, signal);
           let resultRevisionId: string | undefined;
           if (job.options.createRevisionOnSuccess) {
+            await this.assertSemanticAnalysisSourceEligible(job.inputRevisionId);
+            this.assertNotCancelled(jobId, signal);
             const committed = await this.revisionStore.commitAiSegmentation(
               job.inputRevisionId,
               {
@@ -1424,6 +1461,128 @@ export class AiJobManager {
     return provider;
   }
 
+  private async assertSemanticAnalysisSourceEligible(
+    sourceRevisionId: string,
+  ): Promise<void> {
+    const sourceRevision = this.revisionStore.getRevision(sourceRevisionId);
+    const sourceState = await this.revisionStore.readRevisionSemanticState(
+      sourceRevision.id,
+    );
+    const generatedComponentIds = sourceState.document.components
+      .filter((component) => component.provenance.containsGeneratedPixels)
+      .map((component) => component.instanceId)
+      .sort();
+    if (generatedComponentIds.length > 0) {
+      throw semanticAnalysisSourceProvenanceConflict(sourceRevision.id, {
+        reason: "generated_semantic_pixels",
+        evidenceRevisionId: sourceRevision.id,
+        componentIds: generatedComponentIds,
+      });
+    }
+
+    const visited = new Set<string>();
+    let contentRevision: SkinRevision | null = sourceRevision;
+    while (contentRevision) {
+      if (visited.has(contentRevision.id)) {
+        throw semanticAnalysisSourceProvenanceConflict(sourceRevision.id, {
+          reason: "invalid_content_ancestry",
+          evidenceRevisionId: contentRevision.id,
+        });
+      }
+      visited.add(contentRevision.id);
+      if (contentRevision.projectId !== sourceRevision.projectId) {
+        throw semanticAnalysisSourceProvenanceConflict(sourceRevision.id, {
+          reason: "invalid_content_ancestry",
+          evidenceRevisionId: contentRevision.id,
+        });
+      }
+
+      const operation = await this.revisionStore.readRevisionOperation(
+        contentRevision.id,
+      );
+      if (isPixelAuthoringOperation(operation.type)) {
+        const partEvidence = await this.inspectOperationPartEvidence(operation);
+        const reason = partEvidence.generatedPartIds.length > 0
+          ? "generated_part_ancestry"
+          : partEvidence.repairedPartIds.length > 0
+            ? "repaired_part_ancestry"
+            : "pixel_authoring_operation";
+        throw semanticAnalysisSourceProvenanceConflict(sourceRevision.id, {
+          reason,
+          evidenceRevisionId: contentRevision.id,
+          operationType: operation.type,
+          ...(partEvidence.partIds.length > 0
+            ? { partIds: partEvidence.partIds }
+            : {}),
+          ...(partEvidence.repairedPartIds.length > 0
+            ? { repairedPartIds: partEvidence.repairedPartIds }
+            : {}),
+          ...(partEvidence.generatedPartIds.length > 0
+            ? { generatedPartIds: partEvidence.generatedPartIds }
+            : {}),
+        });
+      }
+
+      if (operation.type === "revert") {
+        const targetRevisionId = stringMetadata(
+          operation.metadata,
+          "targetRevisionId",
+        );
+        if (!targetRevisionId) {
+          throw semanticAnalysisSourceProvenanceConflict(sourceRevision.id, {
+            reason: "invalid_content_ancestry",
+            evidenceRevisionId: contentRevision.id,
+          });
+        }
+        contentRevision = this.revisionStore.getRevision(targetRevisionId);
+        continue;
+      }
+      contentRevision = contentRevision.parentRevisionId
+        ? this.revisionStore.getRevision(contentRevision.parentRevisionId)
+        : null;
+    }
+  }
+
+  private async inspectOperationPartEvidence(
+    operation: OperationSnapshot,
+  ): Promise<{
+    readonly partIds: readonly string[];
+    readonly repairedPartIds: readonly string[];
+    readonly generatedPartIds: readonly string[];
+  }> {
+    const partIds = operationPartIds(operation);
+    const repairedPartIds: string[] = [];
+    const generatedPartIds: string[] = [];
+    for (const partId of partIds) {
+      try {
+        const part = this.revisionStore.getPart(partId);
+        const derivation = partDerivation(part);
+        if (derivation?.kind === "part_repair") repairedPartIds.push(part.id);
+        if (derivation?.containsGeneratedPixels === true) {
+          generatedPartIds.push(part.id);
+          continue;
+        }
+        const sourceState = await this.revisionStore.readRevisionSemanticState(
+          part.sourceRevisionId,
+        );
+        const sourceComponent = sourceState.document.components.find(
+          (component) => component.instanceId === part.sourceComponentId,
+        );
+        if (sourceComponent?.provenance.containsGeneratedPixels) {
+          generatedPartIds.push(part.id);
+        }
+      } catch {
+        // The operation itself is already sufficient evidence. Optional ancestry
+        // enrichment must not turn a stable provenance conflict into another error.
+      }
+    }
+    return {
+      partIds,
+      repairedPartIds: repairedPartIds.sort(),
+      generatedPartIds: generatedPartIds.sort(),
+    };
+  }
+
   private requireReplacementProvider(
     providerName: string,
   ): SkinSemanticAiProvider & Required<Pick<SkinSemanticAiProvider, "recommendReplacement">> {
@@ -1445,6 +1604,79 @@ export class AiJobManager {
       throw new AiJobStoreError("AI_WORKER_CLOSED", "AI Worker 已关闭", 503);
     }
   }
+}
+
+type SemanticAnalysisSourceConflictReason =
+  | "generated_semantic_pixels"
+  | "generated_part_ancestry"
+  | "repaired_part_ancestry"
+  | "pixel_authoring_operation"
+  | "invalid_content_ancestry";
+
+function semanticAnalysisSourceProvenanceConflict(
+  sourceRevisionId: string,
+  evidence: {
+    readonly reason: SemanticAnalysisSourceConflictReason;
+    readonly evidenceRevisionId: string;
+    readonly componentIds?: readonly string[];
+    readonly operationType?: OperationSnapshot["type"];
+    readonly partIds?: readonly string[];
+    readonly repairedPartIds?: readonly string[];
+    readonly generatedPartIds?: readonly string[];
+  },
+): AiJobStoreError {
+  return new AiJobStoreError(
+    "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
+    "来源 Revision 包含补绘或像素创作内容，当前 AI 重新识别会丢失来源标记",
+    409,
+    { sourceRevisionId, ...evidence },
+  );
+}
+
+function isPixelAuthoringOperation(
+  operationType: OperationSnapshot["type"],
+): boolean {
+  return operationType === "apply_part" ||
+    operationType === "compose" ||
+    operationType === "palette_change";
+}
+
+function operationPartIds(operation: OperationSnapshot): readonly string[] {
+  const partIds: string[] = [];
+  if (operation.type === "apply_part") {
+    const partId = stringMetadata(operation.metadata, "partId");
+    if (partId) partIds.push(partId);
+  }
+  if (operation.type === "compose") {
+    const layers = operation.metadata.layers;
+    for (const layer of Array.isArray(layers) ? layers : []) {
+      if (!isRecord(layer)) continue;
+      const partId = typeof layer.partId === "string" ? layer.partId : null;
+      if (partId) partIds.push(partId);
+    }
+  }
+  return [...new Set(partIds)].sort();
+}
+
+function partDerivation(part: SkinPart): {
+  readonly kind?: unknown;
+  readonly containsGeneratedPixels?: unknown;
+} | null {
+  const manifest = part.manifest as unknown;
+  if (!isRecord(manifest) || !isRecord(manifest.derivation)) return null;
+  return manifest.derivation;
+}
+
+function stringMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+  key: string,
+): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeOptions(options: AiAnalysisOptions): AiAnalysisOptions {
@@ -1540,6 +1772,31 @@ function normalizeRestorationRecommendationOptions(
       : {}),
     ...(options.manualRgba ? { manualRgba: options.manualRgba } : {}),
   };
+}
+
+function staleSemanticAnalysisRetryContract(
+  job: SemanticAnalysisAiJob,
+): AiJobStoreError {
+  return new AiJobStoreError(
+    "AI_ANALYSIS_RETRY_CONTRACT_STALE",
+    "旧版语义分析的 Skill 或提示词合同已变化，请从来源 Revision 新建分析",
+    409,
+    {
+      jobId: job.id,
+      sourceRevisionId: job.inputRevisionId,
+      storedContract: {
+        skillName: job.skillName,
+        skillVersion: job.skillVersion,
+        promptVersion: job.promptVersion,
+      },
+      currentContract: {
+        skillName: AI_SKILL_NAME,
+        skillVersion: AI_SKILL_VERSION,
+        promptVersion: PROMPT_VERSION,
+      },
+      requiredAction: "start_fresh_analysis",
+    },
+  );
 }
 
 function staleRestorationRecommendation(

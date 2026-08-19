@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-15
+Last updated: 2026-08-19
 
 ## Milestones
 
@@ -22,6 +22,7 @@ Last updated: 2026-08-15
 | M13 single-pass semantic JSON transport | Complete | Default one-call JSON capture, strict host validation, honest recovered diagnostics, and real browser AI completion |
 | M14 analyzed-result catalog archive | Complete | Result-Revision-scoped archive/restore, default active visibility, non-cascading immutable history, and browser persistence |
 | M15 player-first clean analysis and classification repair | Complete | Default clean baseline, six-stage persistent flow, deterministic cross-body review, immutable repaired catalog variant, and real-browser confirmation |
+| M16 bounded semantic transfers and immutable history guards | Complete | Proposal 1.1 ownership rules, provenance-safe reanalysis rejection, and SQLite append-only enforcement |
 
 ## M0 baseline
 
@@ -908,7 +909,7 @@ Last updated: 2026-08-15
   settings can select `"current"`, which supplies a compact existing-component
   summary as a soft prior while retaining complete host validation. Baseline
   identity is stored in the Job/analysis pack and participates in the input hash.
-- Current prompt `semantic-proposal-v4-tool-free` explicitly tells the model that
+- The M15 prompt `semantic-proposal-v4-tool-free` explicitly tells the model that
   long hair may continue from the head across torso front, back, left, and right
   surfaces. Earlier v3 Chrome runs remain historical M13 evidence and do not count
   as M15 prompt verification.
@@ -987,3 +988,65 @@ Last updated: 2026-08-15
 - Hidden-content completion remains a later provenance-aware capability. Any such
   feature must distinguish original, inferred, generated, and authored pixels and
   require preview plus explicit user confirmation.
+
+## M16 deliverables
+
+- Current semantic Jobs pin Skill `1.3.0`, prompt
+  `semantic-proposal-v5-bounded-transfers`, proposal Schema `1.1`, taxonomy
+  `coarse-v2-no-unknown-components`, and validator
+  `semantic-proposal-validator-v2`. Historical Schema `1.0` proposal artifacts
+  remain readable without adopting the new caps, but current validation returns
+  `LEGACY_PROPOSAL_READ_ONLY` for a 1.0 submission.
+- The coarse taxonomy still has 23 outcomes: 22 concrete component categories
+  plus Unknown. Unknown is no longer serialized as a component category. Every
+  CandidateRegion belongs to one component, the unassigned bucket, or exactly one
+  review item, and suggestions use the same 22 concrete categories as components.
+- Pixel overrides are proposal-wide bounded transfers: at most 64 unique pixels
+  and 32 raw spans. Every add must target a component-owned Region pixel and be
+  paired with the owning component's remove; additions from unassigned/review,
+  self-transfers, duplicate destinations, and unpaired additions are rejected.
+  A removal with no destination intentionally moves the pixel to Unknown.
+- Validator v2 reports `overrideUniquePixelCount` and `overrideSpanCount` so the
+  accepted boundary correction remains visible in Run evidence.
+- Current-contract Retry requires an exact stored Skill name/version and prompt
+  version match. A legacy mismatch returns
+  `AI_ANALYSIS_RETRY_CONTRACT_STALE` with `start_fresh_analysis` instead of
+  silently changing the old Job's contract.
+- Committing semantic Job start/retry is now provenance-aware and asynchronous. It
+  rejects current generated components and effective `apply_part`, `compose`, or
+  `palette_change` ancestry with
+  `AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT` before creating a Job. The same check
+  runs again during execution, before provider invocation, and before commit.
+  Revert follows its content target; ordinary imports and semantic-only manual
+  classification remain eligible. Explicit read-only analysis remains available
+  for generated/composed sources because it cannot create a semantic Revision.
+- Migration 013 installs 18 SQLite triggers for immutable Revision, operation,
+  revision-bound asset, Part content/file, Part-edit Revision, Bundle content, and
+  Bundle membership history. Snapshot/Part staging rows retain a single validated
+  owner-binding transition, while Branch/project heads, repair-project state, and
+  Part/Bundle lifecycle fields remain mutable.
+
+## M16 verification status
+
+- Final repository `pnpm verify`: **passed** on 2026-08-19. Fixture checks,
+  workspace typechecks, all 316 tests, and all production builds passed. Package
+  totals are core 71, compositor 8, analysis pack 17, provider 32, Revision 43,
+  worker 24, API 13, and Web 108. The existing Vite warning for two chunks larger
+  than 500 kB remains.
+- API integration confirms a committing asynchronous analysis returns 409 for a
+  composed Revision and creates no semantic Job; `focus: ["unknown"]` is rejected
+  at the public schema boundary.
+- No real model or browser run is required for this contract/storage milestone;
+  provider behavior is covered by deterministic proposal fixtures and a scripted
+  worker provider.
+
+## M16 boundaries
+
+- Reanalysis protection is deliberately conservative because provenance is still
+  component/operation-level. A whole applied-Part or composed ancestry is blocked
+  from commit even when only some pixels may be authored or generated. M18's per-
+  pixel origin model is required before safely relaxing this persistence rule.
+- Imported PNG pixels are treated as source-visible because the application cannot
+  distinguish authorship that occurred before import.
+- M16 does not add CandidateRegion seam/3D evidence or hidden-content generation;
+  those remain separately gated future milestones.

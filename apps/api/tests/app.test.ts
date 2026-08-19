@@ -566,7 +566,8 @@ describe("revision API", () => {
   });
 
   it("creates, resolves, previews, and commits a composition project", async () => {
-    const { app } = await createApi();
+    const provider = new ApiAiProvider("composition-guard-provider");
+    const { app } = await createApi([provider]);
     const sourceProject = await createProject(app, "Composer source");
     const sourceImport = await importSkin(app, sourceProject.projectId);
     const edited = await app.inject({
@@ -740,7 +741,16 @@ describe("revision API", () => {
       payload: { summary: "API 提交混搭" },
     });
     expect(committed.statusCode).toBe(201);
-    expect(committed.json()).toMatchObject({
+    const committedBody = committed.json<{
+      revision: {
+        id: string;
+        parentRevisionId: string;
+        operationType: string;
+        summary: string;
+      };
+      composition: { status: string };
+    }>();
+    expect(committedBody).toMatchObject({
       revision: {
         parentRevisionId: target.revisionId,
         operationType: "compose",
@@ -748,6 +758,38 @@ describe("revision API", () => {
       },
       composition: { status: "committed" },
     });
+
+    const unsafeAnalysis = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${committedBody.revision.id}/ai-analysis`,
+      payload: {
+        mode: "full",
+        semanticBaseline: "empty",
+        provider: provider.providerName,
+        model: "guard-model",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["hair"],
+        createRevisionOnSuccess: true,
+      },
+    });
+    expect(unsafeAnalysis.statusCode).toBe(409);
+    expect(unsafeAnalysis.json()).toMatchObject({
+      error: {
+        code: "AI_ANALYSIS_SOURCE_PROVENANCE_CONFLICT",
+        details: {
+          sourceRevisionId: committedBody.revision.id,
+          operationType: "compose",
+        },
+      },
+    });
+
+    const blockedJobs = await app.inject({
+      method: "GET",
+      url: `/api/ai-jobs?revisionId=${encodeURIComponent(committedBody.revision.id)}`,
+    });
+    expect(blockedJobs.statusCode).toBe(200);
+    expect(blockedJobs.json()).toMatchObject({ jobs: [] });
 
     const invalid = await app.inject({
       method: "POST",
@@ -1520,6 +1562,24 @@ describe("revision API", () => {
       options: { semanticBaseline: "current" },
     });
 
+    const invalidUnknownFocus = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/ai-analysis`,
+      payload: {
+        mode: "full",
+        provider: "provider-a",
+        model: "model-a",
+        reasoningEffort: "medium",
+        taxonomyLevel: "coarse",
+        focus: ["unknown"],
+        createRevisionOnSuccess: false,
+      },
+    });
+    expect(invalidUnknownFocus.statusCode).toBe(400);
+    expect(invalidUnknownFocus.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
     const invalid = await app.inject({
       method: "POST",
       url: `/api/revisions/${imported.revisionId}/ai-analysis`,
@@ -1916,7 +1976,7 @@ class ApiAiProvider implements SkinSemanticAiProvider {
 function apiProposal(input: ProviderAnalysisInput): AnalysisProposal {
   const regions = input.pack.candidateRegions.regions;
   return {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     sourceRevisionId: input.pack.job.sourceRevisionId,
     modelAssessment: {
       armType: input.pack.job.armType,

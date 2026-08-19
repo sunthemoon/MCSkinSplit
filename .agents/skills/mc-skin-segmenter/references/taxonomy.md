@@ -27,7 +27,8 @@ visual evidence supports it.
 | `leg_accessory` | Garters and leg decorations |
 | `back_accessory` | Capes, wings, backpacks, and back items |
 | `other_accessory` | Supported accessory that fits no category above |
-| `unknown` | Semantically uncertain content |
 
 Use stable lowercase instance IDs such as `hair.main` or `outfit.glove.left`.
 One component may span multiple body parts and Base/Outer surfaces.
+Semantically uncertain content belongs in one unassigned/review ownership bucket;
+the host derives the separate Unknown mask from pixels not assigned to components.
