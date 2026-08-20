@@ -1,28 +1,32 @@
 # MCSkinSplit
 
-> 把一张 Minecraft 皮肤拆成可理解、可修正、可复用的语义组件，并保留每一次操作的版本与像素来源。
+> 把一张难以复用的 Minecraft 皮肤，变成看得懂、改得准、可回退的头发、服装与饰品组件。
 
 [中文说明](#中文说明) · [English](#english)
 
 ## 中文说明
 
-### 从整张皮肤到可复用组件
+### 把喜欢的造型从整张皮肤里拆出来
 
-MCSkinSplit 是一套面向 Minecraft 皮肤创作者、像素美术和资源整理者的本地工作台。它不会把皮肤粗略切成头、身体和四肢图片，而是把跨 UV 面、跨身体部位和跨 Base/Outer 图层的像素组织成“长发”“上衣”“手套”“鞋子”“头饰”等真正可使用的语义组件。
+MCSkinSplit 是一套面向 Minecraft 皮肤创作者、像素美术和资源整理者的本地语义拆分与复用工作台。它不会把皮肤粗略切成头、身体和四肢图片，而是把跨 UV 面、跨身体部位和跨 Base/Outer 图层的像素组织成“长发”“上衣”“手套”“鞋子”“头饰”等真正可以再次使用的组件。
 
 普通玩家只需完成四步：**导入皮肤 → 智能识别 → 检查修正 → 保存导出**。历史版本、组件修补、多皮肤混搭和资产管理仍可从高级工作室进入。完整产品定位、第一版边界与待验证问题见 [PRODUCT.md](PRODUCT.md)。
 
+> **当前状态：** 可见组件拆分、人工修正、版本历史、逐像素来源、Part、Bundle、修补和混搭已经可用；隐藏内容候选仍是默认关闭的实验能力，尚未通过完整发布门。
+
+- **适合：** 想从现成皮肤中单独保存、修改或复用长发、衣服和饰品的创作者。
+- **解决：** 同一物品跨多个 UV 面和内外层，靠肉眼逐像素复制容易漏选、错层或改坏原图。
+- **得到：** 可检查的语义组件、不会覆盖旧结果的版本，以及可继续修补或组合的 Part 和 Bundle。
+
 ![MCSkinSplit 玩家四步工作台、皮肤 Atlas 与 3D 预览](docs/assets/readme/studio-overview.jpg)
 
-### 核心功能
+### 当前可以做什么
 
-- **真实皮肤工作台：** 无损读取 64×64 RGBA PNG，识别 Slim/Alex 与 Wide/Classic 手臂布局，并联动显示像素级 Atlas 和 3D 角色。
-- **语义组件拆分：** 用精确像素遮罩表示头发、服装、肤色、五官和饰品；一个组件可以跨多个身体面，同一面也可以包含多个组件。
-- **玩家可控修正：** 在组件树、2D/3D 视图和分类面板之间检查结果，支持画笔、矩形、同色魔棒、整面选择、Unknown、合并、拆分、重分类、关系编辑和草稿撤销/重做。
-- **不可变版本与来源：** 导入、AI 分类、人工修正、部件应用、修补和混搭都创建新 Revision；旧结果不被覆盖，逐像素来源可以区分源图、人工创作和已接受的生成内容。
-- **可复用资产：** 组件可以保存为带纹理、写入遮罩、来源和预览的 Part；完整头发、服装或饰品分类可以保存为 Bundle。
-- **安全修补与混搭：** 在应用组件或组合多张皮肤前显示模型、图层、语义边界和逐像素冲突，再由用户选择处理方式。
-- **可选 AI：** AI 只负责初始分类或对 Host 已生成的候选 ID 排序；Schema、像素归属、范围、Hash 和来源始终由本地 Host 校验。
+- **从皮肤得到语义组件：** 无损读取 64×64 RGBA PNG，区分 Slim/Alex 与 Wide/Classic，并用精确像素范围表示头发、服装、肤色、五官和饰品。
+- **在 2D/3D 中检查修正：** Atlas 与角色预览联动，支持显隐、Solo、画笔、矩形、同色选择、整面选择、Unknown、合并、拆分、重分类、关系编辑和草稿撤销/重做。
+- **保留每一次确认：** 导入、识别、人工修正、部件应用、修补和混搭都会创建新 Revision；旧结果不被覆盖，逐像素来源区分源图、人工创作和已接受的生成内容。
+- **保存并再次使用：** 单个组件可保存为带纹理、遮罩、来源和预览的 Part；完整头发、服装或饰品大类可保存为 Bundle，应用和组合前会先显示冲突。
+- **按需启用 AI：** AI 只帮助完成初始分类或排列本地程序生成的候选；像素边界、身份、Hash、来源和最终写入仍由本地确定性程序（Host）校验并等待用户确认。
 
 ### 怎么使用
 
@@ -53,7 +57,7 @@ MCSkinSplit 是一套面向 Minecraft 皮肤创作者、像素美术和资源整
 
 ### 快速开始
 
-要求：
+前置条件：
 
 - Node.js 24
 - pnpm 10.13.1
@@ -62,7 +66,6 @@ MCSkinSplit 是一套面向 Minecraft 皮肤创作者、像素美术和资源整
 
 ```bash
 pnpm install
-pnpm fixtures:generate
 pnpm dev
 ```
 
@@ -70,15 +73,32 @@ pnpm dev
 
 隐藏内容 Completion 是实验功能，默认不会进入玩家流程。只在明确测试时设置 `VITE_ENABLE_COMPLETION_WORKSPACE=true`；它生成的是需要人工审核的推测候选，不会宣称恢复了原作者没有画出的真实像素。
 
-### 验证
+项目无需环境变量即可启动。常用可选配置：
+
+| 变量 | 用途 | 默认行为 |
+| --- | --- | --- |
+| `MC_SKIN_DATA_DIR` | 指定 SQLite、Revision、Part、Bundle 和 AI 审计资料的持久化目录 | 仓库根目录下的 `data/` |
+| `VITE_ENABLE_COMPLETION_WORKSPACE` | 显式开启隐藏内容候选实验区 | 未设置时关闭 |
+
+AI Provider、模型与推理参数见 [AI 分析合同](docs/ai-analysis.md)；不使用 AI 时无需配置。
+
+### 常用命令
+
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev` | 同时启动本地 API 与 Web 工作台 |
+| `pnpm build` | 构建全部 workspace 包 |
+| `pnpm verify` | 检查 fixture、类型、单元/集成测试与全部构建 |
+| `pnpm browser:install` | 安装确定性浏览器测试所需的 Chromium |
+| `pnpm verify:browser` | 使用隔离数据目录和 replay provider 运行浏览器回归 |
+
+完整仓库验证：
 
 ```bash
 pnpm verify
 ```
 
-该命令检查 fixture 是否漂移，运行所有 TypeScript 类型检查和单元/集成测试，并构建全部 workspace 包。
-
-确定性浏览器回归使用隔离数据目录和 replay provider，不依赖外部模型：
+浏览器回归不依赖外部模型：
 
 ```bash
 pnpm browser:install
@@ -91,6 +111,23 @@ pnpm verify:browser
 - Completion 生成的是推测内容，始终需要显式接受；评测与发布门未全部通过前保持 feature flag 默认关闭。
 - 同层隐藏内容可以形成未发布的 latent Part，但不能伪装成来源皮肤中的单层 PNG。
 - 仓库没有承诺云部署、多人实时协作、在线素材市场或自动发布资产。
+
+### 技术栈
+
+| 技术 | 在项目中的作用 |
+| --- | --- |
+| TypeScript + pnpm workspace | 统一 Web、API、Worker 与领域包的类型和构建 |
+| React + Vite | 浏览器中的玩家四步工作台与高级工作室 |
+| Fastify | 本地 Project、Revision、Part、Bundle、AI Job 与 Completion API |
+| SQLite + better-sqlite3 | 保存本地项目元数据、不可变历史和资产索引 |
+| skinview3d | Slim/Wide Minecraft 角色与组件的 3D 预览 |
+| Vitest + Playwright | 单元/集成测试与确定性 Chromium 工作流回归 |
+
+### 运行与部署边界
+
+当前仓库只验证了本地开发运行。`pnpm build` 会构建全部包，但仓库没有 Dockerfile、Compose、托管平台配置或完整的生产服务编排，因此不能把 `pnpm dev` 当作生产部署方案。
+
+若后续部署为长期服务，至少需要持久化 `data/`（或 `MC_SKIN_DATA_DIR` 指定的目录）、为 API/Web 提供正式进程管理与反向代理，并单独评估 Codex CLI 认证和模型调用权限；这些步骤目前没有被仓库声明为已支持。
 
 ### 文档导航
 
@@ -124,20 +161,25 @@ tests/e2e/                    确定性浏览器回归
 
 ### From a full skin to reusable semantic components
 
-MCSkinSplit is a local, versioned studio for Minecraft skin creators, pixel artists, and asset curators. It turns exact source pixels into meaningful components such as hair, clothing, gloves, shoes, and accessories instead of treating a body part or UV face as the final asset.
+MCSkinSplit is a local semantic splitting and reuse studio for Minecraft skin creators, pixel artists, and asset curators. It turns a hard-to-reuse 64×64 PNG into understandable, editable, versioned components such as hair, clothing, gloves, shoes, and accessories.
 
 The ordinary-player workflow is deliberately short: **Import → Smart analysis → Check & correct → Save & export**. Revision history, component repair, multi-skin composition, and asset management remain available in the Advanced Studio. See [PRODUCT.md](PRODUCT.md) for the product direction, first-release scope, and open validation questions.
 
-The screenshots in the [real interface section](#真实界面) come from the running application and show the player workspace, pixel-accurate semantic editor, and an exported reusable Part.
+> **Status:** visible-component splitting, manual correction, immutable history, per-pixel origin, Parts, Bundles, repair, and composition are available. Hidden-content Completion remains a disabled-by-default experiment until its release evidence is complete.
+
+- **Best for:** creators who want to extract, correct, or reuse a specific look from an existing skin.
+- **Solves:** the error-prone work of finding one semantic item across UV faces, body regions, and Base/Outer layers.
+- **Produces:** inspectable semantic components, reversible Revisions, and reusable Part or Bundle assets.
+
+The screenshots in the [real interface section](#真实界面) come from the running application and show the player workspace, pixel-accurate semantic editor, and an exported reusable Part; they are not concept art.
 
 ### What it does
 
-- Decodes lossless 64×64 RGBA skins and keeps Slim/Alex and Wide/Classic UV layouts explicit.
-- Links a nearest-neighbor Atlas, semantic component masks, and a Revision-aware 3D avatar.
-- Supports pixel-level assignment, Unknown, merge, split, reclassification, relations, local undo/redo, and 2D/3D inspection.
-- Stores every confirmed change as an immutable Revision with Branch history and per-pixel origin evidence.
-- Exports verified reusable Parts and complete-category Bundles, then reports conflicts before repair or composition.
-- Uses AI only as an optional classifier or ranker over host-owned evidence and candidate IDs; the host remains authoritative for pixels, validation, hashes, and persistence.
+- Splits lossless 64×64 RGBA skins into exact semantic components while keeping Slim/Alex and Wide/Classic layouts explicit.
+- Links the pixel Atlas, component ownership, and a 3D avatar for hide, Solo, selection, Unknown, merge, split, reclassification, relation editing, and local undo/redo.
+- Stores every confirmed change as a new immutable Revision with per-pixel origin evidence instead of overwriting the source.
+- Exports reusable Parts and complete-category Bundles, then shows compatibility and pixel conflicts before repair or composition.
+- Uses AI only as an optional classifier or ranker; the local host remains authoritative for candidate identities, pixels, validation, hashes, persistence, and user confirmation.
 
 ### User workflow
 
@@ -159,11 +201,12 @@ Requirements: Node.js 24, pnpm 10.13.1, and a WebGL-capable browser. Optional AI
 
 ```bash
 pnpm install
-pnpm fixtures:generate
 pnpm dev
 ```
 
 Open `http://127.0.0.1:5173`; the Fastify API listens on `127.0.0.1:3001`. Runtime data is stored under `data/` by default. Set `MC_SKIN_DATA_DIR` before starting the API to use a different data directory.
+
+No environment variable is required for the deterministic workflow. `VITE_ENABLE_COMPLETION_WORKSPACE=true` explicitly enables the experimental Completion UI; AI provider settings are documented in [AI analysis](docs/ai-analysis.md).
 
 ### Verification
 
@@ -181,5 +224,11 @@ pnpm verify:browser
 - Hidden-content Completion is inference, not factual recovery. It stays behind `VITE_ENABLE_COMPLETION_WORKSPACE=true` until its release evidence is complete and always requires an explicit decision.
 - A same-layer latent completion may become an unpublished Part, but it cannot be represented honestly as pixels from the original single-layer skin PNG.
 - Cloud deployment, real-time collaboration, an online marketplace, and automatic asset publication are not claimed by this repository.
+
+### Technology and deployment
+
+The workspace uses TypeScript and pnpm, React with Vite for the Web studio, Fastify for the local API, SQLite through better-sqlite3 for versioned metadata, skinview3d for avatar previews, and Vitest plus Playwright for automated verification.
+
+Only local development has been verified. `pnpm build` builds the workspace, but the repository does not include Docker, Compose, hosted-platform configuration, or complete production process orchestration. A future long-running deployment must persist `data/` (or `MC_SKIN_DATA_DIR`) and supply its own process management, reverse proxy, and optional Codex CLI authentication policy.
 
 For detailed contracts and evidence, start with [architecture](docs/architecture.md), [AI analysis](docs/ai-analysis.md), [hidden-content completion](docs/hidden-content-completion.md), and [implementation status](docs/implementation-status.md).
