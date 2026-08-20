@@ -27,7 +27,7 @@ Last updated: 2026-08-20
 | M18 per-pixel origin and Part 2.0 | Complete | Canonical origin propagation, seven-file Part round trip, migration upgrade/tamper tests, full verification, and browser confirmation |
 | M19 independent hidden-content Completion Proposal core | Complete | Deterministic candidates, immutable proposal/decision/result storage, optional ID-only ranking, accept/reject integration, full verification, and isolated service evidence |
 | M20 player-first workspace and efficient correction | Complete | Four-step player IA, feature-gated Completion review/edit/publish, host-generated component IDs, responsive keyboard/touch editing, 11 deterministic browser scenarios, and full verification |
-| M21 Completion evaluation and release gate | In progress | Candidate algorithm v2 passes the offline synthetic gate; AI ordering evidence and the combined release report remain incomplete, so default release stays disabled |
+| M21 Completion evaluation and release gate | Complete | Host v2, real exact-ID AI ordering, and the hash-bound 11-scenario browser gate are recorded; the strict report keeps Completion experimental because AI top-1 oracle acceptability is below threshold |
 
 ## M0 baseline
 
@@ -669,10 +669,10 @@ Last updated: 2026-08-20
   the replacement-planning capability, and keeps the full manual candidate flow
   available when none do.
 - The default replacement provider uses a tool-free, read-only Codex invocation:
-  it ignores user configuration while retaining authentication, clears MCP/apps,
+  it preserves configured model-provider routing by default, clears MCP/apps,
   disables shell, web, browser, computer, image, plugin, and delegation features,
-  and inlines only the immutable public Job/catalog. Semantic analysis retains its
-  existing configurable provider behavior.
+  and inlines only the immutable public Job/catalog. Ignoring user configuration
+  remains an explicit provider option.
 
 ## M10 verification evidence
 
@@ -1371,8 +1371,9 @@ criteria.
 
 ## M21 implementation status
 
-Status: **In progress**. The deterministic Host v2 offline gate passes, but the
-combined release gate remains failed and the runtime contract is unchanged.
+Status: **Complete**. The evaluation and release-gate implementation is finished.
+The strict combined report remains failed, so Completion stays experimental and
+the runtime contract is unchanged.
 
 - `skin-core` keeps `completion-candidates-v1` as the published runtime generator
   and adds an explicit side-by-side `completion-candidates-v2` generator. Existing
@@ -1387,6 +1388,18 @@ combined release gate remains failed and the runtime contract is unchanged.
   precision, RGBA mean absolute error, exact-color rate, per-strategy oracle
   acceptability, negative safety, and optional exact-ID ranking quality. Oracle
   acceptability is labelled synthetic evaluation evidence, never real-user truth.
+- Release inputs are now versioned, canonical, and hash-bound documents rather
+  than caller-supplied arrays or booleans. The evaluator rejects stale source
+  fingerprints, altered evidence hashes, incomplete/duplicated candidate orders,
+  missing browser cases, retries, and mismatched proposal/source identities.
+- The deterministic browser runner can emit a source-bound evidence document, and
+  the real Completion-ranking runner invokes the production Codex provider with
+  only the public occluded fixture and Host candidates. Hidden ground truth stays
+  inside the scorer and never enters the ranking pack or prompt.
+- The report builder combines current-source browser evidence, real AI ranking
+  evidence, and the offline matrix. Strict mode requires all evidence;
+  diagnostic incomplete mode records the missing evidence and can only emit
+  `keep_experimental` while the release gate is failed.
 
 ## M21 verification status
 
@@ -1394,12 +1407,29 @@ combined release gate remains failed and the runtime contract is unchanged.
   escape, 8/9 positive fixtures containing an oracle-acceptable candidate, and
   3/3 negative fixtures remaining safe. The offline gate therefore passes.
 - One intentionally ambiguous mixed-transparent positive fixture still has no
-  oracle-acceptable candidate. The release report remains failed because AI
-  ordering coverage is not evaluated and the default evaluator invocation has not
-  been supplied with the separately passing real-browser criterion.
-- The focused evaluator suite passed 5/5, the complete
-  `skin-analysis-pack` suite passed 43/43, and the evaluator is included in the
-  successful 485-test repository verification above.
+  oracle-acceptable candidate.
+- The current source-bound deterministic Chromium evidence passed all 11 required
+  player scenarios with zero retries. It covers flag-off behavior, responsive
+  layout, semantic analysis/editing, keyboard/touch input, zero-candidate and
+  reject flows, Completion accept, bounded manual candidate editing, latent Part
+  publication, and Blob URL cleanup. Its evidence hash is
+  `sha256:43660cd5054f91ef1e1698892a0c41ed28d9dc5f6aac6753674bf2c0bfbeaa5f`.
+- The production Codex provider recorded all 9/9 rankable fixtures with
+  `gpt-5.6-sol`, medium reasoning, one valid attempt per fixture, and exact Host
+  candidate-ID permutations. Its evidence hash is
+  `sha256:6ed43900c6be5ca397b40076bab79112cdd0091c2b54593085a2ebbc28a2e505`.
+- The provider's tool-free invocation now preserves the configured model-provider
+  transport by default while still explicitly disabling tools and using a
+  read-only sandbox. `AI_IGNORE_USER_CONFIG=true` remains an explicit opt-in.
+- The strict report has no missing evidence. Eight of nine criteria pass; AI
+  top-1 oracle acceptability is 7/9 (77.78%), below the 80% release threshold.
+  It therefore records `releaseGateStatus:"fail"` and
+  `decision:"keep_experimental"`; its report hash is
+  `sha256:c98f6fcdb10d89e2608283a01af7a65b3a2c616c21850c5ff7c5e366f87f8e8a`.
+  The browser evidence and report are stored under [`docs/evidence/m21/`](evidence/m21/).
+- The complete `skin-analysis-pack` suite passed 44/44, `ai-provider` passed
+  49/49, the full repository verification passed all 487 tests plus every
+  typecheck/build, and the final deterministic browser evidence run passed 11/11.
 
 ## M21 boundaries
 
@@ -1407,6 +1437,7 @@ combined release gate remains failed and the runtime contract is unchanged.
   versioned persistence/API migration and new compatibility tests; M21 does not
   mutate stored v1 proposals or reuse their hashes under new semantics.
 - Completion cannot enter the default player path until the combined report has
-  real exact-ID ordering evidence, the browser criterion is supplied to the same
-  gate, all required thresholds pass, and the feature-flag default is changed in
-  a separately reviewed release decision.
+  real exact-ID ordering evidence, all required thresholds pass in the same
+  source-bound report, and the feature-flag default is changed in a separately
+  reviewed release decision. The current report explicitly does not authorize
+  that change.

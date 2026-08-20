@@ -273,6 +273,12 @@ automatically run Completion after semantic analysis, auto-accept a candidate,
 auto-publish a Part, or claim that an inferred garment or hairstyle is authentic.
 
 M21 evaluates conservative, mirror, pattern, and AI-ranked candidates against
-hidden ground truth. The offline host-v2 gate passes, but the combined release
-report is still incomplete; Completion therefore remains absent from the default
-player path unless `VITE_ENABLE_COMPLETION_WORKSPACE=true` is set explicitly.
+hidden ground truth without exposing that truth to the candidate generator or AI
+ranker. The offline Host-v2 gate and the source-bound 11-scenario deterministic
+browser gate pass. Real exact-ID AI ordering covers all 9 rankable fixtures, but
+top-1 synthetic oracle acceptability is 7/9 (77.78%), below the 80% release
+threshold. The strict combined report therefore records `keep_experimental`;
+Completion remains absent from the default player path unless
+`VITE_ENABLE_COMPLETION_WORKSPACE=true` is set explicitly. Reproducible evidence
+and commands are documented in
+[`evidence/m21/`](evidence/m21/).

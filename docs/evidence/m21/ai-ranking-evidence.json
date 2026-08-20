@@ -1,0 +1,533 @@
+{
+  "codexCliVersion": "codex-cli 0.148.0",
+  "evaluationSchemaVersion": "1.1",
+  "evidenceHash": "sha256:6ed43900c6be5ca397b40076bab79112cdd0091c2b54593085a2ebbc28a2e505",
+  "fixtures": [
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:c040252fa2e5b10131a8ff67b2bc0026a4a93bd4c7252da5c4941478a6ebb7ea",
+          "packManifestHash": "sha256:7af173b9f0a650c977db4e0fec9e19c2c377037c99c0ed319c3f331e6b989083",
+          "rawEventsHash": "sha256:d688f85cdf13056823f1fce6128d84e94950b5d70028ad2d47d3d5a46b6af368",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:65822c1db208eb14f42bf05488eb7a854093d7a1e2fdf4ed548ce9f14eb3dd62"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:fde192fdb9fe86876c8c81742984b72c1317c711f4aeb547c12693a342cea577",
+        "sha256:374bb0a6509166499ba5a972ada8ee09f174ff40e53beb2e0c312c87a51a1d46"
+      ],
+      "candidateIds": [
+        "completioncandidate_904252b8fb2069c1e07634debc5f04f3d2bf0649ba65eceeeccd3cdfd91472d1",
+        "completioncandidate_b63c4ac7f6036dc337814e13ad03652f26e02ae0195318d34ecdfb60a083ff97"
+      ],
+      "document": {
+        "jobId": "m21rank_840701375739bb7cacd3e889cf14c5e",
+        "proposalHash": "sha256:840701375739bb7cacd3e889cf14c5e806a79d120e090b1e5f0789959deddaf7",
+        "proposalId": "completioneval_0aea1f76a21481b6cfed74ed",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_b63c4ac7f6036dc337814e13ad03652f26e02ae0195318d34ecdfb60a083ff97",
+            "confidence": 0.75,
+            "explanation": "Produces a clean, continuous blue horizontal feature consistent with the two visible source segments."
+          },
+          {
+            "candidateId": "completioncandidate_904252b8fb2069c1e07634debc5f04f3d2bf0649ba65eceeeccd3cdfd91472d1",
+            "confidence": 0.7,
+            "explanation": "Also preserves convincing continuity and appears visually equivalent, but has slightly weaker supporting confidence."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_b63c4ac7f6036dc337814e13ad03652f26e02ae0195318d34ecdfb60a083ff97",
+          "confidence": 0.75,
+          "explanation": "Both previews look consistent, with this candidate receiving the strongest overall support.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:66f4d64c6ed76e815b59701aa5ab20cd413a74ead0732dd96c6773eaf27ff5f3",
+        "sourceRevisionId": "revision_eval_0aea1f76a21481b6cfed74ed",
+        "sourceSkinHash": "sha256:90c0e9647fe969e5123c3aedda0319f4043e2bc6a2b249d532204d860436a6c7"
+      },
+      "evidenceHash": "sha256:990cc75fb975453272e9386c93af66fcb6fe5c37f82860355203e1e364d223f8",
+      "fixtureId": "slim_base_pattern",
+      "jobId": "m21rank_840701375739bb7cacd3e889cf14c5e",
+      "packInputHash": "sha256:c040252fa2e5b10131a8ff67b2bc0026a4a93bd4c7252da5c4941478a6ebb7ea",
+      "packManifestHash": "sha256:7af173b9f0a650c977db4e0fec9e19c2c377037c99c0ed319c3f331e6b989083",
+      "proposalHash": "sha256:840701375739bb7cacd3e889cf14c5e806a79d120e090b1e5f0789959deddaf7",
+      "proposalId": "completioneval_0aea1f76a21481b6cfed74ed",
+      "rankingHash": "sha256:8c1dc23c6c40283ed0c508a6ba7ba739e53a6391f319919c85e2d59772b43513",
+      "sourceResultHash": "sha256:66f4d64c6ed76e815b59701aa5ab20cd413a74ead0732dd96c6773eaf27ff5f3",
+      "sourceRevisionId": "revision_eval_0aea1f76a21481b6cfed74ed",
+      "sourceSkinHash": "sha256:90c0e9647fe969e5123c3aedda0319f4043e2bc6a2b249d532204d860436a6c7"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:5d3584b182c3ea184ff07558853c8b6cb99342005722d2cb7ac7fa5517719e26",
+          "packManifestHash": "sha256:1f4761b21d7247b64c845ac6324db1569815ec01eaf7720d1443d6a7466f7a6b",
+          "rawEventsHash": "sha256:101b050b12b8a71efd12759f03fefde8bf99fc885bcb6ba14f860b05a6616bf1",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:65822c1db208eb14f42bf05488eb7a854093d7a1e2fdf4ed548ce9f14eb3dd62"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:205b211f8cf8621a1cf1c60236e2067cf854fd8426937cbc5fbb62faee89b583",
+        "sha256:a03abff4bd820747ed25cbc358f43c2bd20a3cfc8260257b7fc838986b8da53b"
+      ],
+      "candidateIds": [
+        "completioncandidate_6b8df311a15ef262216e86e1f95688d64ee382c3b51872e252ca139f1d23322b",
+        "completioncandidate_91e679f0da278edb7db7136aa34319a94f237cc591a65c2e2fe1e96085d66b58"
+      ],
+      "document": {
+        "jobId": "m21rank_0ed2246078b5351d068efa782395fc7",
+        "proposalHash": "sha256:0ed2246078b5351d068efa782395fc779051ff9a238b8c549e7aa08b5aeaacb5",
+        "proposalId": "completioneval_ab685468cac8a9fcc1a04ab3",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_6b8df311a15ef262216e86e1f95688d64ee382c3b51872e252ca139f1d23322b",
+            "confidence": 0.58,
+            "explanation": "Preserves the sparse source pattern and adds a visually consistent counterpart with no evident continuity break."
+          },
+          {
+            "candidateId": "completioncandidate_91e679f0da278edb7db7136aa34319a94f237cc591a65c2e2fe1e96085d66b58",
+            "confidence": 0.54,
+            "explanation": "Also appears consistent with the source, but the preview offers no clear visual advantage over the leading candidate."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_6b8df311a15ef262216e86e1f95688d64ee382c3b51872e252ca139f1d23322b",
+          "confidence": 0.56,
+          "explanation": "Both previews are nearly indistinguishable; the first is marginally preferred for its plausible visual symmetry.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:05e967da78eca56619ca0fd61c4bf5f3655b2d3ebe23eeb3db25895b0332841f",
+        "sourceRevisionId": "revision_eval_ab685468cac8a9fcc1a04ab3",
+        "sourceSkinHash": "sha256:c9c56c567d1f0100d01cd6af7ca5dbe80a26a7dfdcfd25e7036bbf8a7d05e42f"
+      },
+      "evidenceHash": "sha256:1408e34c6894a912ba650b978630a346a213d19466031149fbf4258bc75dbbb6",
+      "fixtureId": "wide_base_mirror_symmetric",
+      "jobId": "m21rank_0ed2246078b5351d068efa782395fc7",
+      "packInputHash": "sha256:5d3584b182c3ea184ff07558853c8b6cb99342005722d2cb7ac7fa5517719e26",
+      "packManifestHash": "sha256:1f4761b21d7247b64c845ac6324db1569815ec01eaf7720d1443d6a7466f7a6b",
+      "proposalHash": "sha256:0ed2246078b5351d068efa782395fc779051ff9a238b8c549e7aa08b5aeaacb5",
+      "proposalId": "completioneval_ab685468cac8a9fcc1a04ab3",
+      "rankingHash": "sha256:4637f58d23e44c27344b22d7ddf8ec994bde2304d4a29ac5e23561e01e80baf1",
+      "sourceResultHash": "sha256:05e967da78eca56619ca0fd61c4bf5f3655b2d3ebe23eeb3db25895b0332841f",
+      "sourceRevisionId": "revision_eval_ab685468cac8a9fcc1a04ab3",
+      "sourceSkinHash": "sha256:c9c56c567d1f0100d01cd6af7ca5dbe80a26a7dfdcfd25e7036bbf8a7d05e42f"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:4e8811a0b67ff18f956765ee507c34ce719342ea3b319611a625b85c4227cb29",
+          "packManifestHash": "sha256:5b64f99a5f1470f51020b4af3f2828c8ece474907d047fd798412cd00423e776",
+          "rawEventsHash": "sha256:062c76013de90c5bc347a91c2cd0a28238a0dbde8bb580c2d34f8ca0b9b97cf2",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:65822c1db208eb14f42bf05488eb7a854093d7a1e2fdf4ed548ce9f14eb3dd62"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:ebd07eab8b928a3d953df6a00040a59bb1659d1ce8bd709771447e8c7f300d66",
+        "sha256:811f337857e906030b4bd3edee1544736aa12ef4d5e0ffaa2a4b1573622759a0"
+      ],
+      "candidateIds": [
+        "completioncandidate_7371bc40637617990d39f6a610804ecbb23d381eec63cee1379447284d88a755",
+        "completioncandidate_02108ea095b378349ece4575b2bd00178dfda8224db97ebc2a03471e8d8d1f8b"
+      ],
+      "document": {
+        "jobId": "m21rank_ce0fe2ca12080762c88ed026c2af112",
+        "proposalHash": "sha256:ce0fe2ca12080762c88ed026c2af112e029b99a4ddae17bfc6677258543a8240",
+        "proposalId": "completioneval_5494a5d1729b17491c208401",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_7371bc40637617990d39f6a610804ecbb23d381eec63cee1379447284d88a755",
+            "confidence": 0.72,
+            "explanation": "The compact adjacent addition preserves the source's sparse geometry and color vocabulary with minimal visual disruption."
+          },
+          {
+            "candidateId": "completioncandidate_02108ea095b378349ece4575b2bd00178dfda8224db97ebc2a03471e8d8d1f8b",
+            "confidence": 0.58,
+            "explanation": "The longer red continuation is locally aligned but introduces a substantially larger block than the source visibly supports."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_7371bc40637617990d39f6a610804ecbb23d381eec63cee1379447284d88a755",
+          "confidence": 0.72,
+          "explanation": "Best matches the source's sparse, compact visual structure while maintaining plausible continuity.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:191b2a660e27f64a0aae4e94a50527ffe5c7389af9334559181ecf2033ae496a",
+        "sourceRevisionId": "revision_eval_5494a5d1729b17491c208401",
+        "sourceSkinHash": "sha256:7b7dc4fcede83ec1201c0dfaaeea90dbe001ddf93518eee82ec2f36a0696308a"
+      },
+      "evidenceHash": "sha256:f22057755342166cd2beb0e0649d80c27b65ce07b153b8f4dfe618e510336b06",
+      "fixtureId": "wide_base_mirror_asymmetric",
+      "jobId": "m21rank_ce0fe2ca12080762c88ed026c2af112",
+      "packInputHash": "sha256:4e8811a0b67ff18f956765ee507c34ce719342ea3b319611a625b85c4227cb29",
+      "packManifestHash": "sha256:5b64f99a5f1470f51020b4af3f2828c8ece474907d047fd798412cd00423e776",
+      "proposalHash": "sha256:ce0fe2ca12080762c88ed026c2af112e029b99a4ddae17bfc6677258543a8240",
+      "proposalId": "completioneval_5494a5d1729b17491c208401",
+      "rankingHash": "sha256:98cd37105c206a6e8dec90a7fe9ff6faeaee1008e22c67fc16255ebbea8656b5",
+      "sourceResultHash": "sha256:191b2a660e27f64a0aae4e94a50527ffe5c7389af9334559181ecf2033ae496a",
+      "sourceRevisionId": "revision_eval_5494a5d1729b17491c208401",
+      "sourceSkinHash": "sha256:7b7dc4fcede83ec1201c0dfaaeea90dbe001ddf93518eee82ec2f36a0696308a"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:9a1081c40d9bc5eec4c43e2e18e249954249d8867e0a042aefb603b607f73cc4",
+          "packManifestHash": "sha256:0a74cb0d10fbc7c31e3c4be98b46840acac71428b0c388fe987a06a0c80289e4",
+          "rawEventsHash": "sha256:9d9cadd42ebcc856c545402c83e9cc60e6afa3eb9005cd4ba4d86b769e535213",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:02f58716835af789dea93590b5bf7d8e84b9963a6b1c23b5445908f783906a20"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:124cc1423ec23ed8f2a2c1154cae7902d3237f996618122cd8b231a51fc15804"
+      ],
+      "candidateIds": [
+        "completioncandidate_d966b4bf24213b37a27b7dfe50d0c91f7393decfccf423be5f9603a8997d93e2"
+      ],
+      "document": {
+        "jobId": "m21rank_58486a31f7edda8e7ec68a606048719",
+        "proposalHash": "sha256:58486a31f7edda8e7ec68a606048719ea43d3a173da2b2f3ccf298cd3e03bafd",
+        "proposalId": "completioneval_c32711fde67f0cccccd320af",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_d966b4bf24213b37a27b7dfe50d0c91f7393decfccf423be5f9603a8997d93e2",
+            "confidence": 0.91,
+            "explanation": "The added purple detail aligns cleanly with the existing lower blue detail and remains consistent with the source's sparse purple-and-blue palette."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_d966b4bf24213b37a27b7dfe50d0c91f7393decfccf423be5f9603a8997d93e2",
+          "confidence": 0.91,
+          "explanation": "The sole candidate preserves the source appearance while completing the visible lower detail with coherent color continuity.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:74948a8c3b2863cdd2adeb5cda5270644a2aa56c26b13ae1291fd355e9ccef2c",
+        "sourceRevisionId": "revision_eval_c32711fde67f0cccccd320af",
+        "sourceSkinHash": "sha256:3ae0597dd702248ae711f5bdefc054e15dcfbbb3609e2350e3f32adf40bfe19c"
+      },
+      "evidenceHash": "sha256:739dafff59524e814edf323a0b15b52d98c77a9b6b79482c80d3b82ea7c895ce",
+      "fixtureId": "slim_outer_underlay",
+      "jobId": "m21rank_58486a31f7edda8e7ec68a606048719",
+      "packInputHash": "sha256:9a1081c40d9bc5eec4c43e2e18e249954249d8867e0a042aefb603b607f73cc4",
+      "packManifestHash": "sha256:0a74cb0d10fbc7c31e3c4be98b46840acac71428b0c388fe987a06a0c80289e4",
+      "proposalHash": "sha256:58486a31f7edda8e7ec68a606048719ea43d3a173da2b2f3ccf298cd3e03bafd",
+      "proposalId": "completioneval_c32711fde67f0cccccd320af",
+      "rankingHash": "sha256:d0d87bbc0e482cf5436479e64c68812be5d927cc0f738a40b1dce0289dce5db9",
+      "sourceResultHash": "sha256:74948a8c3b2863cdd2adeb5cda5270644a2aa56c26b13ae1291fd355e9ccef2c",
+      "sourceRevisionId": "revision_eval_c32711fde67f0cccccd320af",
+      "sourceSkinHash": "sha256:3ae0597dd702248ae711f5bdefc054e15dcfbbb3609e2350e3f32adf40bfe19c"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:2eb685d465149e87696dc82bdbc14f74efffeb0a0bc0cc2bedb61f38cd962beb",
+          "packManifestHash": "sha256:6b4df06d4143c7277056d52ff8fd2b5060a4e2edadabd672db41b00b155a8fa3",
+          "rawEventsHash": "sha256:6fb78a31100defc9aecac86b4eda554d32b2d5104ef22fd9badaaec56c187bf4",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:65822c1db208eb14f42bf05488eb7a854093d7a1e2fdf4ed548ce9f14eb3dd62"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:b8d576801dbc932d1a99d8ebbf27dd9d63e0028dad82b36b5251d98ce54c2d8f",
+        "sha256:de30e6117224beddf1e46cc40a2641283081914a916ce0c659a2ab7d4cb1603c"
+      ],
+      "candidateIds": [
+        "completioncandidate_78d7324b67bfb3eda2a841d5f83c264926312dd516effacee053928f59cf714d",
+        "completioncandidate_2bbcdae6cfb18a532f59faea2055e6c0d8bece4868ff2f7bb8617c67a5c578a2"
+      ],
+      "document": {
+        "jobId": "m21rank_e17b4cd709847ecbaaca7ee6d02fb6a",
+        "proposalHash": "sha256:e17b4cd709847ecbaaca7ee6d02fb6a39130bd398ab51119cb57e9020fcb9f68",
+        "proposalId": "completioneval_d107d70f1cb584a1a0a787d3",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_78d7324b67bfb3eda2a841d5f83c264926312dd516effacee053928f59cf714d",
+            "confidence": 0.72,
+            "explanation": "Forms a clean, continuous green segment aligned with the source endpoints; the preview is visually consistent and free of obvious seams."
+          },
+          {
+            "candidateId": "completioncandidate_2bbcdae6cfb18a532f59faea2055e6c0d8bece4868ff2f7bb8617c67a5c578a2",
+            "confidence": 0.71,
+            "explanation": "Also forms a clean, aligned continuation and appears nearly indistinguishable from the strongest preview, with no visible continuity defect."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_78d7324b67bfb3eda2a841d5f83c264926312dd516effacee053928f59cf714d",
+          "confidence": 0.72,
+          "explanation": "Recommended by a narrow margin because it preserves the visible alignment and continuity of the source while showing no obvious artifact.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:f6d569b1dbf4ad0a5d4b9750814d590c0a9ee16ae2317f0e5b4a16ca9205d415",
+        "sourceRevisionId": "revision_eval_d107d70f1cb584a1a0a787d3",
+        "sourceSkinHash": "sha256:d4cb40fc2ee2805a9cf1f35642533b4760af2f628a1dc4cb7d5997ac25b8af18"
+      },
+      "evidenceHash": "sha256:e22b3f81a6b877a14ce2708f69064c0705884209b5e9a03605c425cabb1cf2e7",
+      "fixtureId": "wide_outer_pattern",
+      "jobId": "m21rank_e17b4cd709847ecbaaca7ee6d02fb6a",
+      "packInputHash": "sha256:2eb685d465149e87696dc82bdbc14f74efffeb0a0bc0cc2bedb61f38cd962beb",
+      "packManifestHash": "sha256:6b4df06d4143c7277056d52ff8fd2b5060a4e2edadabd672db41b00b155a8fa3",
+      "proposalHash": "sha256:e17b4cd709847ecbaaca7ee6d02fb6a39130bd398ab51119cb57e9020fcb9f68",
+      "proposalId": "completioneval_d107d70f1cb584a1a0a787d3",
+      "rankingHash": "sha256:43469dbe4c480a3cccba8bf3262bf1be40d3953e4003d5f45e240bfd8dc10a23",
+      "sourceResultHash": "sha256:f6d569b1dbf4ad0a5d4b9750814d590c0a9ee16ae2317f0e5b4a16ca9205d415",
+      "sourceRevisionId": "revision_eval_d107d70f1cb584a1a0a787d3",
+      "sourceSkinHash": "sha256:d4cb40fc2ee2805a9cf1f35642533b4760af2f628a1dc4cb7d5997ac25b8af18"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:65528aa9bb65daa5a673fd154525310913616951b8dec452066b4a44992e4f7e",
+          "packManifestHash": "sha256:25f47243d51d95277bebb32e491a469b975d998a85d77c91a9e232beba1a77e4",
+          "rawEventsHash": "sha256:29fe14c2854c34a5d97280052cba582a04327de8c534329e1327a8764c098e6a",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:02f58716835af789dea93590b5bf7d8e84b9963a6b1c23b5445908f783906a20"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:c1b80ccc3f3b44c3d9b1ee0c1cd309c72d25c5f6e9ce5003cd77f230aaff8915"
+      ],
+      "candidateIds": [
+        "completioncandidate_91cbac97368dc8eee2777c521fceb987456f25297dbf5392134cd640b7a484d4"
+      ],
+      "document": {
+        "jobId": "m21rank_5e6fc168b50cbbcaaaf2328cb4adf94",
+        "proposalHash": "sha256:5e6fc168b50cbbcaaaf2328cb4adf943aba7a32e609aa27f150ea1c121b672f0",
+        "proposalId": "completioneval_ebf638ed6b3a30040cfdb55a",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_91cbac97368dc8eee2777c521fceb987456f25297dbf5392134cd640b7a484d4",
+            "confidence": 0.58,
+            "explanation": "The candidate remains visually consistent with the sparse source, preserving the dark field and extending the small blue feature without an obvious discontinuity."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_91cbac97368dc8eee2777c521fceb987456f25297dbf5392134cd640b7a484d4",
+          "confidence": 0.58,
+          "explanation": "Suitable based on visible continuity, though confidence is limited by the extremely sparse preview evidence.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:d7dabeb41e6eb3d6b350c4cf3e14e11b6a459f0f04c222a0bb69bdb79a4be40e",
+        "sourceRevisionId": "revision_eval_ebf638ed6b3a30040cfdb55a",
+        "sourceSkinHash": "sha256:dd11b3db32b71c63602edee0fdd5d8436844ddb47ec8b7920cc2591b49097ae0"
+      },
+      "evidenceHash": "sha256:a9433e66cadef16292258f740d0a97ac1acc3060131cafd3cceb93c28ee3f69d",
+      "fixtureId": "slim_base_uv_seam",
+      "jobId": "m21rank_5e6fc168b50cbbcaaaf2328cb4adf94",
+      "packInputHash": "sha256:65528aa9bb65daa5a673fd154525310913616951b8dec452066b4a44992e4f7e",
+      "packManifestHash": "sha256:25f47243d51d95277bebb32e491a469b975d998a85d77c91a9e232beba1a77e4",
+      "proposalHash": "sha256:5e6fc168b50cbbcaaaf2328cb4adf943aba7a32e609aa27f150ea1c121b672f0",
+      "proposalId": "completioneval_ebf638ed6b3a30040cfdb55a",
+      "rankingHash": "sha256:5387e720b88da5b78c6fe1d13fb40d95b7a6fe2466e6a372a4a7ba0a508c4d66",
+      "sourceResultHash": "sha256:d7dabeb41e6eb3d6b350c4cf3e14e11b6a459f0f04c222a0bb69bdb79a4be40e",
+      "sourceRevisionId": "revision_eval_ebf638ed6b3a30040cfdb55a",
+      "sourceSkinHash": "sha256:dd11b3db32b71c63602edee0fdd5d8436844ddb47ec8b7920cc2591b49097ae0"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:8f85f272a730b71f6f7ab14361ee07c7641a3abe043deb086a701c0b536ba2c6",
+          "packManifestHash": "sha256:7c79f29ad15a2a72844aafa500fefae8e8e2591bfe9af41b10f839b4e6e80f5e",
+          "rawEventsHash": "sha256:6179312f59c47fe02e2a64a38cf499a29422147a65d731c0fa606eaaa33dbdd4",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:ba29e50ff7fe7df89a71f92954c0c2763a7be7fc9acee552953f61b4f3396297"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:349ffe542fae16d29d1581967481e19f202bb1b91c138c8f22e9cc4c0f0c2deb"
+      ],
+      "candidateIds": [
+        "completioncandidate_ff9a4e2a691c2951fed3dea4e69f908b2345bf8d6e1c11337522462787b6a890"
+      ],
+      "document": {
+        "jobId": "m21rank_f38697d7fd9a1d0eb40298996f194ee",
+        "proposalHash": "sha256:f38697d7fd9a1d0eb40298996f194ee5c378a7dbf4fea98d8bf83daa8511d287",
+        "proposalId": "completioneval_a87be7a79c3553f5cf10a2f0",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_ff9a4e2a691c2951fed3dea4e69f908b2345bf8d6e1c11337522462787b6a890",
+            "confidence": 0.28,
+            "explanation": "The preview expands the blue region uniformly across the dark source area, with insufficient visible continuity or symmetry evidence to validate the completion."
+          }
+        ],
+        "recommendation": {
+          "candidateId": null,
+          "confidence": 0.72,
+          "explanation": "The sole preview does not provide enough visual support for a reliable recommendation.",
+          "status": "defer"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:c3a888175377c2edbbfec5cf5b733da14a3b5630dbbf9a14ac51dbfbb5256e4a",
+        "sourceRevisionId": "revision_eval_a87be7a79c3553f5cf10a2f0",
+        "sourceSkinHash": "sha256:89910bc40fd4b1eec6d0e6a01ffd6bf6f4ee90c0db4f51ed56c7c5cb76e725a0"
+      },
+      "evidenceHash": "sha256:141e1b3603d140d6a51db4479cc7c52e3639c2aee213ac414bc40e6465a681fd",
+      "fixtureId": "slim_outer_whole_surface",
+      "jobId": "m21rank_f38697d7fd9a1d0eb40298996f194ee",
+      "packInputHash": "sha256:8f85f272a730b71f6f7ab14361ee07c7641a3abe043deb086a701c0b536ba2c6",
+      "packManifestHash": "sha256:7c79f29ad15a2a72844aafa500fefae8e8e2591bfe9af41b10f839b4e6e80f5e",
+      "proposalHash": "sha256:f38697d7fd9a1d0eb40298996f194ee5c378a7dbf4fea98d8bf83daa8511d287",
+      "proposalId": "completioneval_a87be7a79c3553f5cf10a2f0",
+      "rankingHash": "sha256:87db062ce3d7607ac4f51cf1a319de45174a6c2d02b74c129dfc28d668a78a3c",
+      "sourceResultHash": "sha256:c3a888175377c2edbbfec5cf5b733da14a3b5630dbbf9a14ac51dbfbb5256e4a",
+      "sourceRevisionId": "revision_eval_a87be7a79c3553f5cf10a2f0",
+      "sourceSkinHash": "sha256:89910bc40fd4b1eec6d0e6a01ffd6bf6f4ee90c0db4f51ed56c7c5cb76e725a0"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:35c62b510d45f45f223f33b2229851eff02c367b96d93d5667daa21534bc152e",
+          "packManifestHash": "sha256:bf0340c6220ef4e386447f92d212a72d96cd95e321952564fd81425a80edcc55",
+          "rawEventsHash": "sha256:738e8e09d1265f1a5d4751a16d837e06a4233e060f43c535acc8076e623145c9",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:a4b71bc49bf0e99d2d9f0687d8846d15c1c830bc200d1f9397c242ebeb6db964"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:f1e00bf8a4ffcb37e190d4c2d8572cefae7f7579f02ac2aae391d0a9b34b1f63",
+        "sha256:24d1e9cd38425ebe4445e4119d1a53e20784728a04c439d8a26d0635d9e74643",
+        "sha256:a9c22e697517c40a8b0f990566fb62767fe71a847a9677e7be7b4b47cddfc19a"
+      ],
+      "candidateIds": [
+        "completioncandidate_5a35f6bed6fb377dd57a21b766a6fa2ba8ce5ce5453de19d3a03fba32c85c60a",
+        "completioncandidate_b5ac5a1d6ee0131d920b7630faed825428324966d89dcf9e2ff8721c6f5fd266",
+        "completioncandidate_6df8f75fa89cd585d1bfb65d15eeaf15228c6435dc6e64e74d7c7dde492a5c72"
+      ],
+      "document": {
+        "jobId": "m21rank_2fe73da5d60bdbc82558641ff2c2b8c",
+        "proposalHash": "sha256:2fe73da5d60bdbc82558641ff2c2b8c5e2f30898f73f2e2934426ee0db122c31",
+        "proposalId": "completioneval_3e38d2182ff611f193d65cbd",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_5a35f6bed6fb377dd57a21b766a6fa2ba8ce5ce5453de19d3a03fba32c85c60a",
+            "confidence": 0.34,
+            "explanation": "Preview appears visually unchanged from the source, with no visible continuity or symmetry advantage over the other candidates."
+          },
+          {
+            "candidateId": "completioncandidate_6df8f75fa89cd585d1bfb65d15eeaf15228c6435dc6e64e74d7c7dde492a5c72",
+            "confidence": 0.33,
+            "explanation": "Preview matches the same sparse visible purple detail, but provides no discernible pattern-continuity advantage."
+          },
+          {
+            "candidateId": "completioncandidate_b5ac5a1d6ee0131d920b7630faed825428324966d89dcf9e2ff8721c6f5fd266",
+            "confidence": 0.33,
+            "explanation": "Preview is effectively indistinguishable from the source and other candidates, so surface continuity cannot be visually confirmed."
+          }
+        ],
+        "recommendation": {
+          "candidateId": null,
+          "confidence": 0.93,
+          "explanation": "All candidate previews are visually indistinguishable from the source, so the visible evidence does not support selecting one completion.",
+          "status": "defer"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:7c4de8d714d4d0ddf1ef69d73058f7184accfffec8960e1c6b6aca46c3bcccca",
+        "sourceRevisionId": "revision_eval_3e38d2182ff611f193d65cbd",
+        "sourceSkinHash": "sha256:8b0fe747ec5e2bab85f7cf74637fa129a62f2443e53dd48a05ed3c805a2da7d5"
+      },
+      "evidenceHash": "sha256:29bd6eaddb06fdf18c00e01383a970bc1aed9958ac448cc7b1c3a75c788dda6e",
+      "fixtureId": "slim_outer_hair_accessory",
+      "jobId": "m21rank_2fe73da5d60bdbc82558641ff2c2b8c",
+      "packInputHash": "sha256:35c62b510d45f45f223f33b2229851eff02c367b96d93d5667daa21534bc152e",
+      "packManifestHash": "sha256:bf0340c6220ef4e386447f92d212a72d96cd95e321952564fd81425a80edcc55",
+      "proposalHash": "sha256:2fe73da5d60bdbc82558641ff2c2b8c5e2f30898f73f2e2934426ee0db122c31",
+      "proposalId": "completioneval_3e38d2182ff611f193d65cbd",
+      "rankingHash": "sha256:294adef198cf83342f5eb52859c413934a213338bc1b09b4d2f3a4ffb768fa56",
+      "sourceResultHash": "sha256:7c4de8d714d4d0ddf1ef69d73058f7184accfffec8960e1c6b6aca46c3bcccca",
+      "sourceRevisionId": "revision_eval_3e38d2182ff611f193d65cbd",
+      "sourceSkinHash": "sha256:8b0fe747ec5e2bab85f7cf74637fa129a62f2443e53dd48a05ed3c805a2da7d5"
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "packInputHash": "sha256:99a6ad94e7dc0ebccdf8235d006cbad1fca697af2f8741a18e3d00af0ef76341",
+          "packManifestHash": "sha256:c40bdf63765bc1d41196564426db0984e164f891b8fc467a9cd071dd3c6940b4",
+          "rawEventsHash": "sha256:694d06e93fa6d51250c605f6f195c027e62bc4daca681fe48e6fe9519132e1dc",
+          "stderrHash": "sha256:3e75d28a6681c31400a3f0fcb564c7613fd42796fb83294e4d53fea86bcbd401",
+          "valid": true,
+          "validationReportHash": "sha256:65822c1db208eb14f42bf05488eb7a854093d7a1e2fdf4ed548ce9f14eb3dd62"
+        }
+      ],
+      "candidateHashes": [
+        "sha256:4a67322a523fd5c0caf76a13ac85a08d97ca36b4738fb0ff9cb3e43546c3d093",
+        "sha256:3747674c4cbfef0ad86903bb3b0f84b6896e3dfc6093e39dd4ee0b85b5c21a73"
+      ],
+      "candidateIds": [
+        "completioncandidate_30cd0fc512cdb6800280c0b5b85a4acd8142775951b1fff42444fa88654b1e22",
+        "completioncandidate_4e1aee0196ae3b65951bf5150291bc08d35963ae3fdecb5fe8d34510731eb1da"
+      ],
+      "document": {
+        "jobId": "m21rank_b3b8a3fa31e639541357388d7ca4d65",
+        "proposalHash": "sha256:b3b8a3fa31e639541357388d7ca4d655d3dfafe91e485e41234c79897f4184fc",
+        "proposalId": "completioneval_6017318ec318eba42553b2fd",
+        "rankings": [
+          {
+            "candidateId": "completioncandidate_30cd0fc512cdb6800280c0b5b85a4acd8142775951b1fff42444fa88654b1e22",
+            "confidence": 0.88,
+            "explanation": "Best preserves the source's separated red segments and dark lower segment, with no visible continuity mismatch."
+          },
+          {
+            "candidateId": "completioncandidate_4e1aee0196ae3b65951bf5150291bc08d35963ae3fdecb5fe8d34510731eb1da",
+            "confidence": 0.62,
+            "explanation": "Visually consistent overall, but joins the upper red segments where the source shows a dark separation."
+          }
+        ],
+        "recommendation": {
+          "candidateId": "completioncandidate_30cd0fc512cdb6800280c0b5b85a4acd8142775951b1fff42444fa88654b1e22",
+          "confidence": 0.88,
+          "explanation": "The first candidate most closely matches the source's visible spacing, color boundaries, and segment structure.",
+          "status": "recommend"
+        },
+        "schemaVersion": "1.0",
+        "sourceResultHash": "sha256:3c436cc6e2854aeb2eaec199e20b381541903907d555b15274660f96e3e4c1d2",
+        "sourceRevisionId": "revision_eval_6017318ec318eba42553b2fd",
+        "sourceSkinHash": "sha256:36879312b99fcd02f3b49d03cfc8810bfe36dc43709ec4f72adf91d1f85a5a84"
+      },
+      "evidenceHash": "sha256:4bc13eb0aae814fb701e1de6a90252dd54bfe49d22ca2c0d45ed8c26e84f577e",
+      "fixtureId": "wide_base_transparent_mixed",
+      "jobId": "m21rank_b3b8a3fa31e639541357388d7ca4d65",
+      "packInputHash": "sha256:99a6ad94e7dc0ebccdf8235d006cbad1fca697af2f8741a18e3d00af0ef76341",
+      "packManifestHash": "sha256:c40bdf63765bc1d41196564426db0984e164f891b8fc467a9cd071dd3c6940b4",
+      "proposalHash": "sha256:b3b8a3fa31e639541357388d7ca4d655d3dfafe91e485e41234c79897f4184fc",
+      "proposalId": "completioneval_6017318ec318eba42553b2fd",
+      "rankingHash": "sha256:6ba1a49b2038ad9a7168064db92386db5e87d2d0eeb807eb0215333a797ec9be",
+      "sourceResultHash": "sha256:3c436cc6e2854aeb2eaec199e20b381541903907d555b15274660f96e3e4c1d2",
+      "sourceRevisionId": "revision_eval_6017318ec318eba42553b2fd",
+      "sourceSkinHash": "sha256:36879312b99fcd02f3b49d03cfc8810bfe36dc43709ec4f72adf91d1f85a5a84"
+    }
+  ],
+  "generatedAt": "2026-08-20T10:16:30.695Z",
+  "hostAlgorithmVersion": "completion-candidates-v2",
+  "matrixHash": "sha256:f29fb2b58fae868d084d8b2959e703a0e838ca3aa9c63057efe6cc04e1394f8b",
+  "model": "gpt-5.6-sol",
+  "promptVersion": "completion-candidate-ranking-v1",
+  "provider": "codex-exec",
+  "reasoningEffort": "medium",
+  "schemaVersion": "1.0",
+  "validatorVersion": "completion-ranking-validator-v1"
+}

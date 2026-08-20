@@ -2819,8 +2819,11 @@ CandidateRegion 精确分区、Host 像素所有权和不可变 Revision 合同�
 资源与 ETag、latent Part 默认不可见、来源/HEAD 不变量及 SQLite 完整性验证。
 真实 `750fa4166940b473` 的同层长发遮衣案例产出 273 像素 latent 候选并生成未发布
 Part 2.0；独立 12 像素 Outer-over-transparent-Base 夹具完成了正向
-`completion_accept` Revision 验证。M20 的 feature-gated 玩家 UI 和 M21 的隐藏真值
-评测仍是后续阶段。
+`completion_accept` Revision 验证。M20 的 feature-gated 玩家 UI 已完成；M21 的
+Host-v2 隐藏真值离线门、9 夹具真实 AI exact-ID 排序和 11 场景浏览器门均已完成。
+严格报告中 AI 首选候选的合成 oracle 可接受率为 7/9（77.78%），低于 80% 阈值，
+因此组合报告保持 `keep_experimental`，默认玩家入口仍关闭。可复现证据见
+[`evidence/m21/`](evidence/m21/)。
 
 详细服务与 API 合同见
 [`hidden-content-completion.md`](hidden-content-completion.md)，验收边界见

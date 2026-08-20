@@ -247,12 +247,12 @@ The detailed contract is in
   from the M9 public catalog. It copies
   `.agents/skills/mc-skin-replacement-planner` and its JSON Schema per Run and
   verifies all input hashes after provider execution. No images are attached.
-- The default replacement provider ignores user configuration, clears MCP/apps,
-  disables shell, web, browser, computer, image, plugin, and delegation tools,
-  uses a read-only sandbox, and inlines the public catalog. Semantic analysis now
-  uses the same tool-free/read-only capability boundary with attached skin views
-  and an inline semantic contract, while retaining configured model/provider
-  routing unless `AI_IGNORE_USER_CONFIG` is enabled.
+- Semantic analysis, replacement recommendation, and Completion ranking preserve
+  configured model-provider routing by default while enforcing a tool-free,
+  read-only invocation. They clear MCP/apps, disable shell, web, browser,
+  computer, image, plugin, and delegation tools, and inline only their bounded
+  public evidence. `AI_IGNORE_USER_CONFIG=true` explicitly discards user
+  configuration for deployments with an independently usable default provider.
 - Both tool-free providers capture one JSON response by default and apply the
   repository Schema plus deterministic host validation. Native
   `--output-schema` transport is available only through

@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const environment = readHarnessEnvironment();
+const evidenceResultPath = process.env.MC_SKIN_E2E_RESULT_PATH;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -10,7 +11,9 @@ export default defineConfig({
   retries: process.env.CODEX_CI ? 1 : 0,
   timeout: 45_000,
   expect: { timeout: 10_000 },
-  reporter: [["list"]],
+  reporter: evidenceResultPath
+    ? [["list"], ["json", { outputFile: evidenceResultPath }]]
+    : [["list"]],
   outputDir: "test-results",
   grep: environment.realMode ? /@real/ : undefined,
   grepInvert: environment.realMode ? undefined : /@real/,

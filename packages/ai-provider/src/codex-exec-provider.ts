@@ -276,9 +276,10 @@ export class CodexExecProvider implements SkinSemanticAiProvider {
     if (this.useOutputSchema) args.push("--output-schema", schemaPath);
     args.push("--output-last-message", outputPath);
     if (input.isolation) {
-      if (input.isolation !== "semantic-tool-free" || this.ignoreUserConfig) {
-        args.push("--ignore-user-config");
-      }
+      // Tool isolation is enforced by the explicit config and feature overrides
+      // below. Keep the user's model-provider transport by default; otherwise a
+      // configured private endpoint is silently replaced by the CLI default.
+      if (this.ignoreUserConfig) args.push("--ignore-user-config");
       for (const config of TOOL_FREE_ISOLATION_CONFIG) {
         args.push("--config", config);
       }

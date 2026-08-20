@@ -79,9 +79,10 @@ return a PNG, access the application database, or apply a plan.
 ## Optional AI recommendation
 
 The repository `mc-skin-replacement-planner` Skill receives an integrity-checked
-public candidate catalog plus a short user intent. The default provider ignores
-user configuration, clears MCP/apps, disables model tools, uses a read-only
-sandbox, and inlines that public input instead of granting file access. It returns exactly
+public candidate catalog plus a short user intent. The default provider preserves
+configured model-provider routing, clears MCP/apps, disables model tools, uses a
+read-only sandbox, and inlines that public input instead of granting file access.
+Ignoring user configuration remains an explicit deployment option. It returns exactly
 one sorted decision per Base target group: a complete ranking of that group's
 supplied candidate IDs, an optional selected complete candidate, confidence, and
 a short explanation. Aggregate Outer cleanup remains automatic host behavior and

@@ -91,6 +91,10 @@ AI Provider、模型与推理参数见 [AI 分析合同](docs/ai-analysis.md)；
 | `pnpm verify` | 检查 fixture、类型、单元/集成测试与全部构建 |
 | `pnpm browser:install` | 安装确定性浏览器测试所需的 Chromium |
 | `pnpm verify:browser` | 使用隔离数据目录和 replay provider 运行浏览器回归 |
+| `pnpm m21:evidence:browser` | 生成绑定当前源码的 Completion 浏览器发布证据 |
+| `pnpm m21:evidence:ranking -- --model MODEL_NAME` | 使用已认证 Codex CLI 生成真实候选排序证据 |
+| `pnpm m21:report` | 严格组合离线、AI 排序和浏览器证据；缺少任一项即失败 |
+| `pnpm m21:report:check` | 检查已保存的严格报告是否仍匹配当前源码与证据 |
 
 完整仓库验证：
 
@@ -105,10 +109,27 @@ pnpm browser:install
 pnpm verify:browser
 ```
 
+Completion 发布门使用哈希绑定的离线评测、真实 AI 排序和浏览器证据。生成完整报告前，
+先让 Codex CLI 完成认证，再依次运行：
+
+```bash
+pnpm m21:evidence:browser
+pnpm m21:evidence:ranking -- --model MODEL_NAME --reasoning medium --overwrite
+pnpm m21:report
+pnpm m21:report:check
+```
+
+证据运行器默认保留 Codex CLI 配置中的 Provider 路由与认证；`--model` 只选择模型，
+不会丢弃自定义 `base_url`。只有显式设置 `AI_IGNORE_USER_CONFIG=true` 才忽略用户配置。
+
+`m21:report:incomplete` 只用于记录缺失证据并保持 `keep_experimental`，不能作为默认
+开启 Completion 的发布证明。证据格式和当前判定见
+[M21 发布证据](docs/evidence/m21/README.md)。
+
 ### 当前边界
 
 - AI 完全可选；PNG/UV、人工拆分、版本、预览、Part、Bundle、修补和混搭都可以在没有模型调用时工作。
-- Completion 生成的是推测内容，始终需要显式接受；评测与发布门未全部通过前保持 feature flag 默认关闭。
+- Completion 生成的是推测内容，始终需要显式接受；当前严格报告为 `keep_experimental`，feature flag 继续默认关闭。
 - 同层隐藏内容可以形成未发布的 latent Part，但不能伪装成来源皮肤中的单层 PNG。
 - 仓库没有承诺云部署、多人实时协作、在线素材市场或自动发布资产。
 
@@ -218,10 +239,32 @@ pnpm browser:install
 pnpm verify:browser
 ```
 
+### Completion release evidence
+
+The Completion release gate combines hash-bound offline evaluation, real AI
+ordering, and deterministic browser evidence. Authenticate the Codex CLI before
+generating the real ranking evidence, then run:
+
+```bash
+pnpm m21:evidence:browser
+pnpm m21:evidence:ranking -- --model MODEL_NAME --reasoning medium --overwrite
+pnpm m21:report
+pnpm m21:report:check
+```
+
+The evidence runner preserves the Codex CLI's configured provider routing and
+authentication by default. `--model` selects a model without discarding a custom
+`base_url`; only `AI_IGNORE_USER_CONFIG=true` opts out of user configuration.
+
+`m21:report:incomplete` only records missing evidence and keeps the decision at
+`keep_experimental`; it is not evidence for enabling Completion by default. See
+[M21 release evidence](docs/evidence/m21/README.md) for the file contracts and the
+current decision.
+
 ### Current boundaries
 
 - AI is optional; deterministic editing, history, previews, Parts, Bundles, repair, and composition work without a model call.
-- Hidden-content Completion is inference, not factual recovery. It stays behind `VITE_ENABLE_COMPLETION_WORKSPACE=true` until its release evidence is complete and always requires an explicit decision.
+- Hidden-content Completion is inference, not factual recovery. The current strict report says `keep_experimental`, so it stays behind `VITE_ENABLE_COMPLETION_WORKSPACE=true` and always requires an explicit decision.
 - A same-layer latent completion may become an unpublished Part, but it cannot be represented honestly as pixels from the original single-layer skin PNG.
 - Cloud deployment, real-time collaboration, an online marketplace, and automatic asset publication are not claimed by this repository.
 

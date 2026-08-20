@@ -1,0 +1,957 @@
+{
+  "decision": "keep_experimental",
+  "evaluatedAt": "2026-08-20T10:17:31.234Z",
+  "evaluation": {
+    "aggregate": {
+      "aiMeanReciprocalRank": 0.8333333333333334,
+      "aiRankingFixtureCoverage": 1,
+      "aiTop1OracleAcceptableRate": 0.7777777777777778,
+      "candidateCount": 16,
+      "fixtureMatrixComplete": true,
+      "generatedMaskOutOfBoundRate": 0,
+      "negativeSafetyRate": 1,
+      "positiveFixtureOracleCoverage": 0.8888888888888888
+    },
+    "criteria": [
+      {
+        "actual": "completion-candidates-v2",
+        "description": "The release evaluation uses the conservative side-by-side Host algorithm",
+        "id": "host_algorithm_version",
+        "requirement": "completion-candidates-v2",
+        "status": "passed"
+      },
+      {
+        "actual": true,
+        "description": "Wide/Slim, Base/Outer and all required positive/negative traits are represented",
+        "id": "fixture_matrix",
+        "requirement": "true",
+        "status": "passed"
+      },
+      {
+        "actual": true,
+        "description": "Every current Host strategy is emitted from real fixture evidence",
+        "id": "required_strategy_emission",
+        "requirement": "true",
+        "status": "passed"
+      },
+      {
+        "actual": 0,
+        "description": "Aggregate generated-mask pixels remain inside the Host allowed mask",
+        "id": "generated_mask_bounds",
+        "requirement": "<= 0",
+        "status": "passed"
+      },
+      {
+        "actual": 0.8888888888888888,
+        "description": "Positive fixtures expose at least one synthetically oracle-acceptable Host candidate",
+        "id": "positive_oracle_coverage",
+        "requirement": ">= 0.8",
+        "status": "passed"
+      },
+      {
+        "actual": 1,
+        "description": "Negative fixtures produce the expected zero-candidate or rejection outcome",
+        "id": "negative_safety",
+        "requirement": ">= 1",
+        "status": "passed"
+      },
+      {
+        "actual": 1,
+        "description": "Recorded AI rankings cover every rankable fixture using exact Host candidate IDs",
+        "id": "ai_ranking_coverage",
+        "requirement": ">= 1",
+        "status": "passed"
+      },
+      {
+        "actual": 0.7777777777777778,
+        "description": "Recorded AI top-ranked Host candidates meet the synthetic oracle threshold",
+        "id": "ai_top1_oracle",
+        "requirement": ">= 0.8",
+        "status": "failed"
+      },
+      {
+        "actual": true,
+        "description": "The separate real-browser player Completion E2E gate passed",
+        "id": "real_browser_e2e",
+        "requirement": "true",
+        "status": "passed"
+      }
+    ],
+    "evidence": {
+      "aiRanking": {
+        "codexCliVersion": "codex-cli 0.148.0",
+        "evidenceHash": "sha256:6ed43900c6be5ca397b40076bab79112cdd0091c2b54593085a2ebbc28a2e505",
+        "fixtureCount": 9,
+        "generatedAt": "2026-08-20T10:16:30.695Z",
+        "matrixHash": "sha256:f29fb2b58fae868d084d8b2959e703a0e838ca3aa9c63057efe6cc04e1394f8b",
+        "model": "gpt-5.6-sol",
+        "promptVersion": "completion-candidate-ranking-v1",
+        "provider": "codex-exec",
+        "reasoningEffort": "medium",
+        "validatorVersion": "completion-ranking-validator-v1"
+      },
+      "browser": {
+        "durationMs": 107929,
+        "evidenceHash": "sha256:43660cd5054f91ef1e1698892a0c41ed28d9dc5f6aac6753674bf2c0bfbeaa5f",
+        "playwrightVersion": "1.62.1",
+        "sourceFileCount": 252,
+        "sourceHash": "sha256:914f3f76062898639f1bd7dfef59af00e36d1aaa9c950f1523717b3f980ec4d6",
+        "startedAt": "2026-08-20T10:17:31.234Z",
+        "testCount": 11
+      }
+    },
+    "fixtureCount": 12,
+    "fixtures": [
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "slim",
+        "candidateCount": 2,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_904252b8fb2069c1e07634debc5f04f3d2bf0649ba65eceeeccd3cdfd91472d1",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_b63c4ac7f6036dc337814e13ad03652f26e02ae0195318d34ecdfb60a083ff97",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "pattern_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Slim Base clothing with a one-pixel repeatable pattern gap",
+        "emittedStrategies": [
+          "same_surface_continuation",
+          "pattern_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "slim_base_pattern",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "wide",
+        "candidateCount": 2,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_6b8df311a15ef262216e86e1f95688d64ee382c3b51872e252ca139f1d23322b",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "mirrored_counterpart",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_91e679f0da278edb7db7136aa34319a94f237cc591a65c2e2fe1e96085d66b58",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Wide-arm Base clothing with exact left/right mirror evidence",
+        "emittedStrategies": [
+          "mirrored_counterpart",
+          "same_surface_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "wide_base_mirror_symmetric",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "wide",
+        "candidateCount": 2,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_7371bc40637617990d39f6a610804ecbb23d381eec63cee1379447284d88a755",
+            "colorAbsoluteErrorTotal": 326,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 0,
+            "exactColorMatchRate": 0,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 81.5,
+            "oracleAcceptable": false,
+            "pixelPrecision": 1,
+            "strategy": "mirrored_counterpart",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_02108ea095b378349ece4575b2bd00178dfda8224db97ebc2a03471e8d8d1f8b",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Wide-arm Base clothing whose mirrored reference has a different color",
+        "emittedStrategies": [
+          "mirrored_counterpart",
+          "same_surface_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "wide_base_mirror_asymmetric",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "asymmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "slim",
+        "candidateCount": 1,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_d966b4bf24213b37a27b7dfe50d0c91f7393decfccf423be5f9603a8997d93e2",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "opposite_layer_underlay",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Slim Outer clothing with exact Base underlay evidence",
+        "emittedStrategies": [
+          "opposite_layer_underlay"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "slim_outer_underlay",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "latent_component",
+        "targetLayer": "outer",
+        "traits": [
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "wide",
+        "candidateCount": 2,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_78d7324b67bfb3eda2a841d5f83c264926312dd516effacee053928f59cf714d",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_2bbcdae6cfb18a532f59faea2055e6c0d8bece4868ff2f7bb8617c67a5c578a2",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "pattern_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Wide Outer clothing with two-sided constant pattern evidence",
+        "emittedStrategies": [
+          "same_surface_continuation",
+          "pattern_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "wide_outer_pattern",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "latent_component",
+        "targetLayer": "outer",
+        "traits": [
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "slim",
+        "candidateCount": 1,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_91cbac97368dc8eee2777c521fceb987456f25297dbf5392134cd640b7a484d4",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "neighbor_reference",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Slim Base clothing hidden at a canonical front/right UV seam",
+        "emittedStrategies": [
+          "neighbor_reference"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "slim_base_uv_seam",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "uv_seam",
+          "asymmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 96,
+        "armType": "slim",
+        "candidateCount": 1,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_ff9a4e2a691c2951fed3dea4e69f908b2345bf8d6e1c11337522462787b6a890",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 384,
+            "colorComparedPixelCount": 96,
+            "exactColorMatchPixelCount": 96,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 96,
+            "hiddenPixelCoverageCount": 96,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 96,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "opposite_surface_reference",
+            "truePositivePixelCount": 96
+          }
+        ],
+        "description": "Slim latent clothing with its entire Outer front surface occluded",
+        "emittedStrategies": [
+          "opposite_surface_reference"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "slim_outer_whole_surface",
+        "hiddenTruthPixelCount": 96,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "latent_component",
+        "targetLayer": "outer",
+        "traits": [
+          "whole_surface",
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "slim",
+        "candidateCount": 3,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_5a35f6bed6fb377dd57a21b766a6fa2ba8ce5ce5453de19d3a03fba32c85c60a",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "mirrored_counterpart",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_b5ac5a1d6ee0131d920b7630faed825428324966d89dcf9e2ff8721c6f5fd266",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          },
+          {
+            "candidateId": "completioncandidate_6df8f75fa89cd585d1bfb65d15eeaf15228c6435dc6e64e74d7c7dde492a5c72",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 0,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": true,
+            "pixelPrecision": 1,
+            "strategy": "pattern_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Slim Outer hair hidden by an accessory with a repeatable pattern",
+        "emittedStrategies": [
+          "mirrored_counterpart",
+          "same_surface_continuation",
+          "pattern_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "slim_outer_hair_accessory",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": true,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "latent_component",
+        "targetLayer": "outer",
+        "traits": [
+          "symmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 2,
+        "armType": "wide",
+        "candidateCount": 2,
+        "candidates": [
+          {
+            "candidateId": "completioncandidate_30cd0fc512cdb6800280c0b5b85a4acd8142775951b1fff42444fa88654b1e22",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 0,
+            "colorComparedPixelCount": 0,
+            "exactColorMatchPixelCount": 0,
+            "exactColorMatchRate": null,
+            "falsePositivePixelCount": 1,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 1,
+            "hiddenPixelCoverageCount": 0,
+            "hiddenPixelRecall": 0,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": null,
+            "oracleAcceptable": false,
+            "pixelPrecision": 0,
+            "strategy": "mirrored_counterpart",
+            "truePositivePixelCount": 0
+          },
+          {
+            "candidateId": "completioncandidate_4e1aee0196ae3b65951bf5150291bc08d35963ae3fdecb5fe8d34510731eb1da",
+            "colorAbsoluteErrorTotal": 0,
+            "colorComparedChannelCount": 4,
+            "colorComparedPixelCount": 1,
+            "exactColorMatchPixelCount": 1,
+            "exactColorMatchRate": 1,
+            "falsePositivePixelCount": 1,
+            "generatedMaskOutOfBoundPixelCount": 0,
+            "generatedMaskOutOfBoundRate": 0,
+            "generatedPixelCount": 2,
+            "hiddenPixelCoverageCount": 1,
+            "hiddenPixelRecall": 1,
+            "hiddenTruthPixelCount": 1,
+            "meanAbsoluteColorError": 0,
+            "oracleAcceptable": false,
+            "pixelPrecision": 0.5,
+            "strategy": "same_surface_continuation",
+            "truePositivePixelCount": 1
+          }
+        ],
+        "description": "Wide Base gap containing one colored and one transparent hidden texel",
+        "emittedStrategies": [
+          "mirrored_counterpart",
+          "same_surface_continuation"
+        ],
+        "expectationMet": true,
+        "expectedOutcome": "candidates",
+        "fixtureId": "wide_base_transparent_mixed",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": false,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "transparent",
+          "asymmetric"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 1,
+        "armType": "slim",
+        "candidateCount": 0,
+        "candidates": [],
+        "description": "Negative Base gap whose hidden ground truth is transparent",
+        "emittedStrategies": [],
+        "expectationMet": true,
+        "expectedOutcome": "zero_candidates",
+        "fixtureId": "slim_base_transparent_only",
+        "hiddenTruthPixelCount": 0,
+        "oracleCandidateAvailable": false,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "transparent"
+        ]
+      },
+      {
+        "algorithmVersion": "completion-candidates-v2",
+        "allowedGeneratedPixelCount": 0,
+        "armType": "wide",
+        "candidateCount": 0,
+        "candidates": [],
+        "description": "Negative requested skin-texel case with only a Base-layer occluder",
+        "emittedStrategies": [],
+        "expectationMet": true,
+        "expectedOutcome": "zero_candidates",
+        "fixtureId": "wide_base_no_evidence",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": false,
+        "outcome": "evaluated",
+        "rejectionMessage": null,
+        "representation": "skin_texel",
+        "targetLayer": "base",
+        "traits": [
+          "no_evidence"
+        ]
+      },
+      {
+        "algorithmVersion": null,
+        "allowedGeneratedPixelCount": 0,
+        "armType": "slim",
+        "candidateCount": 0,
+        "candidates": [],
+        "description": "Negative hair target occluded by unsupported clothing",
+        "emittedStrategies": [],
+        "expectationMet": true,
+        "expectedOutcome": "unsupported_error",
+        "fixtureId": "slim_base_unsupported",
+        "hiddenTruthPixelCount": 1,
+        "oracleCandidateAvailable": false,
+        "outcome": "rejected",
+        "rejectionMessage": "Unsupported Completion occlusion: upper_clothing over hair",
+        "representation": null,
+        "targetLayer": "base",
+        "traits": [
+          "unsupported"
+        ]
+      }
+    ],
+    "hostAlgorithmVersion": "completion-candidates-v2",
+    "negativeFixtureCount": 3,
+    "offlineGateStatus": "pass",
+    "orderings": [
+      {
+        "candidateCount": 2,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "slim_base_pattern",
+        "oracleAcceptableCandidateCount": 2,
+        "rankedCandidateIds": [
+          "completioncandidate_b63c4ac7f6036dc337814e13ad03652f26e02ae0195318d34ecdfb60a083ff97",
+          "completioncandidate_904252b8fb2069c1e07634debc5f04f3d2bf0649ba65eceeeccd3cdfd91472d1"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 2,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "wide_base_mirror_symmetric",
+        "oracleAcceptableCandidateCount": 2,
+        "rankedCandidateIds": [
+          "completioncandidate_6b8df311a15ef262216e86e1f95688d64ee382c3b51872e252ca139f1d23322b",
+          "completioncandidate_91e679f0da278edb7db7136aa34319a94f237cc591a65c2e2fe1e96085d66b58"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 2,
+        "firstOracleAcceptableRank": 2,
+        "fixtureId": "wide_base_mirror_asymmetric",
+        "oracleAcceptableCandidateCount": 1,
+        "rankedCandidateIds": [
+          "completioncandidate_7371bc40637617990d39f6a610804ecbb23d381eec63cee1379447284d88a755",
+          "completioncandidate_02108ea095b378349ece4575b2bd00178dfda8224db97ebc2a03471e8d8d1f8b"
+        ],
+        "reciprocalRank": 0.5,
+        "top1OracleAcceptable": false
+      },
+      {
+        "candidateCount": 1,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "slim_outer_underlay",
+        "oracleAcceptableCandidateCount": 1,
+        "rankedCandidateIds": [
+          "completioncandidate_d966b4bf24213b37a27b7dfe50d0c91f7393decfccf423be5f9603a8997d93e2"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 2,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "wide_outer_pattern",
+        "oracleAcceptableCandidateCount": 2,
+        "rankedCandidateIds": [
+          "completioncandidate_78d7324b67bfb3eda2a841d5f83c264926312dd516effacee053928f59cf714d",
+          "completioncandidate_2bbcdae6cfb18a532f59faea2055e6c0d8bece4868ff2f7bb8617c67a5c578a2"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 1,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "slim_base_uv_seam",
+        "oracleAcceptableCandidateCount": 1,
+        "rankedCandidateIds": [
+          "completioncandidate_91cbac97368dc8eee2777c521fceb987456f25297dbf5392134cd640b7a484d4"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 1,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "slim_outer_whole_surface",
+        "oracleAcceptableCandidateCount": 1,
+        "rankedCandidateIds": [
+          "completioncandidate_ff9a4e2a691c2951fed3dea4e69f908b2345bf8d6e1c11337522462787b6a890"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 3,
+        "firstOracleAcceptableRank": 1,
+        "fixtureId": "slim_outer_hair_accessory",
+        "oracleAcceptableCandidateCount": 3,
+        "rankedCandidateIds": [
+          "completioncandidate_5a35f6bed6fb377dd57a21b766a6fa2ba8ce5ce5453de19d3a03fba32c85c60a",
+          "completioncandidate_6df8f75fa89cd585d1bfb65d15eeaf15228c6435dc6e64e74d7c7dde492a5c72",
+          "completioncandidate_b5ac5a1d6ee0131d920b7630faed825428324966d89dcf9e2ff8721c6f5fd266"
+        ],
+        "reciprocalRank": 1,
+        "top1OracleAcceptable": true
+      },
+      {
+        "candidateCount": 2,
+        "firstOracleAcceptableRank": null,
+        "fixtureId": "wide_base_transparent_mixed",
+        "oracleAcceptableCandidateCount": 0,
+        "rankedCandidateIds": [
+          "completioncandidate_30cd0fc512cdb6800280c0b5b85a4acd8142775951b1fff42444fa88654b1e22",
+          "completioncandidate_4e1aee0196ae3b65951bf5150291bc08d35963ae3fdecb5fe8d34510731eb1da"
+        ],
+        "reciprocalRank": 0,
+        "top1OracleAcceptable": false
+      }
+    ],
+    "positiveFixtureCount": 9,
+    "releaseGateStatus": "fail",
+    "schemaVersion": "1.1",
+    "strategies": {
+      "mirrored_counterpart": {
+        "candidateCount": 4,
+        "colorComparedPixelCount": 3,
+        "exactColorMatchPixelCount": 2,
+        "exactColorMatchRate": 0.6666666666666666,
+        "falsePositivePixelCount": 1,
+        "fixtureEmissionCount": 4,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 4,
+        "hiddenPixelCoverageCount": 3,
+        "hiddenPixelRecall": 0.75,
+        "hiddenTruthPixelCount": 4,
+        "meanAbsoluteColorError": 27.166666666666668,
+        "oracleAcceptableCount": 2,
+        "oracleAcceptableRate": 0.5,
+        "pixelPrecision": 0.75,
+        "strategy": "mirrored_counterpart",
+        "truePositivePixelCount": 3
+      },
+      "neighbor_reference": {
+        "candidateCount": 1,
+        "colorComparedPixelCount": 1,
+        "exactColorMatchPixelCount": 1,
+        "exactColorMatchRate": 1,
+        "falsePositivePixelCount": 0,
+        "fixtureEmissionCount": 1,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 1,
+        "hiddenPixelCoverageCount": 1,
+        "hiddenPixelRecall": 1,
+        "hiddenTruthPixelCount": 1,
+        "meanAbsoluteColorError": 0,
+        "oracleAcceptableCount": 1,
+        "oracleAcceptableRate": 1,
+        "pixelPrecision": 1,
+        "strategy": "neighbor_reference",
+        "truePositivePixelCount": 1
+      },
+      "opposite_layer_underlay": {
+        "candidateCount": 1,
+        "colorComparedPixelCount": 1,
+        "exactColorMatchPixelCount": 1,
+        "exactColorMatchRate": 1,
+        "falsePositivePixelCount": 0,
+        "fixtureEmissionCount": 1,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 1,
+        "hiddenPixelCoverageCount": 1,
+        "hiddenPixelRecall": 1,
+        "hiddenTruthPixelCount": 1,
+        "meanAbsoluteColorError": 0,
+        "oracleAcceptableCount": 1,
+        "oracleAcceptableRate": 1,
+        "pixelPrecision": 1,
+        "strategy": "opposite_layer_underlay",
+        "truePositivePixelCount": 1
+      },
+      "opposite_surface_reference": {
+        "candidateCount": 1,
+        "colorComparedPixelCount": 96,
+        "exactColorMatchPixelCount": 96,
+        "exactColorMatchRate": 1,
+        "falsePositivePixelCount": 0,
+        "fixtureEmissionCount": 1,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 96,
+        "hiddenPixelCoverageCount": 96,
+        "hiddenPixelRecall": 1,
+        "hiddenTruthPixelCount": 96,
+        "meanAbsoluteColorError": 0,
+        "oracleAcceptableCount": 1,
+        "oracleAcceptableRate": 1,
+        "pixelPrecision": 1,
+        "strategy": "opposite_surface_reference",
+        "truePositivePixelCount": 96
+      },
+      "pattern_continuation": {
+        "candidateCount": 3,
+        "colorComparedPixelCount": 3,
+        "exactColorMatchPixelCount": 3,
+        "exactColorMatchRate": 1,
+        "falsePositivePixelCount": 0,
+        "fixtureEmissionCount": 3,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 3,
+        "hiddenPixelCoverageCount": 3,
+        "hiddenPixelRecall": 1,
+        "hiddenTruthPixelCount": 3,
+        "meanAbsoluteColorError": 0,
+        "oracleAcceptableCount": 3,
+        "oracleAcceptableRate": 1,
+        "pixelPrecision": 1,
+        "strategy": "pattern_continuation",
+        "truePositivePixelCount": 3
+      },
+      "same_surface_continuation": {
+        "candidateCount": 6,
+        "colorComparedPixelCount": 6,
+        "exactColorMatchPixelCount": 6,
+        "exactColorMatchRate": 1,
+        "falsePositivePixelCount": 1,
+        "fixtureEmissionCount": 6,
+        "generatedMaskOutOfBoundPixelCount": 0,
+        "generatedMaskOutOfBoundRate": 0,
+        "generatedPixelCount": 7,
+        "hiddenPixelCoverageCount": 6,
+        "hiddenPixelRecall": 1,
+        "hiddenTruthPixelCount": 6,
+        "meanAbsoluteColorError": 0,
+        "oracleAcceptableCount": 5,
+        "oracleAcceptableRate": 0.8333333333333334,
+        "pixelPrecision": 0.8571428571428571,
+        "strategy": "same_surface_continuation",
+        "truePositivePixelCount": 6
+      }
+    }
+  },
+  "evidenceGaps": [],
+  "reportHash": "sha256:c98f6fcdb10d89e2608283a01af7a65b3a2c616c21850c5ff7c5e366f87f8e8a",
+  "schemaVersion": "1.0",
+  "sourceFileCount": 252,
+  "sourceHash": "sha256:914f3f76062898639f1bd7dfef59af00e36d1aaa9c950f1523717b3f980ec4d6"
+}

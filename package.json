@@ -22,6 +22,12 @@
     "test:browser:real-provider": "node scripts/run-browser-e2e.mjs --real-provider",
     "test:e2e": "pnpm test:browser",
     "verify:browser": "pnpm typecheck:browser && pnpm test:browser",
+    "m21:evidence:ranking": "tsx packages/ai-provider/scripts/run-completion-ranking-evidence.ts",
+    "m21:evidence:browser": "pnpm typecheck:browser && pnpm test:browser -- --evidence docs/evidence/m21/browser-evidence.json",
+    "m21:report": "tsx packages/ai-provider/scripts/build-completion-release-report.ts",
+    "m21:report:incomplete": "tsx packages/ai-provider/scripts/build-completion-release-report.ts --allow-missing-ai",
+    "m21:report:check": "tsx packages/ai-provider/scripts/build-completion-release-report.ts --check",
+    "m21:report:check:incomplete": "tsx packages/ai-provider/scripts/build-completion-release-report.ts --allow-missing-ai --check",
     "fixtures:generate": "node scripts/generate-fixtures.mjs",
     "fixtures:check": "node scripts/generate-fixtures.mjs --check",
     "verify": "pnpm fixtures:check && pnpm typecheck && pnpm test && pnpm build"
@@ -30,6 +36,7 @@
     "@playwright/test": "1.62.1",
     "@types/node": "24.13.3",
     "pngjs": "7.0.0",
+    "tsx": "4.23.12",
     "typescript": "7.0.2"
   }
 }

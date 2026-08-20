@@ -173,12 +173,13 @@ overrides tool and sandbox capabilities for this invocation. The model value
 configuration is available; this additionally ignores user configuration rather
 than changing the mandatory tool-free restrictions.
 
-Replacement recommendation uses the same tool-free boundary but a smaller input.
-It always adds
-`--ignore-user-config` (Codex authentication still comes from `CODEX_HOME`), uses
-no attached images, and inlines only the immutable public Job and candidate
-catalog. The checked-in Skill remains the versioned decision contract and manual
-validation tool; schema validation and exact catalog validation remain
+Replacement recommendation and Completion ranking use the same tool-free boundary
+with smaller, purpose-specific inputs. They preserve configured model-provider
+routing by default, use no unrelated file access, and inline only their immutable
+public Job/candidate evidence. `AI_IGNORE_USER_CONFIG=true` explicitly adds
+`--ignore-user-config` for deployments that provide an independently usable
+default Codex configuration. The checked-in Skills remain versioned contracts and
+manual validation tools; schema validation and exact catalog validation remain
 authoritative host checks.
 
 ## Live process display

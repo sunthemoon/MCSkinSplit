@@ -658,7 +658,6 @@ describe("CodexExecProvider", () => {
       "--json",
       "--output-last-message",
       resolve(root, "output/replacement-plan.json"),
-      "--ignore-user-config",
       "--config",
       'approval_policy="never"',
       "--config",
@@ -838,7 +837,7 @@ ${JSON.stringify(pack.candidateCatalog).replaceAll("&", "\\u0026").replaceAll("<
       },
     });
 
-    expect(commandInput?.args).toContain("--ignore-user-config");
+    expect(commandInput?.args).not.toContain("--ignore-user-config");
     expect(commandInput?.args).toEqual(
       expect.arrayContaining(["--sandbox", "read-only"]),
     );

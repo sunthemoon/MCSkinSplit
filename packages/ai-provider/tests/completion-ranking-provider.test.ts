@@ -64,7 +64,6 @@ describe("CodexExecProvider Completion ranking", () => {
     expect(commandInput?.args).toEqual(expect.arrayContaining([
       "--sandbox",
       "read-only",
-      "--ignore-user-config",
       "--disable",
       "shell_tool",
       "--disable",
@@ -87,6 +86,37 @@ describe("CodexExecProvider Completion ranking", () => {
     }
     expect(commandInput?.stdin).not.toContain('"pixelCount"');
     expect(commandInput?.stdin).not.toContain('"candidateHash"');
+  });
+
+  it("ignores user config only when the caller opts in", async () => {
+    const root = await temporaryDirectory();
+    const pack = await createCompletionRankingPackFixture(root);
+    const proposal = validCompletionRankingProposal(pack);
+    let commandInput: CommandExecutionInput | undefined;
+    const provider = new CodexExecProvider({
+      command: "codex-test",
+      ignoreUserConfig: true,
+      execute: async (input) => {
+        commandInput = input;
+        const outputIndex = input.args.indexOf("--output-last-message");
+        await writeFile(
+          input.args[outputIndex + 1]!,
+          JSON.stringify(proposal),
+          "utf8",
+        );
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    await provider.rankCompletion({
+      jobId: pack.job.jobId,
+      attempt: 1,
+      model: CODEX_CONFIG_DEFAULT_MODEL,
+      reasoningEffort: "medium",
+      pack,
+    });
+
+    expect(commandInput?.args).toContain("--ignore-user-config");
   });
 
   it("keeps native output schema opt-in", async () => {

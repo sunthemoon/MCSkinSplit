@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   buildSurfaceTexels,
   createRgbaImage,
@@ -7,16 +8,29 @@ import {
 } from "@mc-skin-split/skin-core";
 import { describe, expect, it } from "vitest";
 import {
+  COMPLETION_AI_RANKING_EVIDENCE_SCHEMA_VERSION,
+  COMPLETION_BROWSER_EVIDENCE_SCHEMA_VERSION,
+  COMPLETION_BROWSER_REQUIRED_TEST_IDS,
+  COMPLETION_BROWSER_SUITE_VERSION,
+  COMPLETION_EVALUATION_SCHEMA_VERSION,
   DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
   COMPLETION_EVALUATION_HOST_ALGORITHM_VERSION,
   HOST_COMPLETION_STRATEGIES,
+  completionRankingHash,
   computeCompletionPixelMetrics,
+  createCompletionEvaluationPublicCase,
+  createCompletionRankingMatrixHash,
   evaluateCompletionCandidateOrdering,
   evaluateSyntheticCompletionFixture,
+  finalizeCompletionAiRankingEvidence,
+  finalizeCompletionBrowserEvidence,
   runCompletionEvaluationSuite,
   runHostCompletionEvaluator,
   runHostCompletionEvaluatorV1,
   type CompletionSyntheticFixture,
+  type CompletionAiRankingEvidenceDocument,
+  type CompletionBrowserEvidenceDocument,
+  type CompletionEvaluationRankingExpectation,
 } from "../src";
 
 describe("M21 synthetic Completion evaluation", () => {
@@ -183,6 +197,7 @@ describe("M21 synthetic Completion evaluation", () => {
       expect(first.strategies[strategy].fixtureEmissionCount).toBeGreaterThan(0);
     }
     expect(first.aggregate.generatedMaskOutOfBoundRate).toBe(0);
+    expect(first.evidence).toEqual({ aiRanking: null, browser: null });
     expect(first.releaseGateStatus).toBe("fail");
     expect(first.criteria.find((criterion) => criterion.id === "ai_ranking_coverage"))
       .toMatchObject({ status: "not_evaluated" });
@@ -264,12 +279,257 @@ describe("M21 synthetic Completion evaluation", () => {
         "completioncandidate_not_from_host",
       ],
     })).toThrow(/exact Host candidate-ID permutation/u);
+  });
+
+  it("accepts only hash-bound complete AI and browser release evidence", () => {
+    const baseline = runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+    );
+    const aiEvidence = createAiRankingEvidence(baseline);
+    const browserEvidence = createBrowserEvidence();
+    const report = runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      {
+        aiRankingEvidence: aiEvidence,
+        browserEvidence,
+        expectedBrowserSourceHash: browserEvidence.sourceHash,
+      },
+    );
+
+    expect(report.releaseGateStatus).toBe("pass");
+    expect(report.aggregate.aiRankingFixtureCoverage).toBe(1);
+    expect(report.aggregate.aiTop1OracleAcceptableRate).toBe(8 / 9);
+    expect(report.evidence.aiRanking).toMatchObject({
+      evidenceHash: aiEvidence.evidenceHash,
+      fixtureCount: 9,
+    });
+    expect(report.evidence.browser).toMatchObject({
+      evidenceHash: browserEvidence.evidenceHash,
+      testCount: COMPLETION_BROWSER_REQUIRED_TEST_IDS.length,
+    });
+
     expect(() => runCompletionEvaluationSuite(
       DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
-      { rankedCandidateIdsByFixture: { not_a_fixture: [] } },
-    )).toThrow(/not a rankable positive Host fixture/u);
+      {
+        aiRankingEvidence: {
+          ...aiEvidence,
+          evidenceHash: hashText("tampered evidence"),
+        },
+      },
+    )).toThrow(/evidence hash is invalid/u);
+
+    const unknownFixture = refinalizeAiEvidence(aiEvidence, [
+      ...aiEvidence.fixtures,
+      { ...aiEvidence.fixtures[0]!, fixtureId: "not_a_fixture" },
+    ]);
+    expect(() => runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      { aiRankingEvidence: unknownFixture },
+    )).toThrow(/does not cover every rankable fixture/u);
+
+    expect(() => runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      {
+        browserEvidence,
+        expectedBrowserSourceHash: hashText("different sources"),
+      },
+    )).toThrow(/does not match current sources/u);
+
+    const incompleteBrowser = refinalizeBrowserEvidence(
+      browserEvidence,
+      browserEvidence.tests.slice(1),
+    );
+    expect(() => runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      {
+        browserEvidence: incompleteBrowser,
+        expectedBrowserSourceHash: incompleteBrowser.sourceHash,
+      },
+    )).toThrow(/complete release suite/u);
+
+    const retriedBrowser = refinalizeBrowserEvidence(
+      browserEvidence,
+      browserEvidence.tests.map((test, index) =>
+        index === 0 ? { ...test, retries: 1 } : test
+      ),
+    );
+    expect(() => runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      {
+        browserEvidence: retriedBrowser,
+        expectedBrowserSourceHash: retriedBrowser.sourceHash,
+      },
+    )).toThrow(/did not pass cleanly/u);
+
+    expect(() => runCompletionEvaluationSuite(
+      DEFAULT_COMPLETION_SYNTHETIC_FIXTURES,
+      { browserEvidence: true },
+    )).toThrow(/must be supplied together/u);
   });
 });
+
+function createAiRankingEvidence(
+  report: ReturnType<typeof runCompletionEvaluationSuite>,
+): CompletionAiRankingEvidenceDocument {
+  const fixtureResults = new Map(
+    report.fixtures.map((fixture) => [fixture.fixtureId, fixture]),
+  );
+  const publicCases = DEFAULT_COMPLETION_SYNTHETIC_FIXTURES
+    .filter((fixture) => fixture.expectedOutcome === "candidates")
+    .map((fixture) => createCompletionEvaluationPublicCase(fixture))
+    .filter((item) => item.proposal.candidates.length > 0);
+  const expectations: CompletionEvaluationRankingExpectation[] = publicCases.map(
+    (item) => ({
+      fixtureId: item.fixtureId,
+      proposalId: item.proposal.proposalId,
+      proposalHash: item.proposal.proposalHash,
+      evidenceHash: item.proposal.evidenceHash,
+      sourceRevisionId: item.input.source.sourceRevisionId,
+      sourceResultHash: item.input.source.sourceResultHash,
+      sourceSkinHash: item.input.source.sourceSkinHash,
+      candidateIds: item.proposal.candidates.map((candidate) => candidate.candidateId),
+      candidateHashes: item.proposal.candidates.map((candidate) => candidate.candidateHash),
+    }),
+  );
+  const fixtures = publicCases.map((item, index) => {
+    const evaluated = fixtureResults.get(item.fixtureId)!;
+    const acceptable = new Set(
+      evaluated.candidates
+        .filter((candidate) => candidate.oracleAcceptable)
+        .map((candidate) => candidate.candidateId),
+    );
+    const candidates = [...item.proposal.candidates].sort((left, right) =>
+      Number(acceptable.has(right.candidateId)) -
+        Number(acceptable.has(left.candidateId))
+    );
+    const jobId = `completionrankingtest_${index + 1}`;
+    const document = {
+      schemaVersion: "1.0" as const,
+      jobId,
+      proposalId: item.proposal.proposalId,
+      proposalHash: item.proposal.proposalHash,
+      sourceRevisionId: item.input.source.sourceRevisionId,
+      sourceResultHash: item.input.source.sourceResultHash,
+      sourceSkinHash: item.input.source.sourceSkinHash,
+      rankings: candidates.map((candidate) => ({
+        candidateId: candidate.candidateId,
+        confidence: 0.9,
+        explanation: "Synthetic test ordering evidence",
+      })),
+      recommendation: {
+        status: "recommend" as const,
+        candidateId: candidates[0]!.candidateId,
+        confidence: 0.9,
+        explanation: "Synthetic test recommendation",
+      },
+    };
+    const packInputHash = hashText(`pack-input:${item.fixtureId}`);
+    const packManifestHash = hashText(`pack-manifest:${item.fixtureId}`);
+    return {
+      fixtureId: item.fixtureId,
+      jobId,
+      packInputHash,
+      packManifestHash,
+      proposalId: item.proposal.proposalId,
+      proposalHash: item.proposal.proposalHash,
+      evidenceHash: item.proposal.evidenceHash,
+      sourceRevisionId: item.input.source.sourceRevisionId,
+      sourceResultHash: item.input.source.sourceResultHash,
+      sourceSkinHash: item.input.source.sourceSkinHash,
+      candidateIds: item.proposal.candidates.map((candidate) => candidate.candidateId),
+      candidateHashes: item.proposal.candidates.map((candidate) => candidate.candidateHash),
+      document,
+      rankingHash: completionRankingHash(document),
+      attempts: [{
+        attempt: 1,
+        packInputHash,
+        packManifestHash,
+        rawEventsHash: hashText(`events:${item.fixtureId}`),
+        stderrHash: hashText(`stderr:${item.fixtureId}`),
+        validationReportHash: hashText(`validation:${item.fixtureId}`),
+        valid: true,
+      }],
+    };
+  });
+  return finalizeCompletionAiRankingEvidence({
+    schemaVersion: COMPLETION_AI_RANKING_EVIDENCE_SCHEMA_VERSION,
+    evaluationSchemaVersion: COMPLETION_EVALUATION_SCHEMA_VERSION,
+    hostAlgorithmVersion: COMPLETION_EVALUATION_HOST_ALGORITHM_VERSION,
+    matrixHash: createCompletionRankingMatrixHash(expectations),
+    provider: "test-provider",
+    model: "test-model",
+    reasoningEffort: "medium",
+    promptVersion: "test-prompt-v1",
+    validatorVersion: "test-validator-v1",
+    codexCliVersion: "codex-cli test",
+    generatedAt: "2026-08-20T00:00:00.000Z",
+    fixtures,
+  });
+}
+
+function createBrowserEvidence(): CompletionBrowserEvidenceDocument {
+  return finalizeCompletionBrowserEvidence({
+    schemaVersion: COMPLETION_BROWSER_EVIDENCE_SCHEMA_VERSION,
+    suiteVersion: COMPLETION_BROWSER_SUITE_VERSION,
+    mode: "deterministic-replay",
+    browserName: "chromium",
+    playwrightVersion: "1.55.0",
+    sourceHash: hashText("browser sources"),
+    sourceFileCount: 42,
+    startedAt: "2026-08-20T00:00:00.000Z",
+    durationMs: 1_000,
+    status: "passed",
+    tests: COMPLETION_BROWSER_REQUIRED_TEST_IDS.map((id) => ({
+      id,
+      status: "passed" as const,
+      durationMs: 10,
+      retries: 0,
+    })),
+  });
+}
+
+function refinalizeAiEvidence(
+  evidence: CompletionAiRankingEvidenceDocument,
+  fixtures: CompletionAiRankingEvidenceDocument["fixtures"],
+): CompletionAiRankingEvidenceDocument {
+  return finalizeCompletionAiRankingEvidence({
+    schemaVersion: evidence.schemaVersion,
+    evaluationSchemaVersion: evidence.evaluationSchemaVersion,
+    hostAlgorithmVersion: evidence.hostAlgorithmVersion,
+    matrixHash: evidence.matrixHash,
+    provider: evidence.provider,
+    model: evidence.model,
+    reasoningEffort: evidence.reasoningEffort,
+    promptVersion: evidence.promptVersion,
+    validatorVersion: evidence.validatorVersion,
+    codexCliVersion: evidence.codexCliVersion,
+    generatedAt: evidence.generatedAt,
+    fixtures,
+  });
+}
+
+function refinalizeBrowserEvidence(
+  evidence: CompletionBrowserEvidenceDocument,
+  tests: CompletionBrowserEvidenceDocument["tests"],
+): CompletionBrowserEvidenceDocument {
+  return finalizeCompletionBrowserEvidence({
+    schemaVersion: evidence.schemaVersion,
+    suiteVersion: evidence.suiteVersion,
+    mode: evidence.mode,
+    browserName: evidence.browserName,
+    playwrightVersion: evidence.playwrightVersion,
+    sourceHash: evidence.sourceHash,
+    sourceFileCount: evidence.sourceFileCount,
+    startedAt: evidence.startedAt,
+    durationMs: evidence.durationMs,
+    status: evidence.status,
+    tests,
+  });
+}
+
+function hashText(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
 
 function fixtureResult(
   report: ReturnType<typeof runCompletionEvaluationSuite>,

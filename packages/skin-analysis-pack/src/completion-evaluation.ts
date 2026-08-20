@@ -31,8 +31,15 @@ import {
   type SurfaceKey,
   type SurfaceTexel,
 } from "@mc-skin-split/skin-core";
+import {
+  validateCompletionAiRankingEvidence,
+  validateCompletionBrowserEvidence,
+  type CompletionAiRankingEvidenceSummary,
+  type CompletionBrowserEvidenceSummary,
+  type CompletionEvaluationRankingExpectation,
+} from "./completion-release-evidence";
 
-export const COMPLETION_EVALUATION_SCHEMA_VERSION = "1.0" as const;
+export const COMPLETION_EVALUATION_SCHEMA_VERSION = "1.1" as const;
 export const COMPLETION_EVALUATION_HOST_ALGORITHM_VERSION =
   COMPLETION_CANDIDATE_ALGORITHM_V2;
 
@@ -106,6 +113,16 @@ export interface CompletionEvaluationInput {
   readonly targetComponentId: string;
   readonly occludingComponentIds: readonly string[];
   readonly representation: CompletionRequestedRepresentation;
+}
+
+/**
+ * Public, truth-free fixture input and its Host proposal. The fixture ID is
+ * harness metadata only and must never be included in a provider prompt.
+ */
+export interface CompletionEvaluationPublicCase {
+  readonly fixtureId: string;
+  readonly input: CompletionEvaluationInput;
+  readonly proposal: CompletionProposal;
 }
 
 export type CompletionEvaluator = (
@@ -230,6 +247,10 @@ export interface CompletionEvaluationReport {
     readonly aiMeanReciprocalRank: number | null;
     readonly fixtureMatrixComplete: boolean;
   };
+  readonly evidence: {
+    readonly aiRanking: CompletionAiRankingEvidenceSummary | null;
+    readonly browser: CompletionBrowserEvidenceSummary | null;
+  };
   readonly offlineGateStatus: "pass" | "fail";
   readonly releaseGateStatus: "pass" | "fail";
   readonly criteria: readonly CompletionGateCriterion[];
@@ -265,12 +286,12 @@ export const COMPLETION_EVALUATION_THRESHOLDS = Object.freeze({
 });
 
 export interface RunCompletionEvaluationOptions {
-  /** Exact Host candidate-ID permutations produced by a real ranking run. */
-  readonly rankedCandidateIdsByFixture?: Readonly<
-    Record<string, readonly string[]>
-  >;
-  /** Must refer to the separate real-browser evidence, never a synthetic stub. */
-  readonly browserE2ePassed?: boolean;
+  /** A hash-bound, exact-fixture AI ranking evidence document. */
+  readonly aiRankingEvidence?: unknown;
+  /** A hash-bound result from the deterministic real-browser release suite. */
+  readonly browserEvidence?: unknown;
+  /** Fingerprint recomputed from the current browser-relevant source files. */
+  readonly expectedBrowserSourceHash?: string;
   readonly evaluator?: CompletionEvaluator;
 }
 
@@ -280,6 +301,11 @@ interface PreparedCompletionCase {
     readonly pixelId: number;
     readonly rgba: Rgba;
   }[];
+}
+
+interface EvaluatedCompletionCase {
+  readonly result: CompletionFixtureEvaluation;
+  readonly publicCase: CompletionEvaluationPublicCase | null;
 }
 
 const TARGET_COMPONENT_ID = "outfit.eval_target";
@@ -430,32 +456,53 @@ export function evaluateSyntheticCompletionFixture(
   fixture: CompletionSyntheticFixture,
   evaluator: CompletionEvaluator = runHostCompletionEvaluator,
 ): CompletionFixtureEvaluation {
+  return evaluateSyntheticCompletionCase(fixture, evaluator).result;
+}
+
+export function createCompletionEvaluationPublicCase(
+  fixture: CompletionSyntheticFixture,
+  evaluator: CompletionEvaluator = runHostCompletionEvaluator,
+): CompletionEvaluationPublicCase {
   const prepared = prepareSyntheticCompletionCase(fixture);
+  const input = cloneEvaluationInput(prepared.input);
+  const proposal = evaluator(cloneEvaluationInput(input));
+  return { fixtureId: fixture.id, input, proposal };
+}
+
+function evaluateSyntheticCompletionCase(
+  fixture: CompletionSyntheticFixture,
+  evaluator: CompletionEvaluator,
+): EvaluatedCompletionCase {
+  const prepared = prepareSyntheticCompletionCase(fixture);
+  const input = cloneEvaluationInput(prepared.input);
   let proposal: CompletionProposal;
   try {
-    proposal = evaluator(cloneEvaluationInput(prepared.input));
+    proposal = evaluator(cloneEvaluationInput(input));
   } catch (error) {
     const rejectionMessage = error instanceof Error ? error.message : String(error);
     return {
-      fixtureId: fixture.id,
-      description: fixture.description,
-      armType: fixture.armType,
-      targetLayer: fixture.targetLayer,
-      traits: [...fixture.traits],
-      expectedOutcome: fixture.expectedOutcome,
-      outcome: "rejected",
-      algorithmVersion: null,
-      representation: null,
-      allowedGeneratedPixelCount: 0,
-      hiddenTruthPixelCount: prepared.hiddenTruthPixels.length,
-      candidateCount: 0,
-      candidates: [],
-      emittedStrategies: [],
-      rejectionMessage,
-      expectationMet:
-        fixture.expectedOutcome === "unsupported_error" &&
-        isUnsupportedCompletionError(error),
-      oracleCandidateAvailable: false,
+      result: {
+        fixtureId: fixture.id,
+        description: fixture.description,
+        armType: fixture.armType,
+        targetLayer: fixture.targetLayer,
+        traits: [...fixture.traits],
+        expectedOutcome: fixture.expectedOutcome,
+        outcome: "rejected",
+        algorithmVersion: null,
+        representation: null,
+        allowedGeneratedPixelCount: 0,
+        hiddenTruthPixelCount: prepared.hiddenTruthPixels.length,
+        candidateCount: 0,
+        candidates: [],
+        emittedStrategies: [],
+        rejectionMessage,
+        expectationMet:
+          fixture.expectedOutcome === "unsupported_error" &&
+          isUnsupportedCompletionError(error),
+        oracleCandidateAvailable: false,
+      },
+      publicCase: null,
     };
   }
   const candidates = proposal.candidates.map((candidate) =>
@@ -467,25 +514,28 @@ export function evaluateSyntheticCompletionFixture(
       ? candidates.length === 0
       : false;
   return {
-    fixtureId: fixture.id,
-    description: fixture.description,
-    armType: fixture.armType,
-    targetLayer: fixture.targetLayer,
-    traits: [...fixture.traits],
-    expectedOutcome: fixture.expectedOutcome,
-    outcome: "evaluated",
-    algorithmVersion: proposal.algorithmVersion,
-    representation: proposal.representation,
-    allowedGeneratedPixelCount: proposal.allowedGeneratedPixelCount,
-    hiddenTruthPixelCount: prepared.hiddenTruthPixels.length,
-    candidateCount: candidates.length,
-    candidates,
-    emittedStrategies: candidates.map((candidate) => candidate.strategy),
-    rejectionMessage: null,
-    expectationMet: expectedCandidateState,
-    oracleCandidateAvailable: candidates.some(
-      (candidate) => candidate.oracleAcceptable,
-    ),
+    result: {
+      fixtureId: fixture.id,
+      description: fixture.description,
+      armType: fixture.armType,
+      targetLayer: fixture.targetLayer,
+      traits: [...fixture.traits],
+      expectedOutcome: fixture.expectedOutcome,
+      outcome: "evaluated",
+      algorithmVersion: proposal.algorithmVersion,
+      representation: proposal.representation,
+      allowedGeneratedPixelCount: proposal.allowedGeneratedPixelCount,
+      hiddenTruthPixelCount: prepared.hiddenTruthPixels.length,
+      candidateCount: candidates.length,
+      candidates,
+      emittedStrategies: candidates.map((candidate) => candidate.strategy),
+      rejectionMessage: null,
+      expectationMet: expectedCandidateState,
+      oracleCandidateAvailable: candidates.some(
+        (candidate) => candidate.oracleAcceptable,
+      ),
+    },
+    publicCase: { fixtureId: fixture.id, input, proposal },
   };
 }
 
@@ -495,9 +545,10 @@ export function runCompletionEvaluationSuite(
 ): CompletionEvaluationReport {
   assertUniqueFixtureIds(fixtures);
   const evaluator = options.evaluator ?? runHostCompletionEvaluator;
-  const fixtureResults = fixtures.map((fixture) =>
-    evaluateSyntheticCompletionFixture(fixture, evaluator)
+  const evaluatedCases = fixtures.map((fixture) =>
+    evaluateSyntheticCompletionCase(fixture, evaluator)
   );
+  const fixtureResults = evaluatedCases.map((item) => item.result);
   const evaluatedAlgorithmVersions = new Set(
     fixtureResults.flatMap((fixture) =>
       fixture.algorithmVersion === null ? [] : [fixture.algorithmVersion]
@@ -518,16 +569,32 @@ export function runCompletionEvaluationSuite(
       aggregateStrategy(strategy, fixtureResults),
     ]),
   ) as Readonly<Record<HostCompletionStrategy, CompletionStrategyAggregate>>;
-  const rankedByFixture = options.rankedCandidateIdsByFixture ?? {};
   const rankable = positive.filter((fixture) => fixture.candidateCount > 0);
   const rankableIds = new Set(rankable.map((fixture) => fixture.fixtureId));
-  for (const fixtureId of Object.keys(rankedByFixture)) {
-    if (!rankableIds.has(fixtureId)) {
-      throw new RangeError(
-        `AI ranking fixture ${fixtureId} is not a rankable positive Host fixture`,
-      );
-    }
-  }
+  const rankingExpectations = evaluatedCases.flatMap((item) =>
+    item.publicCase !== null &&
+      rankableIds.has(item.publicCase.fixtureId) &&
+      item.publicCase.proposal.candidates.length > 0
+      ? [completionRankingExpectation(item.publicCase)]
+      : []
+  );
+  const hostAlgorithmVersion =
+    evaluatedAlgorithmVersions.values().next().value ?? null;
+  const aiEvidence = options.aiRankingEvidence === undefined
+    ? null
+    : hostAlgorithmVersion === null
+      ? (() => {
+          throw new RangeError(
+            "Completion AI evidence requires an evaluated Host algorithm",
+          );
+        })()
+      : validateCompletionAiRankingEvidence({
+          evidence: options.aiRankingEvidence,
+          evaluationSchemaVersion: COMPLETION_EVALUATION_SCHEMA_VERSION,
+          hostAlgorithmVersion,
+          expectations: rankingExpectations,
+        });
+  const rankedByFixture = aiEvidence?.rankingsByFixture ?? {};
   const orderings = rankable.flatMap((fixture) => {
     const ranking = rankedByFixture[fixture.fixtureId];
     return ranking !== undefined
@@ -566,11 +633,24 @@ export function runCompletionEvaluationSuite(
         orderings.length,
     fixtureMatrixComplete: matrixIsComplete(fixtures),
   };
+  const hasBrowserEvidence = options.browserEvidence !== undefined;
+  const hasBrowserSourceHash = options.expectedBrowserSourceHash !== undefined;
+  if (hasBrowserEvidence !== hasBrowserSourceHash) {
+    throw new RangeError(
+      "Completion browser evidence and current source hash must be supplied together",
+    );
+  }
+  const browserEvidence = hasBrowserEvidence
+    ? validateCompletionBrowserEvidence({
+        evidence: options.browserEvidence,
+        expectedSourceHash: options.expectedBrowserSourceHash!,
+      })
+    : null;
   const criteria = gateCriteria(
-    evaluatedAlgorithmVersions.values().next().value ?? null,
+    hostAlgorithmVersion,
     aggregate,
     strategies,
-    options.browserE2ePassed,
+    browserEvidence === null ? undefined : true,
   );
   const offlineCriterionIds = new Set([
     "host_algorithm_version",
@@ -582,8 +662,7 @@ export function runCompletionEvaluationSuite(
   ]);
   return {
     schemaVersion: COMPLETION_EVALUATION_SCHEMA_VERSION,
-    hostAlgorithmVersion:
-      evaluatedAlgorithmVersions.values().next().value ?? null,
+    hostAlgorithmVersion,
     fixtureCount: fixtureResults.length,
     positiveFixtureCount: positive.length,
     negativeFixtureCount: negative.length,
@@ -591,6 +670,10 @@ export function runCompletionEvaluationSuite(
     strategies,
     orderings,
     aggregate,
+    evidence: {
+      aiRanking: aiEvidence?.summary ?? null,
+      browser: browserEvidence,
+    },
     offlineGateStatus: criteria
       .filter((criterion) => offlineCriterionIds.has(criterion.id))
       .every((criterion) => criterion.status === "passed")
@@ -600,6 +683,23 @@ export function runCompletionEvaluationSuite(
       ? "pass"
       : "fail",
     criteria,
+  };
+}
+
+function completionRankingExpectation(
+  publicCase: CompletionEvaluationPublicCase,
+): CompletionEvaluationRankingExpectation {
+  const { input, proposal } = publicCase;
+  return {
+    fixtureId: publicCase.fixtureId,
+    proposalId: proposal.proposalId,
+    proposalHash: proposal.proposalHash,
+    evidenceHash: proposal.evidenceHash,
+    sourceRevisionId: input.source.sourceRevisionId,
+    sourceResultHash: input.source.sourceResultHash,
+    sourceSkinHash: input.source.sourceSkinHash,
+    candidateIds: proposal.candidates.map((candidate) => candidate.candidateId),
+    candidateHashes: proposal.candidates.map((candidate) => candidate.candidateHash),
   };
 }
 
@@ -940,7 +1040,7 @@ function gateCriteria(
   hostAlgorithmVersion: CompletionCandidateAlgorithmVersion | null,
   aggregate: CompletionEvaluationReport["aggregate"],
   strategies: CompletionEvaluationReport["strategies"],
-  browserE2ePassed: boolean | undefined,
+  browserEvidencePassed: boolean | undefined,
 ): CompletionGateCriterion[] {
   const release = COMPLETION_EVALUATION_THRESHOLDS.release;
   const requiredStrategiesEmitted = HOST_COMPLETION_STRATEGIES.every(
@@ -1013,10 +1113,10 @@ function gateCriteria(
     criterion(
       "real_browser_e2e",
       "The separate real-browser player Completion E2E gate passed",
-      browserE2ePassed ?? null,
+      browserEvidencePassed ?? null,
       "true",
-      browserE2ePassed === true,
-      browserE2ePassed === undefined,
+      browserEvidencePassed === true,
+      browserEvidencePassed === undefined,
     ),
   ];
 }

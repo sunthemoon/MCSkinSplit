@@ -1,0 +1,81 @@
+{
+  "browserName": "chromium",
+  "durationMs": 107929,
+  "evidenceHash": "sha256:43660cd5054f91ef1e1698892a0c41ed28d9dc5f6aac6753674bf2c0bfbeaa5f",
+  "mode": "deterministic-replay",
+  "playwrightVersion": "1.62.1",
+  "schemaVersion": "1.0",
+  "sourceFileCount": 252,
+  "sourceHash": "sha256:914f3f76062898639f1bd7dfef59af00e36d1aaa9c950f1523717b3f980ec4d6",
+  "startedAt": "2026-08-20T10:17:31.234Z",
+  "status": "passed",
+  "suiteVersion": "completion-player-browser-release-v1",
+  "tests": [
+    {
+      "durationMs": 11212,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > creates a manual derived candidate, accepts it, and publishes the latent Part",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 2288,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > exposes the gated four-step workspace without horizontal overflow",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 10497,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > generates and accepts a review-only Completion candidate",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 5471,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > keeps Completion absent and makes no Completion request when the flag is off",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 8069,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > rejects a Completion proposal while retaining the original result",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 10341,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > releases replaced Blob URLs across upload and Revision switching",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 7619,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > runs semantic recognition through the deterministic replay provider",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 8696,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > shows an explicit zero-candidate result and can keep the source",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 2834,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > supports native hash navigation and keyboard activation",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 11185,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > supports player semantic selection, Host IDs, overlays, and one relation commit",
+      "retries": 0,
+      "status": "passed"
+    },
+    {
+      "durationMs": 7472,
+      "id": "tests/e2e/player-workspace.spec.ts::M20 deterministic player browser gate > touch input can choose evidence and start candidate generation",
+      "retries": 0,
+      "status": "passed"
+    }
+  ]
+}

@@ -17,6 +17,9 @@ importers:
       pngjs:
         specifier: 7.0.0
         version: 7.0.0
+      tsx:
+        specifier: 4.23.12
+        version: 4.23.12
       typescript:
         specifier: 7.0.2
         version: 7.0.2
