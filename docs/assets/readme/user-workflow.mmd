@@ -1,0 +1,21 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Segoe UI, Microsoft YaHei, sans-serif","primaryColor":"#f6f0df","primaryTextColor":"#13242a","primaryBorderColor":"#13242a","lineColor":"#167f88","secondaryColor":"#dceeea","tertiaryColor":"#f06a36","clusterBkg":"#fbf7eb","clusterBorder":"#13242a"},"flowchart":{"curve":"basis","htmlLabels":true}}}%%
+flowchart LR
+    A["<b>01 · 导入皮肤</b><br/>Import a 64×64 PNG<br/>确认 Slim / Wide"]
+    B["<b>02 · 智能识别</b><br/>Smart analysis<br/>或直接人工拆分"]
+    C["<b>03 · 检查修正</b><br/>Check & correct<br/>组件树 · 2D · 3D"]
+    D["<b>04 · 保存导出</b><br/>Save & export<br/>选择明确版本"]
+
+    A --> B --> C --> D
+    D --> E["<b>完整皮肤 PNG</b><br/>Full skin"]
+    D --> F["<b>组件 Part</b><br/>Reusable component"]
+    D --> G["<b>分类 Bundle</b><br/>Complete category"]
+
+    C -. "显式开启 / opt-in" .-> H["<b>隐藏内容候选</b><br/>Completion preview<br/>默认关闭 · 必须人工确认"]
+    D -. "高级入口 / advanced" .-> I["<b>高级工作室</b><br/>历史 · 修补 · 混搭 · 资产管理"]
+
+    classDef step fill:#f6f0df,stroke:#13242a,stroke-width:2px,color:#13242a;
+    classDef output fill:#dceeea,stroke:#167f88,stroke-width:2px,color:#13242a;
+    classDef experimental fill:#fff1e8,stroke:#f06a36,stroke-width:2px,stroke-dasharray:6 4,color:#522514;
+    class A,B,C,D step;
+    class E,F,G,I output;
+    class H experimental;

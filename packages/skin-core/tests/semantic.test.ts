@@ -210,6 +210,172 @@ describe("manual semantic transactions", () => {
     expect(() => validateSemanticState(state, image)).not.toThrow();
   });
 
+  it("replaces component relations with canonical symmetric peer updates", () => {
+    const image = semanticFixture();
+    let state = initialState(image);
+    for (const [instanceId, displayName, category, x] of [
+      ["outfit.main", "Outfit", "upper_clothing", 8],
+      ["accessory.left", "Left", "head_accessory", 9],
+      ["accessory.right", "Right", "head_accessory", 10],
+    ] as const) {
+      state = applyManualSemanticOperation(state, {
+        type: "assign_pixels",
+        target: component(instanceId, displayName, category),
+        spans: [headSpan(x, x)],
+      }, image);
+    }
+
+    state = applyManualSemanticOperation(state, {
+      type: "set_component_relations",
+      componentId: "outfit.main",
+      relations: {
+        attachedTo: "accessory.left",
+        pairedWith: ["accessory.right", "accessory.left"],
+        sameOutfitGroup: "outfit.main",
+        conflictsWith: ["accessory.right"],
+      },
+    }, image);
+
+    const byId = new Map(state.document.components.map((item) => [item.instanceId, item]));
+    expect(byId.get("outfit.main")!.relations).toEqual({
+      attachedTo: "accessory.left",
+      pairedWith: ["accessory.left", "accessory.right"],
+      sameOutfitGroup: "outfit.main",
+      conflictsWith: ["accessory.right"],
+    });
+    expect(byId.get("accessory.left")!.relations.pairedWith).toEqual(["outfit.main"]);
+    expect(byId.get("accessory.left")!.relations.attachedTo).toBeNull();
+    expect(byId.get("accessory.right")!.relations).toMatchObject({
+      pairedWith: ["outfit.main"],
+      conflictsWith: ["outfit.main"],
+    });
+
+    expect(() => applyManualSemanticOperation(state, {
+      type: "set_component_relations",
+      componentId: "outfit.main",
+      relations: {
+        attachedTo: "accessory.left",
+        pairedWith: ["accessory.left", "accessory.right"],
+        sameOutfitGroup: "outfit.main",
+        conflictsWith: ["accessory.right"],
+      },
+    }, image)).toThrow(/does not change/u);
+
+    expect(() => applyManualSemanticOperation(state, {
+      type: "set_component_relations",
+      componentId: "outfit.main",
+      relations: {
+        attachedTo: null,
+        pairedWith: ["outfit.main"],
+        sameOutfitGroup: null,
+        conflictsWith: [],
+      },
+    }, image)).toThrow(/itself/u);
+    expect(() => applyManualSemanticOperation(state, {
+      type: "set_component_relations",
+      componentId: "outfit.main",
+      relations: {
+        attachedTo: "accessory.missing",
+        pairedWith: [],
+        sameOutfitGroup: null,
+        conflictsWith: [],
+      },
+    }, image)).toThrow(/does not exist/u);
+  });
+
+  it("rewrites or removes relation references when component identities disappear", () => {
+    const image = semanticFixture();
+    const buildRelatedState = () => {
+      let state = initialState(image);
+      for (const [instanceId, displayName, category, x] of [
+        ["component.a", "A", "upper_clothing", 8],
+        ["component.b", "B", "head_accessory", 9],
+        ["component.c", "C", "head_accessory", 10],
+      ] as const) {
+        state = applyManualSemanticOperation(state, {
+          type: "assign_pixels",
+          target: component(instanceId, displayName, category),
+          spans: [headSpan(x, x)],
+        }, image);
+      }
+      state = applyManualSemanticOperation(state, {
+        type: "set_component_relations",
+        componentId: "component.a",
+        relations: {
+          attachedTo: "component.b",
+          pairedWith: ["component.b"],
+          sameOutfitGroup: null,
+          conflictsWith: [],
+        },
+      }, image);
+      return applyManualSemanticOperation(state, {
+        type: "set_component_relations",
+        componentId: "component.c",
+        relations: {
+          attachedTo: "component.b",
+          pairedWith: [],
+          sameOutfitGroup: null,
+          conflictsWith: ["component.b"],
+        },
+      }, image);
+    };
+
+    const unassigned = applyManualSemanticOperation(buildRelatedState(), {
+      type: "unassign_pixels",
+      spans: [headSpan(9, 9)],
+    }, image);
+    expect(unassigned.document.components.map((item) => item.instanceId))
+      .toEqual(["component.a", "component.c"]);
+    expect(unassigned.document.components.map((item) => item.relations))
+      .toEqual([
+        {
+          attachedTo: null,
+          pairedWith: [],
+          sameOutfitGroup: null,
+          conflictsWith: [],
+        },
+        {
+          attachedTo: null,
+          pairedWith: [],
+          sameOutfitGroup: null,
+          conflictsWith: [],
+        },
+      ]);
+
+    const assigned = applyManualSemanticOperation(buildRelatedState(), {
+      type: "assign_pixels",
+      target: component("component.a", "A", "upper_clothing"),
+      spans: [headSpan(9, 9)],
+    }, image);
+    const assignedById = new Map(
+      assigned.document.components.map((item) => [item.instanceId, item]),
+    );
+    expect(assignedById.has("component.b")).toBe(false);
+    expect(assignedById.get("component.a")!.relations.pairedWith).toEqual([]);
+    expect(assignedById.get("component.c")!.relations).toMatchObject({
+      attachedTo: "component.a",
+      conflictsWith: ["component.a"],
+    });
+    expect(assignedById.get("component.a")!.relations.conflictsWith)
+      .toEqual(["component.c"]);
+
+    const merged = applyManualSemanticOperation(buildRelatedState(), {
+      type: "merge_components",
+      componentIds: ["component.b", "component.c"],
+      target: component("component.bc", "BC", "head_accessory"),
+    }, image);
+    const mergedById = new Map(
+      merged.document.components.map((item) => [item.instanceId, item]),
+    );
+    expect(mergedById.get("component.a")!.relations).toMatchObject({
+      attachedTo: "component.bc",
+      pairedWith: ["component.bc"],
+    });
+    expect(mergedById.get("component.bc")!.relations.pairedWith)
+      .toEqual(["component.a"]);
+    expect(() => validateSemanticState(merged, image)).not.toThrow();
+  });
+
   it("rejects transparent selections and inconsistent overlapping state", () => {
     const image = semanticFixture();
     expect(() =>
@@ -310,6 +476,58 @@ describe("manual semantic transactions", () => {
     });
     expect(maskToPixelIds(rebased.unknownMask)).toContain(8 * 64 + 13);
     expect(() => validateSemanticState(rebased, resultImage)).not.toThrow();
+  });
+
+  it("clears relation references when rebasing removes a transparent component", () => {
+    const image = semanticFixture();
+    let state = initialState(image);
+    state = applyManualSemanticOperation(state, {
+      type: "assign_pixels",
+      target: component("component.source", "Source", "head_accessory"),
+      spans: [headSpan(8, 8)],
+    }, image);
+    state = applyManualSemanticOperation(state, {
+      type: "assign_pixels",
+      target: component("component.peer", "Peer", "upper_clothing"),
+      spans: [headSpan(9, 9)],
+    }, image);
+    state = applyManualSemanticOperation(state, {
+      type: "set_component_relations",
+      componentId: "component.peer",
+      relations: {
+        attachedTo: "component.source",
+        pairedWith: ["component.source"],
+        sameOutfitGroup: null,
+        conflictsWith: ["component.source"],
+      },
+    }, image);
+
+    const unchanged = rebaseSemanticStateImage({
+      state,
+      sourceImage: image,
+      resultImage: createRgbaImage(64, 64, image.data.slice()),
+      sourceHash: `sha256:${"2".repeat(64)}`,
+    });
+    expect(unchanged.document.components.map((item) => item.relations))
+      .toEqual(state.document.components.map((item) => item.relations));
+
+    const transparent = createRgbaImage(64, 64, image.data.slice());
+    setPixel(transparent, 8, 8, [0, 0, 0, 0]);
+    const rebased = rebaseSemanticStateImage({
+      state,
+      sourceImage: image,
+      resultImage: transparent,
+      sourceHash: `sha256:${"3".repeat(64)}`,
+    });
+    expect(rebased.document.components.map((item) => item.instanceId))
+      .toEqual(["component.peer"]);
+    expect(rebased.document.components[0]!.relations).toEqual({
+      attachedTo: null,
+      pairedWith: [],
+      sameOutfitGroup: null,
+      conflictsWith: [],
+    });
+    expect(() => validateSemanticState(rebased, transparent)).not.toThrow();
   });
 
   it("records explicit generated and sourced restoration provenance", () => {

@@ -3,6 +3,8 @@ export * from "./candidate-regions";
 export * from "./candidate-evidence-graph";
 export * from "./completion-ranking-builder";
 export * from "./completion-ranking-types";
+export * from "./completion-evaluation";
+export * from "./completion-evaluation-fixtures";
 export * from "./render-analysis";
 export * from "./semantic-followup";
 export * from "./replacement-builder";

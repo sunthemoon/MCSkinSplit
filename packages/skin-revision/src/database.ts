@@ -110,6 +110,14 @@ const migrations: readonly Migration[] = [
       "utf8",
     ),
   },
+  {
+    version: 16,
+    name: "player completion candidate edits",
+    sql: readFileSync(
+      new URL("./migrations/016_player_completion_workflows.sql", import.meta.url),
+      "utf8",
+    ),
+  },
 ];
 
 export function openRevisionDatabase(databasePath: string): Database.Database {

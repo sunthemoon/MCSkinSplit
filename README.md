@@ -1,93 +1,64 @@
 # MCSkinSplit
 
-MCSkinSplit is a versioned Minecraft skin studio for lossless UV editing, semantic component extraction, reusable parts, AI-assisted classification, and pixel-safe multi-skin composition.
+> 把一张 Minecraft 皮肤拆成可理解、可修正、可复用的语义组件，并保留每一次操作的版本与像素来源。
 
-The repository is implemented milestone by milestone from the project specification in [`docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`](docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md). M0 established the browser baseline, M1 added the deterministic 64×64 RGBA/UV core, M2 added immutable local history, M3 made the 3D avatar Revision-aware, M4 added manual semantic editing plus reusable parts, M5 added schema-validated Codex-assisted classification, M6 added conflict-aware composition, M7 added an analyzed-skin catalog plus reusable complete-category bundles, M8 added immutable single-component repair, M9 added deterministic target-remnant cleanup and Base skin restoration, M10 added a separate constrained AI recommendation step over those host-generated restoration candidates, M11 added source-aware library search plus auditable correction and retirement workflows for Parts and Bundles, M12 added a responsive workflow index for navigating the long-form Studio, M13 made semantic JSON transport single-pass by default while retaining strict host validation and opt-in native structured output, M14 added reversible, result-Revision-scoped catalog archiving without deleting or merging immutable history and library assets, M15 added a player-first clean-analysis flow with deterministic cross-body classification review and immutable catalog variants, M16 makes pixel transfers explicit, prevents provenance-losing reanalysis, and enforces immutable Revision/Part history in SQLite, M17 adds deterministic CandidateRegion evidence plus paired all-surface visual grounding without changing the exact candidate partition or granting the model pixel authority, M18 adds exact per-pixel origin records plus Part 2.0 artifacts, and M19 adds an independent, explicit-decision Completion Proposal service for inferred content hidden by hair or accessories.
+[中文说明](#中文说明) · [English](#english)
 
-The current Studio can:
+## 中文说明
 
-- navigate seven stable workflow sections through native hash links, with a
-  desktop left-side sticky index, a sticky horizontal index at 1280 px and
-  below, scroll-aware `aria-current` state, and reduced-motion support;
-- fully decode 64×64 PNG files to RGBA, including indexed-color PNGs with `tRNS`;
-- infer Wide/Classic or Slim/Alex arm layouts and let the user override the result;
-- map an Atlas to 72 canonical body surfaces and reconstruct every RGBA pixel;
-- render a true 1024×1024 nearest-neighbor Atlas and a semantic face Contact Sheet;
-- exercise six versioned real-world skins and a deterministic six-source Alex/Slim mix;
-- preview the effective arm layout through one lazy-loaded `skinview3d` viewer that is reused across Revision switches;
-- create SQLite-backed Projects with a Slim/Alex default and Import Revisions;
-- load any independently verified historical snapshot into the Atlas and 3D avatar together;
-- restore an old state as a new Revision or continue it on a new Branch;
-- classify exact UV pixels into a fixed semantic taxonomy through a 64×64 draft canvas;
-- merge, split, reclassify, or return component pixels to `unknown` without editing history in place;
-- remove a whole mistaken component classification by returning all of its pixels to `unknown` in a new Revision;
-- export a component as a verified seven-file Part 2.0 asset with `origin.json`
-  and a derived `generated-mask.png`, while retaining read compatibility for
-  historical five-file Part 1.0/1.1 assets;
-- search and filter Parts and complete-category Bundles by source Project, Branch/Revision provenance, semantic kind, and active/retired state;
-- retire or restore immutable library entries without deleting files or breaking historical reads;
-- revise a complete-category Bundle by replacing repaired members, creating a new Bundle and retiring the old Bundle atomically;
-- re-export hair, clothing, or accessories from a corrected current Branch HEAD without overwriting earlier library versions;
-- preview part conflicts without creating a Revision, then apply an explicit conflict strategy as a new Revision;
-- prepare an integrity-checked analysis workspace for every AI run;
-- run the repository `mc-skin-segmenter` Skill 1.4 contract through a read-only,
-  tool-free local Codex CLI invocation with a compact Candidate Evidence Graph,
-  an ordered attachment manifest, and paired natural/candidate-region views;
-- start semantic analysis with one player-facing action and a clean semantic
-  baseline by default, while keeping the existing-classification baseline in
-  advanced settings;
-- inspect six-stage Job progress, paired tool events, recoverable provider events,
-  validation artifacts, cross-body review, and review items in the Studio;
-- create an `ai_segment` Revision only after strict schema and pixel-ownership validation;
-- review deterministic cross-body hair reclassification suggestions and either
-  retain the original result or create an immutable classification-repair Revision;
-- browse successful AI result Revisions as a persistent analyzed-skin catalog;
-- compare an accepted `分类修复版` beneath its original analyzed-skin entry
-  without replacing or hiding the original Revision;
-- batch-export complete hair, clothing, or accessory groups without removing any of the 23 fine semantic categories;
-- inspect an immutable part bundle as a 2D texture or on a draggable Wide/Slim 3D mannequin;
-- add every member of a bundle to a Composition Project atomically while retaining independent fine-component layers;
-- start a repair project directly from any saved atomic part without first selecting it in the component tree;
-- paint non-transparent pixels, erase explicitly, replace exact RGBA colors,
-  mirror limbs, or copy donor surfaces through append-only repair Revisions
-  while preserving intrinsic pixel origin and immediate copy ancestry;
-- preview a configured repair immediately in both 2D and on a draggable Wide/Slim mannequin without persisting it;
-- commit a repair as a new immutable part while retaining the original part and complete repair history;
-- arrange multiple saved parts in a persistent top-to-bottom layer stack;
-- inspect model, semantic-boundary, same-color, and hard per-pixel conflicts;
-- resolve hard conflicts through explicit layer order or individual pixel winners;
-- choose cleanup targets by fine semantic component or by complete hair, clothing,
-  or accessory view without changing the fixed 23-category taxonomy;
-- clear selected Outer remnants and fill exposed Base pixels from deterministic
-  same-surface, same-body-part, mirror, donor-Revision, or opaque manual candidates;
-- preview, version, audit, clear, and commit a hash-verified restoration plan
-  without accepting client-supplied masks or PNG output;
-- ask the repository `mc-skin-replacement-planner` Skill to rank only the
-  already generated Base candidate IDs, then review and load its confidence and
-  explanation without automatically applying a restoration plan;
-- export the live composition preview and commit a validated `compose` Revision;
-- rebuild the checked-in Alex/Slim mix pixel-exactly from all six real skins.
+### 从整张皮肤到可复用组件
 
-M19 service work is complete. Its deterministic host can create
-review-only hidden-content candidates without changing the source Revision;
-optional AI support may order only those existing candidate IDs. Accepting a safe
-`skin_texel` candidate creates a `completion_accept` Revision, while accepting a
-same-layer `latent_component` candidate creates an unpublished Part 2.0 variant
-and leaves the source skin unchanged. The service contract, persistence,
-immutable review assets, acceptance/rejection paths, and restart/cancellation
-behavior are verified; the player-facing, feature-gated workspace belongs to
-M20, and default availability remains gated by M21 evaluation. See
-[`docs/hidden-content-completion.md`](docs/hidden-content-completion.md).
+MCSkinSplit 是一套面向 Minecraft 皮肤创作者、像素美术和资源整理者的本地工作台。它不会把皮肤粗略切成头、身体和四肢图片，而是把跨 UV 面、跨身体部位和跨 Base/Outer 图层的像素组织成“长发”“上衣”“手套”“鞋子”“头饰”等真正可使用的语义组件。
 
-## Requirements
+普通玩家只需完成四步：**导入皮肤 → 智能识别 → 检查修正 → 保存导出**。历史版本、组件修补、多皮肤混搭和资产管理仍可从高级工作室进入。完整产品定位、第一版边界与待验证问题见 [PRODUCT.md](PRODUCT.md)。
+
+![MCSkinSplit 玩家四步工作台、皮肤 Atlas 与 3D 预览](docs/assets/readme/studio-overview.jpg)
+
+### 核心功能
+
+- **真实皮肤工作台：** 无损读取 64×64 RGBA PNG，识别 Slim/Alex 与 Wide/Classic 手臂布局，并联动显示像素级 Atlas 和 3D 角色。
+- **语义组件拆分：** 用精确像素遮罩表示头发、服装、肤色、五官和饰品；一个组件可以跨多个身体面，同一面也可以包含多个组件。
+- **玩家可控修正：** 在组件树、2D/3D 视图和分类面板之间检查结果，支持画笔、矩形、同色魔棒、整面选择、Unknown、合并、拆分、重分类、关系编辑和草稿撤销/重做。
+- **不可变版本与来源：** 导入、AI 分类、人工修正、部件应用、修补和混搭都创建新 Revision；旧结果不被覆盖，逐像素来源可以区分源图、人工创作和已接受的生成内容。
+- **可复用资产：** 组件可以保存为带纹理、写入遮罩、来源和预览的 Part；完整头发、服装或饰品分类可以保存为 Bundle。
+- **安全修补与混搭：** 在应用组件或组合多张皮肤前显示模型、图层、语义边界和逐像素冲突，再由用户选择处理方式。
+- **可选 AI：** AI 只负责初始分类或对 Host 已生成的候选 ID 排序；Schema、像素归属、范围、Hash 和来源始终由本地 Host 校验。
+
+### 怎么使用
+
+![MCSkinSplit 用户流程：导入、智能识别、检查修正、保存导出](docs/assets/readme/user-workflow.svg)
+
+图表由 Kroki 从可维护的 [Mermaid 源码](docs/assets/readme/user-workflow.mmd)生成。
+
+1. 导入一张 64×64 PNG，并确认 Slim 或 Wide 手臂布局。
+2. 启动可选智能识别，或直接使用人工拆分工具。
+3. 选择组件，在 2D/3D 中检查像素归属；草稿只有在确认后才创建新版本。
+4. 选择明确的结果，下载完整皮肤 PNG，或保存单个 Part、完整分类 Bundle。
+
+### 真实界面
+
+| 组件检查与逐像素修正 | 拆分后的可复用组件 |
+| --- | --- |
+| ![三栏语义组件编辑器](docs/assets/readme/semantic-components.jpg) | ![独立组件资产的 3D 展示](docs/assets/readme/reusable-part.jpg) |
+
+左侧界面展示组件树、像素选择和分类确认；右侧展示从皮肤中导出的独立 Part，以及它在对应 Slim/Wide 模型上的真实外观。图片来自本仓库运行中的实际界面，不是概念稿。
+
+### 怎么运作
+
+![MCSkinSplit 系统流程：确定性 Host、可选 AI、严格校验、用户确认和不可变版本](docs/assets/readme/system-workflow.svg)
+
+图表由 Kroki 从可维护的 [Mermaid 源码](docs/assets/readme/system-workflow.mmd)生成。
+
+关键原则是：**模型没有直接写入皮肤或版本历史的权限**。本地 Host 负责 PNG 解码、UV 映射、候选区域、像素边界和来源证据；可选 AI 只能返回受 Schema 约束的分类或候选排序。结果通过严格校验并由用户确认后，系统才会创建带 Branch、快照 Hash 和逐像素 Origin 的不可变 Revision。
+
+### 快速开始
+
+要求：
 
 - Node.js 24
 - pnpm 10.13.1
-- A browser with WebGL support
-- An installed and authenticated Codex CLI for optional AI-assisted analysis,
-  replacement recommendation, or Completion candidate ranking
-
-## Start the Studio
+- 支持 WebGL 的浏览器
+- 可选 AI 功能需要已经安装并完成认证的 Codex CLI
 
 ```bash
 pnpm install
@@ -95,38 +66,120 @@ pnpm fixtures:generate
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`. The command starts both the Fastify API (`127.0.0.1:3001`) and Vite. The generated Alex/Slim mix is selected by default. Uploading a 64×64 PNG creates a Project and Import Revision; bundled real-world skins can be previewed first and imported with the timeline button.
+打开 `http://127.0.0.1:5173`。该命令会同时启动 Fastify API（`127.0.0.1:3001`）和 Vite。运行时数据库、Revision 快照、部件和审计资料默认保存在 `data/`；启动 API 前设置 `MC_SKIN_DATA_DIR` 可以改用其他数据目录。
 
-Runtime metadata and snapshots are stored under `data/`. Set `MC_SKIN_DATA_DIR` before starting the API to use another directory.
+隐藏内容 Completion 是实验功能，默认不会进入玩家流程。只在明确测试时设置 `VITE_ENABLE_COMPLETION_WORKSPACE=true`；它生成的是需要人工审核的推测候选，不会宣称恢复了原作者没有画出的真实像素。
 
-AI analysis and replacement recommendation default to the locally configured Codex model, `medium` reasoning, and a 600-second timeout. New semantic Jobs default to `semanticBaseline: "empty"`: the provider classifies from the prepared views and candidate evidence without receiving earlier component labels as a prior. Advanced settings can select `"current"`, which supplies the existing component summary as a soft prior that must still be re-evaluated. Semantic analysis uses Skill 1.4, prompt `semantic-proposal-v7-all-surface-grounding`, proposal Schema 1.2, and validator v3. The unchanged CandidateRegions remain the exact ownership units; Candidate Evidence Graph v1 adds host-computed geometry, color, contact, proximity, canonical seam, Base/Outer projection, and bilateral-mirror evidence. A labelled six-face natural/Region sheet covers top and bottom alongside the four-direction composite/Base/Outer pairs and stable-ID legend. A same-response `appearanceInventory` records diagnostic visible evidence only and cannot assign pixels or change masks. Unknown pixels stay in the unassigned/review mask rather than becoming components; proposal-wide overrides remain limited to 64 unique pixels and 32 spans, and every added pixel must be explicitly removed from another component-owned Region. Historical Schema 1.0 and 1.1 artifacts remain readable but cannot be submitted as new results. Historical Skill v1-v3 Job options are normalized only while reading their exact stored contract, so the audit list remains available without relaxing current writes; Retry still requires a fresh analysis instead of silently upgrading an older contract. The provider captures one JSON response by default, then applies strict host-side Schema, candidate-coverage, and pixel-ownership validation. Native structured-output transport is an explicit opt-in for compatible endpoints and retains a narrow host-validation fallback. Timeout and cancellation failures retain captured JSONL/stderr diagnostics when available. New Revision snapshots preserve exact intrinsic pixel origins across semantic reanalysis, manual classification, Part reuse, Composition, revert, branch, and repair instead of trusting provider-level generated booleans; old snapshots are upgraded conservatively to `legacy_mixed` unless immutable ancestry proves a more precise source. An explicitly read-only run remains available for comparison. After a valid AI Revision is stored, deterministic follow-up `cross-body-hair-reclassification-v2` may join nearby same-surface hair fragments into conservative cross-body classification suggestions for explicit review; version v1 remains readable as historical evidence. The follow-up does not generate missing clothing, hair, or body pixels. AI remains optional: deterministic editing, candidate generation, manual selection, history, previews, and parts work without a model call. See [`docs/ai-analysis.md`](docs/ai-analysis.md) for configuration, privacy boundaries, API routes, verification evidence, and audit behavior.
-
-Composition uses the selected Revision's stored arm model and defaults imported projects to Slim/Alex. Preview rendering is always available, but a new Revision cannot be created until every blocking conflict has an explicit resolution and every requested Base restoration pixel has a validated source. Complete-category bundles and restoration target groups are convenience views over immutable fine parts and the unchanged 23-category taxonomy; neither flattens or deletes fine semantic components. Component repair provides deterministic authored reconstruction, while composition restoration clears selected target remnants and fills exposed Base pixels from explicit candidates. Neither workflow claims to recover factual pixels that were hidden in the source artwork. See [`docs/composition-workflow.md`](docs/composition-workflow.md) for layer and conflict behavior, [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md) for cleanup, candidate, audit, and provenance contracts, [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md) for the catalog and whole-bundle workflow, and [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md) for repair tools and history.
-
-## Verify
+### 验证
 
 ```bash
 pnpm verify
 ```
 
-This checks that generated fixtures are unchanged, runs TypeScript and unit tests, and builds the production web application.
+该命令检查 fixture 是否漂移，运行所有 TypeScript 类型检查和单元/集成测试，并构建全部 workspace 包。
 
-## Repository layout
+确定性浏览器回归使用隔离数据目录和 replay provider，不依赖外部模型：
 
-```text
-apps/api/                 Fastify Project and Revision API
-apps/ai-worker/           Persistent AI jobs, attempts, repair, and audit assets
-apps/web/                 Vite + React browser Studio
-packages/ai-provider/     Replaceable provider contract and Codex CLI adapter
-packages/skin-analysis-pack/ Deterministic isolated analysis-workspace builder
-packages/skin-compositor/ Deterministic multi-part composition and conflict reports
-packages/skin-core/       Framework-independent PNG, layout, UV, and render core
-packages/skin-revision/   SQLite metadata and immutable snapshot service
-.agents/skills/mc-skin-segmenter/ Repository semantic-analysis Skill
-.agents/skills/mc-skin-replacement-planner/ Repository candidate-ranking Skill
-docs/                     Architecture, implementation status, and specification
-scripts/                  Deterministic fixture tooling
-tests/fixtures/skins/     Versioned Minecraft skin fixtures
+```bash
+pnpm browser:install
+pnpm verify:browser
 ```
 
-The canonical UV contract is documented in [`docs/uv-layout.md`](docs/uv-layout.md), the history/storage contract in [`docs/revision-history.md`](docs/revision-history.md), semantic editing and part reuse in [`docs/semantic-editing-and-parts.md`](docs/semantic-editing-and-parts.md), AI analysis in [`docs/ai-analysis.md`](docs/ai-analysis.md), analyzed skins and bundles in [`docs/analyzed-skin-catalog-and-bundles.md`](docs/analyzed-skin-catalog-and-bundles.md), immutable component repair in [`docs/component-repair-workflow.md`](docs/component-repair-workflow.md), composition in [`docs/composition-workflow.md`](docs/composition-workflow.md), composition restoration in [`docs/composition-restoration-workflow.md`](docs/composition-restoration-workflow.md), hidden-content Completion in [`docs/hidden-content-completion.md`](docs/hidden-content-completion.md), and verification evidence in [`docs/implementation-status.md`](docs/implementation-status.md).
+### 当前边界
+
+- AI 完全可选；PNG/UV、人工拆分、版本、预览、Part、Bundle、修补和混搭都可以在没有模型调用时工作。
+- Completion 生成的是推测内容，始终需要显式接受；评测与发布门未全部通过前保持 feature flag 默认关闭。
+- 同层隐藏内容可以形成未发布的 latent Part，但不能伪装成来源皮肤中的单层 PNG。
+- 仓库没有承诺云部署、多人实时协作、在线素材市场或自动发布资产。
+
+### 文档导航
+
+- [产品说明与第一版范围](PRODUCT.md)
+- [架构与数据流](docs/architecture.md)
+- [UV 布局合同](docs/uv-layout.md)
+- [版本历史与存储](docs/revision-history.md)
+- [语义编辑与组件](docs/semantic-editing-and-parts.md)
+- [AI 分析合同](docs/ai-analysis.md)
+- [组件修补](docs/component-repair-workflow.md)
+- [多组件混搭](docs/composition-workflow.md)
+- [隐藏内容候选](docs/hidden-content-completion.md)
+- [实现状态与验证证据](docs/implementation-status.md)
+
+### 仓库结构
+
+```text
+apps/api/                     Fastify Project / Revision API
+apps/ai-worker/               持久化 AI Job、Run 与审计资料
+apps/web/                     Vite + React 浏览器工作台
+packages/ai-provider/         可替换 Provider 合同与 Codex CLI 适配器
+packages/skin-analysis-pack/  确定性分析工作区、证据与离线评测
+packages/skin-compositor/     多组件混搭与冲突报告
+packages/skin-core/           PNG、布局、UV、语义与渲染核心
+packages/skin-revision/       SQLite 元数据与不可变快照服务
+docs/                         产品、架构、工作流和验证文档
+tests/e2e/                    确定性浏览器回归
+```
+
+## English
+
+### From a full skin to reusable semantic components
+
+MCSkinSplit is a local, versioned studio for Minecraft skin creators, pixel artists, and asset curators. It turns exact source pixels into meaningful components such as hair, clothing, gloves, shoes, and accessories instead of treating a body part or UV face as the final asset.
+
+The ordinary-player workflow is deliberately short: **Import → Smart analysis → Check & correct → Save & export**. Revision history, component repair, multi-skin composition, and asset management remain available in the Advanced Studio. See [PRODUCT.md](PRODUCT.md) for the product direction, first-release scope, and open validation questions.
+
+The screenshots in the [real interface section](#真实界面) come from the running application and show the player workspace, pixel-accurate semantic editor, and an exported reusable Part.
+
+### What it does
+
+- Decodes lossless 64×64 RGBA skins and keeps Slim/Alex and Wide/Classic UV layouts explicit.
+- Links a nearest-neighbor Atlas, semantic component masks, and a Revision-aware 3D avatar.
+- Supports pixel-level assignment, Unknown, merge, split, reclassification, relations, local undo/redo, and 2D/3D inspection.
+- Stores every confirmed change as an immutable Revision with Branch history and per-pixel origin evidence.
+- Exports verified reusable Parts and complete-category Bundles, then reports conflicts before repair or composition.
+- Uses AI only as an optional classifier or ranker over host-owned evidence and candidate IDs; the host remains authoritative for pixels, validation, hashes, and persistence.
+
+### User workflow
+
+![MCSkinSplit workflow: import, smart analysis, check and correct, save and export](docs/assets/readme/user-workflow.svg)
+
+[Mermaid source](docs/assets/readme/user-workflow.mmd), rendered through Kroki.
+
+### How it works
+
+![MCSkinSplit system flow: deterministic host, optional AI, strict validation, user confirmation, immutable revision](docs/assets/readme/system-workflow.svg)
+
+[Mermaid source](docs/assets/readme/system-workflow.mmd), rendered through Kroki.
+
+The model never receives direct write authority. The deterministic host decodes the PNG, maps UV surfaces, builds candidate evidence, validates every returned identity and pixel boundary, and waits for explicit user confirmation before creating an immutable Revision.
+
+### Quick start
+
+Requirements: Node.js 24, pnpm 10.13.1, and a WebGL-capable browser. Optional AI workflows additionally require an installed and authenticated Codex CLI.
+
+```bash
+pnpm install
+pnpm fixtures:generate
+pnpm dev
+```
+
+Open `http://127.0.0.1:5173`; the Fastify API listens on `127.0.0.1:3001`. Runtime data is stored under `data/` by default. Set `MC_SKIN_DATA_DIR` before starting the API to use a different data directory.
+
+### Verification
+
+```bash
+pnpm verify
+
+# Deterministic Chromium E2E with isolated data and a replay provider
+pnpm browser:install
+pnpm verify:browser
+```
+
+### Current boundaries
+
+- AI is optional; deterministic editing, history, previews, Parts, Bundles, repair, and composition work without a model call.
+- Hidden-content Completion is inference, not factual recovery. It stays behind `VITE_ENABLE_COMPLETION_WORKSPACE=true` until its release evidence is complete and always requires an explicit decision.
+- A same-layer latent completion may become an unpublished Part, but it cannot be represented honestly as pixels from the original single-layer skin PNG.
+- Cloud deployment, real-time collaboration, an online marketplace, and automatic asset publication are not claimed by this repository.
+
+For detailed contracts and evidence, start with [architecture](docs/architecture.md), [AI analysis](docs/ai-analysis.md), [hidden-content completion](docs/hidden-content-completion.md), and [implementation status](docs/implementation-status.md).

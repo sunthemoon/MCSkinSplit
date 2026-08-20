@@ -14,6 +14,7 @@ import {
 } from "./origin";
 import type {
   ManualSemanticOperation,
+  ComponentRelations,
   SegmentationDocument,
   SemanticComponent,
   SemanticComponentInput,
@@ -93,6 +94,14 @@ export function applyManualSemanticOperation(
         image,
         layout,
       );
+    case "set_component_relations":
+      return setComponentRelations(
+        state,
+        operation.componentId,
+        operation.relations,
+        image,
+        layout,
+      );
   }
 }
 
@@ -165,11 +174,13 @@ export function rebaseSemanticStateImage(input: {
   }
   const components: SemanticComponent[] = [];
   const masks: Record<string, Uint8Array> = {};
+  const removedComponentIds = new Set<string>();
   for (const component of input.state.document.components) {
     const remaining = maskToPixelIds(input.state.masks[component.instanceId]!).filter(
       (pixelId) => input.resultImage.data[pixelId * 4 + 3] !== 0,
     );
     if (remaining.length === 0) {
+      removedComponentIds.add(component.instanceId);
       continue;
     }
     const mask = pixelIdsToMask(remaining);
@@ -183,7 +194,12 @@ export function rebaseSemanticStateImage(input: {
       ...input.state.document,
       source: { ...input.state.document.source, sourceHash: input.sourceHash },
     },
-    components,
+    rewriteRelationsAfterComponentRemoval(
+      components,
+      new Map(
+        [...removedComponentIds].map((componentId) => [componentId, null]),
+      ),
+    ),
     masks,
     input.resultImage,
     layout,
@@ -386,6 +402,7 @@ function assignPixels(
   const masks: Record<string, Uint8Array> = {};
   const components: SemanticComponent[] = [];
   const displacedProvenance: SemanticComponentProvenance[] = [];
+  const removedComponentIds = new Set<string>();
   let existingTarget: SemanticComponent | undefined;
 
   for (const component of state.document.components) {
@@ -404,6 +421,8 @@ function assignPixels(
       const mask = pixelIdsToMask(remaining);
       masks[component.instanceId] = mask;
       components.push(refreshComponent(component, mask, image, layout));
+    } else {
+      removedComponentIds.add(component.instanceId);
     }
   }
 
@@ -432,7 +451,21 @@ function assignPixels(
       targetProvenance,
     ),
   );
-  return finalizeState(state.document, components, masks, image, layout);
+  return finalizeState(
+    state.document,
+    rewriteRelationsAfterComponentRemoval(
+      components,
+      new Map(
+        [...removedComponentIds].map((componentId) => [
+          componentId,
+          target.instanceId,
+        ]),
+      ),
+    ),
+    masks,
+    image,
+    layout,
+  );
 }
 
 function unassignPixels(
@@ -449,11 +482,13 @@ function unassignPixels(
   let removedPixelCount = 0;
   const components: SemanticComponent[] = [];
   const masks: Record<string, Uint8Array> = {};
+  const removedComponentIds = new Set<string>();
   for (const component of state.document.components) {
     const current = maskToPixelIds(state.masks[component.instanceId]!);
     const remaining = current.filter((pixelId) => !selection.has(pixelId));
     removedPixelCount += current.length - remaining.length;
     if (remaining.length === 0) {
+      removedComponentIds.add(component.instanceId);
       continue;
     }
     const mask = pixelIdsToMask(remaining);
@@ -466,7 +501,18 @@ function unassignPixels(
       "Unassign selection does not contain classified pixels",
     );
   }
-  return finalizeState(state.document, components, masks, image, layout);
+  return finalizeState(
+    state.document,
+    rewriteRelationsAfterComponentRemoval(
+      components,
+      new Map(
+        [...removedComponentIds].map((componentId) => [componentId, null]),
+      ),
+    ),
+    masks,
+    image,
+    layout,
+  );
 }
 
 function mergeComponents(
@@ -519,7 +565,16 @@ function mergeComponents(
       combineProvenance(sourceComponents.map((component) => component.provenance)),
     ),
   );
-  return finalizeState(state.document, components, masks, image, layout);
+  return finalizeState(
+    state.document,
+    rewriteRelationsAfterComponentRemoval(
+      components,
+      new Map(sourceIds.map((componentId) => [componentId, target.instanceId])),
+    ),
+    masks,
+    image,
+    layout,
+  );
 }
 
 function splitComponent(
@@ -606,6 +661,221 @@ function reclassifyComponent(
       : component,
   );
   return finalizeState(state.document, components, state.masks, image, layout);
+}
+
+function setComponentRelations(
+  state: SemanticState,
+  componentId: string,
+  relations: Required<ComponentRelations>,
+  image: RgbaImage,
+  layout: SkinLayout,
+): SemanticState {
+  findComponent(state, componentId);
+  const componentIds = new Set(
+    state.document.components.map((component) => component.instanceId),
+  );
+  const validateReference = (relation: string, value: string): void => {
+    validateInstanceId(value);
+    if (value === componentId) {
+      throw new SemanticEditError(
+        "INVALID_COMPONENT",
+        `${relation} cannot reference the component itself: ${componentId}`,
+      );
+    }
+    if (!componentIds.has(value)) {
+      throw new SemanticEditError(
+        "INVALID_COMPONENT",
+        `${relation} component does not exist: ${value}`,
+      );
+    }
+  };
+  if (relations.attachedTo !== null) {
+    validateReference("attachedTo", relations.attachedTo);
+  }
+  const pairedWith = canonicalRelationIds(
+    "pairedWith",
+    relations.pairedWith,
+    validateReference,
+  );
+  const conflictsWith = canonicalRelationIds(
+    "conflictsWith",
+    relations.conflictsWith,
+    validateReference,
+  );
+  const sameOutfitGroup = relations.sameOutfitGroup === null
+    ? null
+    : relations.sameOutfitGroup.trim();
+  if (
+    sameOutfitGroup !== null &&
+    (sameOutfitGroup.length === 0 || sameOutfitGroup.length > 100)
+  ) {
+    throw new SemanticEditError(
+      "INVALID_COMPONENT",
+      "sameOutfitGroup must contain 1-100 characters or be null",
+    );
+  }
+
+  const pairedSet = new Set(pairedWith);
+  const conflictSet = new Set(conflictsWith);
+  const components = state.document.components.map((component) => {
+    if (component.instanceId === componentId) {
+      return {
+        ...component,
+        relations: {
+          attachedTo: relations.attachedTo,
+          pairedWith,
+          sameOutfitGroup,
+          conflictsWith,
+        },
+      };
+    }
+    const peerPairedWith = new Set(component.relations.pairedWith);
+    const peerConflictsWith = new Set(component.relations.conflictsWith ?? []);
+    if (pairedSet.has(component.instanceId)) peerPairedWith.add(componentId);
+    else peerPairedWith.delete(componentId);
+    if (conflictSet.has(component.instanceId)) peerConflictsWith.add(componentId);
+    else peerConflictsWith.delete(componentId);
+    return {
+      ...component,
+      relations: {
+        ...component.relations,
+        pairedWith: [...peerPairedWith].sort(compareIds),
+        ...(component.relations.conflictsWith !== undefined ||
+            peerConflictsWith.size > 0
+          ? { conflictsWith: [...peerConflictsWith].sort(compareIds) }
+          : {}),
+      },
+    };
+  });
+  if (components.every((component, index) => relationsEqual(
+    component.relations,
+    state.document.components[index]!.relations,
+  ))) {
+    throw new SemanticEditError(
+      "INVALID_SELECTION",
+      "Component relation replacement does not change the semantic state",
+    );
+  }
+  return finalizeState(state.document, components, state.masks, image, layout);
+}
+
+function canonicalRelationIds(
+  relation: string,
+  values: readonly string[],
+  validate: (relation: string, value: string) => void,
+): string[] {
+  if (!Array.isArray(values)) {
+    throw new SemanticEditError(
+      "INVALID_COMPONENT",
+      `${relation} must be an array`,
+    );
+  }
+  for (const value of values) validate(relation, value);
+  return [...new Set(values)].sort(compareIds);
+}
+
+function compareIds(left: string, right: string): number {
+  return left.localeCompare(right);
+}
+
+function relationsEqual(
+  left: ComponentRelations,
+  right: ComponentRelations,
+): boolean {
+  const leftConflicts = left.conflictsWith ?? [];
+  const rightConflicts = right.conflictsWith ?? [];
+  return (
+    left.attachedTo === right.attachedTo &&
+    left.sameOutfitGroup === right.sameOutfitGroup &&
+    left.pairedWith.length === right.pairedWith.length &&
+    left.pairedWith.every((value, index) => value === right.pairedWith[index]) &&
+    leftConflicts.length === rightConflicts.length &&
+    leftConflicts.every((value, index) => value === rightConflicts[index])
+  );
+}
+
+/**
+ * Rewrites references when an operation removes component identities. Explicit
+ * merge/assignment replacements keep peer links on the surviving identity;
+ * deletion to Unknown removes them. Pair/conflict edges are then made
+ * symmetric so a newly committed Revision cannot introduce a one-sided link.
+ */
+function rewriteRelationsAfterComponentRemoval(
+  components: readonly SemanticComponent[],
+  replacements: ReadonlyMap<string, string | null>,
+): SemanticComponent[] {
+  if (replacements.size === 0) return [...components];
+  const componentIds = new Set(
+    components.map((component) => component.instanceId),
+  );
+  const remap = (ownerId: string, referencedId: string): string | null => {
+    const replacement = replacements.has(referencedId)
+      ? replacements.get(referencedId)!
+      : referencedId;
+    return replacement !== null &&
+        replacement !== ownerId &&
+        componentIds.has(replacement)
+      ? replacement
+      : null;
+  };
+  const rewritten = components.map((component) => {
+    const attachedTo = component.relations.attachedTo === null
+      ? null
+      : remap(component.instanceId, component.relations.attachedTo);
+    const pairedWith = component.relations.pairedWith
+      .map((componentId) => remap(component.instanceId, componentId))
+      .filter((componentId): componentId is string => componentId !== null);
+    const conflictsWith = (component.relations.conflictsWith ?? [])
+      .map((componentId) => remap(component.instanceId, componentId))
+      .filter((componentId): componentId is string => componentId !== null);
+    return {
+      ...component,
+      relations: {
+        ...component.relations,
+        attachedTo,
+        pairedWith: [...new Set(pairedWith)].sort(compareIds),
+        ...(component.relations.conflictsWith !== undefined ||
+            conflictsWith.length > 0
+          ? { conflictsWith: [...new Set(conflictsWith)].sort(compareIds) }
+          : {}),
+      },
+    };
+  });
+  const byId = new Map(
+    rewritten.map((component) => [component.instanceId, component] as const),
+  );
+  const paired = new Map<string, Set<string>>();
+  const conflicts = new Map<string, Set<string>>();
+  for (const component of rewritten) {
+    paired.set(component.instanceId, new Set(component.relations.pairedWith));
+    conflicts.set(
+      component.instanceId,
+      new Set(component.relations.conflictsWith ?? []),
+    );
+  }
+  for (const component of rewritten) {
+    for (const peerId of paired.get(component.instanceId)!) {
+      if (byId.has(peerId)) paired.get(peerId)!.add(component.instanceId);
+    }
+    for (const peerId of conflicts.get(component.instanceId)!) {
+      if (byId.has(peerId)) conflicts.get(peerId)!.add(component.instanceId);
+    }
+  }
+  return rewritten.map((component) => ({
+    ...component,
+    relations: {
+      ...component.relations,
+      pairedWith: [...paired.get(component.instanceId)!].sort(compareIds),
+      ...(component.relations.conflictsWith !== undefined ||
+          conflicts.get(component.instanceId)!.size > 0
+        ? {
+            conflictsWith: [
+              ...conflicts.get(component.instanceId)!,
+            ].sort(compareIds),
+          }
+        : {}),
+    },
+  }));
 }
 
 function finalizeState(

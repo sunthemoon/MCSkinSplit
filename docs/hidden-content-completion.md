@@ -6,11 +6,12 @@ accessory. A Completion Proposal is an inference, not a recovery of the factual
 source artwork. It never changes a Revision until a user explicitly accepts one
 candidate.
 
-Status: **Complete for the M19 service boundary**. The deterministic core,
-persistence model, Job/API orchestration, immutable review assets, acceptance and
-rejection paths, and optional candidate-ID ranking contract are implemented and
-verified. The player-facing workspace belongs to M20, and default release remains
-gated by the M21 evaluation.
+Status: **Complete for the M19 service boundary and the feature-gated M20 player
+workspace**. The deterministic core, persistence model, Job/API orchestration,
+immutable review assets, acceptance/rejection paths, bounded manual candidate
+editing, explicit latent-Part publication, and optional candidate-ID ranking
+contract are implemented and verified. Default release remains gated by the M21
+evaluation.
 
 ## Workflow and authority
 
@@ -73,9 +74,10 @@ where the target already has visible support. Acceptance:
 - creates an immutable Completion Result that points to the latent Part;
 - leaves the Part unpublished, so it is excluded from normal Part-library lists.
 
-Publishing a latent result is a later, explicit append-only action. M19 does not
-expose that action through the public HTTP API, and it does not silently add a
-latent Part to a Bundle or the default Catalog.
+Publishing a latent result is a later, explicit append-only action. M20 exposes
+that action through a hash-bound public HTTP route, but never calls it
+automatically. Publication makes the accepted Part discoverable in normal Part
+library lists; it does not silently add the Part to a Bundle or Catalog.
 
 When `representation` is `auto`, the host chooses `skin_texel` if at least one
 safe target texel exists; otherwise it uses `latent_component`. The chosen
@@ -91,8 +93,9 @@ pixel into `source_visible`.
 The core also defines bounded manual candidate edits. Only pixels that were
 actually changed by a user receive intrinsic origin `manual_authored`, together
 with actor and operation identity; untouched inferred pixels remain
-`generated_completion`. The M19 HTTP surface does not expose the manual-candidate
-editor. That player-facing editing flow belongs to M20.
+`generated_completion`. M20 exposes this as an immutable derived candidate:
+the original host candidate and optional ranking are never rewritten, and the
+user must apply or cancel pending edits before accepting a candidate.
 
 For a latent Part, existing visible target pixels preserve their intrinsic origin
 and gain an immediate copy reference to the source Revision/component. Its
@@ -196,7 +199,6 @@ POST /api/completion-proposals/:proposalId/candidates/:candidateId/accept
   "expectedProposalHash": "sha256:...",
   "expectedEvidenceHash": "sha256:...",
   "expectedCandidateHash": "sha256:...",
-  "actorId": "local-player",
   "summary": "Accept hidden clothing candidate"
 }
 ```
@@ -212,7 +214,6 @@ POST /api/completion-proposals/:proposalId/reject
   "expectedSourceResultHash": "sha256:...",
   "expectedProposalHash": "sha256:...",
   "expectedEvidenceHash": "sha256:...",
-  "actorId": "local-player",
   "reason": "The continuation does not match this outfit"
 }
 ```
@@ -221,14 +222,57 @@ The first stored decision returns `201` with `changed: true`; an exact replay
 returns `200` with `changed: false`. Hash or state mismatches and conflicting
 decisions return `409`.
 
+Create an immutable, manually edited candidate before acceptance:
+
+```text
+POST /api/completion-proposals/:proposalId/candidates/:candidateId/edits
+```
+
+```json
+{
+  "expectedSourceResultHash": "sha256:...",
+  "expectedProposalHash": "sha256:...",
+  "expectedEvidenceHash": "sha256:...",
+  "expectedCandidateHash": "sha256:...",
+  "edits": [
+    { "type": "set_pixel", "pixelId": 1234, "rgba": [42, 57, 81, 255] },
+    { "type": "remove_pixel", "pixelId": 1235 }
+  ]
+}
+```
+
+The request accepts 1–256 unique, allowed-mask edits. An exact replay returns the
+same derived candidate with `changed: false`; `baseCandidateId` preserves the
+host-candidate relationship. A derived candidate is accepted with its own exact
+candidate hash through the normal acceptance route.
+
+Publish an accepted latent result explicitly:
+
+```text
+POST /api/completion-results/:resultId/publish
+```
+
+```json
+{
+  "expectedResultHash": "sha256:...",
+  "expectedPartId": "part_..."
+}
+```
+
+The first publication returns `201`; an exact repeat returns `200` with
+`changed: false`. `actorId` is optional on decision, edit, and publication
+requests and should be supplied only from a real trusted identity context.
+
 ## Product boundary
 
-M19 supplies the deterministic and auditable service boundary only. It does not
-add a default Studio entry, automatically run after semantic analysis, publish a
-latent Part, or claim that an inferred garment or hairstyle is authentic.
+M19 supplies the deterministic and auditable service boundary. M20 adds the
+feature-gated player review/editor, exact source/candidate/mask comparison,
+bounded candidate editing, explicit latent-Part publication, and distinct
+original/classification-repaired/accepted-completion result choices. It does not
+automatically run Completion after semantic analysis, auto-accept a candidate,
+auto-publish a Part, or claim that an inferred garment or hairstyle is authentic.
 
-M20 is responsible for the feature-gated player review/editor experience and for
-showing original, classification-repaired, and accepted-completion variants in a
-clear workflow. M21 must evaluate conservative, mirror, pattern, and AI-ranked
-candidates against hidden ground truth before Completion can enter the default
-player path.
+M21 evaluates conservative, mirror, pattern, and AI-ranked candidates against
+hidden ground truth. The offline host-v2 gate passes, but the combined release
+report is still incomplete; Completion therefore remains absent from the default
+player path unless `VITE_ENABLE_COMPLETION_WORKSPACE=true` is set explicitly.

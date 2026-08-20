@@ -12,6 +12,7 @@ import type {
   CompletionCandidateStrategy,
   CompletionConfidence,
   CompletionPixelOriginMode,
+  CompletionCandidateEdit,
   SemanticComponent,
   SemanticPixelSpan,
   SemanticState,
@@ -193,10 +194,22 @@ export interface RevisionMutationResult {
   readonly project: SkinProject;
   readonly branch: SkinBranch;
   readonly revision: SkinRevision;
+  readonly generatedComponentId?: string;
 }
 
+export type ManualRevisionSemanticOperation =
+  ManualSemanticOperation extends infer Operation
+    ? Operation extends { readonly target: infer Target }
+      ? Omit<Operation, "target"> & {
+          readonly target: Omit<Target, "instanceId"> & {
+            readonly instanceId?: string;
+          };
+        }
+      : Operation
+    : never;
+
 export interface ManualRevisionOperationInput {
-  readonly operation: ManualSemanticOperation;
+  readonly operation: ManualRevisionSemanticOperation;
   readonly branchId?: string;
   readonly actorId?: string;
   readonly summary?: string;
@@ -749,6 +762,7 @@ export interface StoredCompletionCandidate {
   readonly proposalId: string;
   readonly representation: CompletionTargetRepresentation;
   readonly strategy: CompletionCandidateStrategy;
+  readonly baseCandidateId: string | null;
   readonly confidence: CompletionConfidence;
   readonly originMode: CompletionPixelOriginMode | "mixed";
   readonly pixelCount: number;
@@ -909,8 +923,33 @@ export interface CompletionDecisionOutcome {
   readonly changed: boolean;
 }
 
+export interface EditCompletionCandidateInput {
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string;
+  readonly actorId?: string;
+  readonly edits: readonly CompletionCandidateEdit[];
+}
+
+export interface CompletionCandidateEditOutcome {
+  readonly detail: CompletionProposalDetail;
+  readonly changed: boolean;
+  readonly editedCandidateId: string;
+}
+
 export interface PublishCompletionResultInput {
   readonly actorId?: string;
+}
+
+export interface PublishCompletionResultRequest extends PublishCompletionResultInput {
+  readonly expectedResultHash: string;
+  readonly expectedPartId: string;
+}
+
+export interface CompletionResultPublicationOutcome {
+  readonly changed: boolean;
+  readonly result: CompletionResult;
 }
 
 export type RevisionIdKind =
@@ -925,7 +964,8 @@ export type RevisionIdKind =
   | "part_edit_revision"
   | "composition"
   | "composition_layer"
-  | "completion_result";
+  | "completion_result"
+  | "component";
 
 export interface RevisionStoreOptions {
   readonly dataDirectory: string;

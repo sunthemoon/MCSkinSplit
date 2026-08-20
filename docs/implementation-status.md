@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 ## Milestones
 
@@ -26,6 +26,8 @@ Last updated: 2026-08-19
 | M17 Candidate Evidence Graph and visual grounding | Complete | 344 automated checks, deterministic Wide/Slim graph/grounding coverage, real-provider target run, and Studio browser confirmation |
 | M18 per-pixel origin and Part 2.0 | Complete | Canonical origin propagation, seven-file Part round trip, migration upgrade/tamper tests, full verification, and browser confirmation |
 | M19 independent hidden-content Completion Proposal core | Complete | Deterministic candidates, immutable proposal/decision/result storage, optional ID-only ranking, accept/reject integration, full verification, and isolated service evidence |
+| M20 player-first workspace and efficient correction | Complete | Four-step player IA, feature-gated Completion review/edit/publish, host-generated component IDs, responsive keyboard/touch editing, 11 deterministic browser scenarios, and full verification |
+| M21 Completion evaluation and release gate | In progress | Candidate algorithm v2 passes the offline synthetic gate; AI ordering evidence and the combined release report remain incomplete, so default release stays disabled |
 
 ## M0 baseline
 
@@ -1300,3 +1302,111 @@ The public service contract and route shapes are documented in
 - M20 owns the feature-gated player review/editor and simple workflow integration.
   M21 owns hidden-ground-truth evaluation and the release gate for the default
   player path.
+
+## M20 implementation status
+
+Status: **Complete**. The player-facing workflow is implemented and verified,
+while Completion remains explicitly feature-gated until M21 passes its release
+criteria.
+
+- The default Studio presents four ordinary-player steps: Import, Smart
+  analysis, Check/correct, and Save/export. History, Catalog, Part Repair,
+  Composition, provider configuration, and raw audit details remain available
+  through Advanced Studio instead of becoming prerequisites for the first task.
+- Check/correct uses a component-first three-column layout with component
+  hide/Solo controls, 2D/3D switching, paint/rectangle/same-color/surface
+  selection, local undo/redo, mirror/seam expansion preview, Host-generated
+  component identities, exact texture/ownership/category comparison, and
+  one-Revision relation updates.
+- Save/export binds the selected original, classification-repaired, or accepted
+  Completion result explicitly. It offers only representations that the selected
+  result can support; a latent Part is never labelled as a single-layer skin PNG,
+  and a complete-category Bundle remains disabled when no compatible Bundle can
+  include the latent Part honestly.
+- `VITE_ENABLE_COMPLETION_WORKSPACE=true` enables the experimental Completion
+  review workspace. It shows source, candidate texture, write mask, and generated
+  mask; supports zero candidates, advisory AI defer/order, explicit keep/reject,
+  and never starts, accepts, or publishes automatically.
+- Migration 016 and the RevisionStore add immutable derived-candidate edits and
+  explicit latent-result publication. Edits bind source/proposal/evidence/base
+  candidate hashes, stay inside the allowed mask, preserve untouched origins,
+  and mark only effective user deltas `manual_authored`.
+- The public API exposes candidate editing and latent publication, permits the
+  Host to materialize collision-safe component IDs for assign/merge/split, and
+  adds canonical relation replacement with symmetric paired/conflict updates and
+  directional attachment semantics.
+- README now starts with the Chinese product explanation and keeps the English
+  explanation below it. It includes three real application screenshots plus two
+  reproducible Mermaid diagrams rendered through Kroki; `PRODUCT.md` records the
+  selected product direction, first-version scope, boundaries, and open questions.
+
+## M20 verification status
+
+- `pnpm verify` passed on 2026-08-20 with deterministic fixtures unchanged, every
+  workspace typecheck, **485 tests**, and all production builds. Package totals
+  were `skin-core` 98, `skin-compositor` 8, `web` 158,
+  `skin-analysis-pack` 43, `ai-provider` 48, `skin-revision` 72,
+  `ai-worker` 40, and `api` 18. The existing Vite >500 kB chunk advisory is
+  unchanged.
+- `pnpm verify:browser` passed **11/11** deterministic Chromium scenarios in an
+  isolated data directory with the replay provider. Coverage includes the flag-off
+  no-request boundary, four responsive widths, hash and keyboard navigation,
+  semantic recognition, component selection/Host IDs/relations, Completion
+  accept/reject/zero-candidate flows, manual derived-candidate acceptance, latent
+  Part publication, Blob URL release, and touch input.
+- README/PRODUCT local links, both Kroki SVG documents, screenshot formats and
+  dimensions, and scoped whitespace were checked. The screenshot API and Vite
+  processes used for documentation were stopped, and their isolated temporary
+  data directory was removed.
+
+## M20 boundaries
+
+- Completion stays absent from the default player path unless its explicit Vite
+  flag is enabled. M20 verification does not override the M21 release gate.
+- Real provider and WebGL smoke tests remain optional and separate from the
+  deterministic replay-based browser gate.
+- Publishing a latent Part is explicit; creating a complete Bundle from arbitrary
+  Part IDs is not implemented, because that would require a separate complete-set
+  derivation and validation contract.
+
+## M21 implementation status
+
+Status: **In progress**. The deterministic Host v2 offline gate passes, but the
+combined release gate remains failed and the runtime contract is unchanged.
+
+- `skin-core` keeps `completion-candidates-v1` as the published runtime generator
+  and adds an explicit side-by-side `completion-candidates-v2` generator. Existing
+  v1 evidence, hashes, candidate IDs, persistence, and retries remain stable.
+- Host v2 is more conservative around visible transparent boundaries and keeps
+  neighboring-face evidence distinct from same/opposite-surface strategies. It
+  does not silently change the migration-015/016 runtime algorithm contract.
+- `skin-analysis-pack` adds a pure offline evaluator and 12-fixture Wide/Slim
+  matrix. The callback receives only the occluded public snapshot; hidden target
+  colors enter only after candidate generation in the independent scorer.
+- The evaluator reports generated-mask escape, hidden-pixel recall, pixel
+  precision, RGBA mean absolute error, exact-color rate, per-strategy oracle
+  acceptability, negative safety, and optional exact-ID ranking quality. Oracle
+  acceptability is labelled synthetic evaluation evidence, never real-user truth.
+
+## M21 verification status
+
+- Host v2 emits 16 candidates across the fixture matrix with zero generated-mask
+  escape, 8/9 positive fixtures containing an oracle-acceptable candidate, and
+  3/3 negative fixtures remaining safe. The offline gate therefore passes.
+- One intentionally ambiguous mixed-transparent positive fixture still has no
+  oracle-acceptable candidate. The release report remains failed because AI
+  ordering coverage is not evaluated and the default evaluator invocation has not
+  been supplied with the separately passing real-browser criterion.
+- The focused evaluator suite passed 5/5, the complete
+  `skin-analysis-pack` suite passed 43/43, and the evaluator is included in the
+  successful 485-test repository verification above.
+
+## M21 boundaries
+
+- Host v2 is evaluation-only. Promoting it to runtime requires an explicit
+  versioned persistence/API migration and new compatibility tests; M21 does not
+  mutate stored v1 proposals or reuse their hashes under new semantics.
+- Completion cannot enter the default player path until the combined report has
+  real exact-ID ordering evidence, the browser criterion is supplied to the same
+  gate, all required thresholds pass, and the feature-flag default is changed in
+  a separately reviewed release decision.

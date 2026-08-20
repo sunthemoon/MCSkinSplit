@@ -46,6 +46,11 @@ export interface VerifiedCompletionCandidateStorage {
   >;
 }
 
+export interface CompletionCandidateWriteResult {
+  readonly storage: VerifiedCompletionCandidateStorage;
+  readonly created: boolean;
+}
+
 export interface VerifiedCompletionProposalStorage {
   readonly directory: string;
   readonly files: Readonly<
@@ -168,8 +173,63 @@ export class CompletionStorage {
     return { candidateId, directory, files };
   }
 
+  async writeCandidate(
+    proposalId: string,
+    input: CompletionCandidateStorageInput,
+  ): Promise<CompletionCandidateWriteResult> {
+    assertSafeId("completion proposal", proposalId);
+    assertSafeId("completion candidate", input.candidateId);
+    const candidatesDirectory = resolveWithin(
+      this.proposalDirectory(proposalId),
+      "candidates",
+    );
+    await mkdir(candidatesDirectory, { recursive: true });
+    const finalDirectory = this.candidateDirectory(
+      proposalId,
+      input.candidateId,
+    );
+    const temporaryDirectory = resolveWithin(
+      candidatesDirectory,
+      `.${input.candidateId}.${randomUUID()}.tmp`,
+    );
+    await mkdir(temporaryDirectory, { recursive: false });
+    try {
+      for (const fileName of COMPLETION_CANDIDATE_FILE_NAMES) {
+        await writeDurableFile(
+          resolveWithin(temporaryDirectory, fileName),
+          input.files[fileName],
+        );
+      }
+      await rename(temporaryDirectory, finalDirectory);
+      return {
+        storage: await this.readCandidate(proposalId, input.candidateId),
+        created: true,
+      };
+    } catch (error) {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+      try {
+        const storage = await this.readCandidate(proposalId, input.candidateId);
+        if (COMPLETION_CANDIDATE_FILE_NAMES.every(
+          (fileName) => storage.files[fileName].sha256 === sha256(input.files[fileName]),
+        )) {
+          return { storage, created: false };
+        }
+      } catch {
+        // Preserve the original atomic-write error when no exact replay exists.
+      }
+      throw error;
+    }
+  }
+
   async removeNewProposal(proposalId: string): Promise<void> {
     await rm(this.proposalDirectory(proposalId), { recursive: true, force: true });
+  }
+
+  async removeNewCandidate(proposalId: string, candidateId: string): Promise<void> {
+    await rm(this.candidateDirectory(proposalId, candidateId), {
+      recursive: true,
+      force: true,
+    });
   }
 
   private async readFile<Name extends string>(

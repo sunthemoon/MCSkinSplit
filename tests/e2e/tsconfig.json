@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node", "@playwright/test"]
+  },
+  "include": [
+    "../../apps/web/vite.e2e.config.ts",
+    "../../playwright.config.ts",
+    "./**/*.ts"
+  ]
+}

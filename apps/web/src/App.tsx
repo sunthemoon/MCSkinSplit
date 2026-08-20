@@ -4,10 +4,8 @@ import {
   categoryBelongsToAggregate,
   encodeSkinPng,
   getSkinLayout,
-  pixelIdsToSpans,
   type ArmType,
   type ArmTypeAssessment,
-  type ManualSemanticOperation,
   type RgbaImage,
   type SemanticCategory,
 } from "@mc-skin-split/skin-core";
@@ -25,9 +23,21 @@ import { AtlasCanvas, type PixelView } from "./components/AtlasCanvas";
 import { AnalyzedSkinCatalog } from "./components/AnalyzedSkinCatalog";
 import { ComponentRepairStudio } from "./components/ComponentRepairStudio";
 import { CompositionRestorationPanel } from "./components/CompositionRestorationPanel";
+import { HiddenContentCompletionWorkspace } from "./components/HiddenContentCompletionWorkspace";
 import { LibraryLifecycleControls } from "./components/LibraryLifecycleControls";
 import { LibraryToolbar } from "./components/LibraryToolbar";
 import { PartBundleShelf } from "./components/PartBundleShelf";
+import {
+  PlayerResultWorkspace,
+  type PlayerCompletionResultSnapshot,
+  type PlayerResultSelection,
+} from "./components/PlayerResultWorkspace";
+import {
+  PLAYER_WORKFLOW_HASHES,
+  PlayerWorkflowNav,
+  resolvePlayerWorkflowStepFromHash,
+  type PlayerWorkflowStep,
+} from "./components/PlayerWorkflowNav";
 import {
   PixelOriginSummaryPanel,
   partOriginDetailLabel,
@@ -36,7 +46,11 @@ import {
 import { SemanticAiEventLog } from "./components/SemanticAiEventLog";
 import { SemanticAiJobProgress } from "./components/SemanticAiJobProgress";
 import { SemanticFollowupReview } from "./components/SemanticFollowupReview";
-import { WorkflowSectionNav } from "./components/WorkflowSectionNav";
+import {
+  WORKFLOW_SECTIONS,
+  WorkflowSectionNav,
+  resolveWorkflowSectionIdFromHash,
+} from "./components/WorkflowSectionNav";
 import {
   SkinPreview,
   type PreviewMotion,
@@ -88,6 +102,7 @@ import {
   partMannequinUrl,
   partPreviewUrl,
   previewRevisionPart,
+  publishCompletionResult,
   restorePart,
   restorePartBundle,
   restoreAnalyzedSkin,
@@ -105,9 +120,11 @@ import {
   type ApiAiJobDetail,
   type ApiAiJobStatus,
   type ApiAiAnalysisOptions,
+  type ApiManualSemanticOperation,
   type ApiBranch,
   type ApiAnalyzedSkin,
   type ApiAnalyzedSkinGroup,
+  type ApiCompletionProposalDetail,
   type ApiCompositionDetail,
   type ApiCompositionRestorationCandidates,
   type ApiProject,
@@ -136,8 +153,47 @@ import {
   toggleRestorationCandidateId,
   type RestorationTargetMode,
 } from "./lib/compositionRestoration";
+import {
+  completionResultAppliesToRevision,
+  findCompletionCatalogContext,
+  isCompletionWorkspaceEnabled,
+  type CompletionCatalogContext,
+} from "./lib/completionWorkspace";
+import {
+  applySelectionPixels,
+  compareSemanticRevisionSnapshots,
+  commitSemanticSelection,
+  createSemanticSelectionHistory,
+  mirroredSelectionPixelIds,
+  redoSemanticSelection,
+  seamExpansionPixelIds,
+  semanticRevisionDiffLabel,
+  semanticRevisionDiffPixelIds,
+  semanticSelectionSpans,
+  undoSemanticSelection,
+  type SemanticCanvasViewMode,
+  type SemanticRevisionDiff,
+  type SemanticRevisionSnapshot,
+  type SemanticSelectionTool,
+} from "./lib/semanticSelectionTools";
 
 type ModelChoice = "auto" | ArmType;
+
+interface SemanticRelationDraft {
+  readonly attachedTo: string | null;
+  readonly pairedWith: readonly string[];
+  readonly sameOutfitGroup: string;
+  readonly conflictsWith: readonly string[];
+}
+
+function emptySemanticRelationDraft(): SemanticRelationDraft {
+  return {
+    attachedTo: null,
+    pairedWith: [],
+    sameOutfitGroup: "",
+    conflictsWith: [],
+  };
+}
 
 interface SkinFixture {
   readonly id: string;
@@ -214,6 +270,9 @@ const SKIN_FIXTURES: readonly SkinFixture[] = [
 
 const DEFAULT_FIXTURE = SKIN_FIXTURES[0]!;
 const HISTORY_PROJECT_KEY = "mc-skin-split.active-project";
+const COMPLETION_WORKSPACE_ENABLED = isCompletionWorkspaceEnabled(
+  import.meta.env.VITE_ENABLE_COMPLETION_WORKSPACE,
+);
 
 const operationLabels: Readonly<Record<string, string>> = {
   import: "IMPORT",
@@ -227,6 +286,7 @@ const operationLabels: Readonly<Record<string, string>> = {
   apply_part: "APPLY PART",
   compose: "COMPOSE",
   palette_change: "PALETTE",
+  completion_accept: "COMPLETION",
 };
 
 const previewLabels: Record<PreviewState, string> = {
@@ -267,7 +327,61 @@ const aiFocus = SEMANTIC_CATEGORIES.filter(
   (category) => category !== "unknown",
 );
 
+function initialStudioMode(): "player" | "advanced" {
+  if (typeof window === "undefined") return "player";
+  return resolveWorkflowSectionIdFromHash(window.location.hash)
+    ? "advanced"
+    : "player";
+}
+
+function initialPlayerWorkflowStep(): PlayerWorkflowStep {
+  if (typeof window === "undefined") return "import";
+  if (
+    COMPLETION_WORKSPACE_ENABLED &&
+    window.location.hash === "#workspace-completion"
+  ) {
+    return "review";
+  }
+  return resolvePlayerWorkflowStepFromHash(window.location.hash) ?? "import";
+}
+
+function pushWorkspaceHash(hash: string): void {
+  if (typeof window === "undefined" || window.location.hash === hash) return;
+  const nextUrl = new URL(window.location.href);
+  nextUrl.hash = hash.slice(1);
+  window.history.pushState(window.history.state, "", nextUrl);
+}
+
+function scheduleWorkspaceFocus(
+  findTarget: () => HTMLElement | null,
+): void {
+  if (typeof window === "undefined") return;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const target = findTarget();
+      if (!target) return;
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({
+        behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+        block: "start",
+      });
+    });
+  });
+}
+
 export function App() {
+  const [studioMode, setStudioMode] = useState<"player" | "advanced">(() =>
+    initialStudioMode(),
+  );
+  const [playerWorkflowStep, setPlayerWorkflowStep] =
+    useState<PlayerWorkflowStep>(() => initialPlayerWorkflowStep());
+  const [playerCompletionResult, setPlayerCompletionResult] =
+    useState<PlayerCompletionResultSnapshot | null>(null);
+  const [playerResultSelection, setPlayerResultSelection] =
+    useState<PlayerResultSelection>("current");
+  const [completionPublishBusy, setCompletionPublishBusy] = useState(false);
   const [activeSkin, setActiveSkin] = useState<ActiveSkin | null>(null);
   const [modelChoice, setModelChoice] = useState<ModelChoice>("slim");
   const [pixelView, setPixelView] = useState<PixelView>("atlas");
@@ -286,14 +400,38 @@ export function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [segmentation, setSegmentation] = useState<ApiSegmentation | null>(null);
   const [revisionOrigin, setRevisionOrigin] = useState<ApiRevisionOrigin | null>(null);
-  const [draftPixelIds, setDraftPixelIds] = useState<readonly number[]>([]);
+  const [draftSelectionHistory, setDraftSelectionHistory] = useState(
+    createSemanticSelectionHistory,
+  );
+  const draftPixelIds = draftSelectionHistory.present;
+  const [semanticSelectionTool, setSemanticSelectionTool] =
+    useState<SemanticSelectionTool>("brush");
+  const [semanticCanvasViewMode, setSemanticCanvasViewMode] =
+    useState<SemanticCanvasViewMode>("texture");
+  const [semanticRevisionDiff, setSemanticRevisionDiff] =
+    useState<SemanticRevisionDiff | null>(null);
+  const [semanticRevisionDiffStatus, setSemanticRevisionDiffStatus] =
+    useState<"none" | "loading" | "ready" | "unavailable">("none");
+  const [semanticMiddleView, setSemanticMiddleView] = useState<"2d" | "3d">("2d");
+  const [hiddenSemanticComponentIds, setHiddenSemanticComponentIds] =
+    useState<readonly string[]>([]);
+  const [soloSemanticComponentId, setSoloSemanticComponentId] =
+    useState<string | null>(null);
+  const [semanticSelectionPreview, setSemanticSelectionPreview] = useState<{
+    readonly kind: "mirror" | "seam";
+    readonly pixelIds: readonly number[];
+  } | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
+  const [componentTargetMode, setComponentTargetMode] =
+    useState<"selected" | "new">("new");
   const [checkedComponentIds, setCheckedComponentIds] = useState<readonly string[]>([]);
   const [componentId, setComponentId] = useState("hair.main");
   const [componentName, setComponentName] = useState("主头发");
   const [componentCategory, setComponentCategory] =
     useState<SemanticCategory>("hair");
   const [componentSubtype, setComponentSubtype] = useState("");
+  const [semanticRelationDraft, setSemanticRelationDraft] =
+    useState<SemanticRelationDraft>(emptySemanticRelationDraft);
   const [semanticBusy, setSemanticBusy] = useState(false);
   const [partLibrary, setPartLibrary] = useState<readonly ApiPart[]>([]);
   const [partBundles, setPartBundles] = useState<readonly ApiPartBundle[]>([]);
@@ -387,6 +525,94 @@ export function App() {
   const libraryLifecycleBusyRef = useRef(false);
   const catalogLifecycleBusyRef = useRef(new Set<string>());
   const catalogRefreshRequestRef = useRef(0);
+  const lastAdvancedSectionIdRef = useRef(
+    typeof window === "undefined"
+      ? WORKFLOW_SECTIONS[0]!.id
+      : resolveWorkflowSectionIdFromHash(window.location.hash) ??
+          WORKFLOW_SECTIONS[0]!.id,
+  );
+
+  const updateDraftSelection = useCallback((pixelIds: readonly number[]) => {
+    setDraftSelectionHistory((current) =>
+      commitSemanticSelection(current, pixelIds));
+    setSemanticSelectionPreview(null);
+  }, []);
+
+  const clearDraftSelection = useCallback(() => {
+    setDraftSelectionHistory(createSemanticSelectionHistory());
+    setSemanticSelectionPreview(null);
+  }, []);
+
+  const focusPlayerStep = useCallback((step: PlayerWorkflowStep) => {
+    scheduleWorkspaceFocus(() => {
+      if (step === "save") {
+        return document.querySelector<HTMLElement>(
+          "[data-player-result-surface]",
+        ) ?? document.getElementById("workspace-preview");
+      }
+      if (step === "review") {
+        return document.getElementById("workspace-semantic");
+      }
+      return document.getElementById(
+        step === "import" ? "workspace-preview" : "workspace-ai",
+      );
+    });
+  }, []);
+
+  const navigateToPlayerStep = useCallback((step: PlayerWorkflowStep) => {
+    setStudioMode("player");
+    setPlayerWorkflowStep(step);
+    pushWorkspaceHash(PLAYER_WORKFLOW_HASHES[step]);
+    focusPlayerStep(step);
+  }, [focusPlayerStep]);
+
+  const navigateToAdvancedStudio = useCallback(() => {
+    const sectionId = lastAdvancedSectionIdRef.current;
+    setStudioMode("advanced");
+    pushWorkspaceHash(`#${sectionId}`);
+    scheduleWorkspaceFocus(() => document.getElementById(sectionId));
+  }, []);
+
+  useEffect(() => {
+    const followWorkspaceLocation = () => {
+      const advancedSectionId = resolveWorkflowSectionIdFromHash(
+        window.location.hash,
+      );
+      if (advancedSectionId) {
+        lastAdvancedSectionIdRef.current = advancedSectionId;
+        setStudioMode("advanced");
+        scheduleWorkspaceFocus(() =>
+          document.getElementById(advancedSectionId));
+        return;
+      }
+      if (
+        COMPLETION_WORKSPACE_ENABLED &&
+        window.location.hash === "#workspace-completion"
+      ) {
+        setStudioMode("player");
+        setPlayerWorkflowStep("review");
+        scheduleWorkspaceFocus(() =>
+          document.getElementById("workspace-completion"));
+        return;
+      }
+      const playerStep = resolvePlayerWorkflowStepFromHash(
+        window.location.hash,
+      );
+      if (playerStep) {
+        setStudioMode("player");
+        setPlayerWorkflowStep(playerStep);
+        focusPlayerStep(playerStep);
+      }
+    };
+
+    followWorkspaceLocation();
+    window.addEventListener("hashchange", followWorkspaceLocation);
+    window.addEventListener("popstate", followWorkspaceLocation);
+    return () => {
+      window.removeEventListener("hashchange", followWorkspaceLocation);
+      window.removeEventListener("popstate", followWorkspaceLocation);
+    };
+  }, [focusPlayerStep]);
 
   const releaseObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -456,8 +682,10 @@ export function App() {
         });
         setSelectedRevisionId(null);
         setSegmentation(null);
+        setSemanticRevisionDiff(null);
+        setSemanticRevisionDiffStatus("none");
         setRevisionOrigin(null);
-        setDraftPixelIds([]);
+        clearDraftSelection();
         setActiveComponentId(null);
         setCheckedComponentIds([]);
         setPartPreview(null);
@@ -474,7 +702,7 @@ export function App() {
         }
       }
     },
-    [releaseObjectUrl],
+    [clearDraftSelection, releaseObjectUrl],
   );
 
   const activateRevision = useCallback(
@@ -497,13 +725,31 @@ export function App() {
       setHistoryBusy(true);
       setHistoryError(null);
       setRevisionOrigin(null);
+      setSemanticRevisionDiff(null);
+      setSemanticRevisionDiffStatus(
+        revision.parentRevisionId ? "loading" : "none",
+      );
       setNotice(`正在校验并载入 ${revision.branchName} #${revision.sequence}`);
 
       try {
-        const [skinBytes, segmentation, origin] = await Promise.all([
+        const parentSnapshotPromise: Promise<SemanticRevisionSnapshot | null> =
+          revision.parentRevisionId
+            ? Promise.all([
+                loadRevisionSkin(revision.parentRevisionId),
+                loadRevisionSegmentation(revision.parentRevisionId),
+              ])
+                .then(([parentSkinBytes, parentSegmentation]) => ({
+                  image: decodeMinecraftSkinBytes(parentSkinBytes).image,
+                  armType: parentSegmentation.source.armType,
+                  components: parentSegmentation.components,
+                }))
+                .catch(() => null)
+            : Promise.resolve(null);
+        const [skinBytes, segmentation, origin, parentSnapshot] = await Promise.all([
           loadRevisionSkin(revision.id),
           loadRevisionSegmentation(revision.id),
           loadRevisionOrigin(revision.id),
+          parentSnapshotPromise,
         ]);
         const decoded = decodeMinecraftSkinBytes(skinBytes);
         if (requestId !== requestIdRef.current) {
@@ -526,8 +772,29 @@ export function App() {
           url: nextUrl,
         });
         setSegmentation(segmentation);
+        if (parentSnapshot) {
+          try {
+            setSemanticRevisionDiff(compareSemanticRevisionSnapshots(
+              parentSnapshot,
+              {
+                image: decoded.image,
+                armType: segmentation.source.armType,
+                components: segmentation.components,
+              },
+            ));
+            setSemanticRevisionDiffStatus("ready");
+          } catch {
+            setSemanticRevisionDiff(null);
+            setSemanticRevisionDiffStatus("unavailable");
+          }
+        } else {
+          setSemanticRevisionDiff(null);
+          setSemanticRevisionDiffStatus(
+            revision.parentRevisionId ? "unavailable" : "none",
+          );
+        }
         setRevisionOrigin(origin);
-        setDraftPixelIds([]);
+        clearDraftSelection();
         setActiveComponentId((current) =>
           segmentation.components.some(
             (component) => component.instanceId === current,
@@ -553,6 +820,8 @@ export function App() {
       } catch (error) {
         if (requestId === requestIdRef.current) {
           const message = error instanceof Error ? error.message : String(error);
+          setSemanticRevisionDiff(null);
+          setSemanticRevisionDiffStatus("unavailable");
           setHistoryError(message);
           setNotice(`Revision 载入失败：${message}`);
         }
@@ -564,7 +833,7 @@ export function App() {
         }
       }
     },
-    [releaseObjectUrl],
+    [clearDraftSelection, releaseObjectUrl],
   );
 
   const refreshHistory = useCallback(
@@ -1033,6 +1302,8 @@ export function App() {
       const requestId = ++requestIdRef.current;
       setIsLoadingSkin(true);
       setRevisionOrigin(null);
+      setSemanticRevisionDiff(null);
+      setSemanticRevisionDiffStatus("none");
       setNotice(`正在解码 ${file.name}`);
 
       try {
@@ -1082,6 +1353,27 @@ export function App() {
   const selectedRevision = historyRevisions.find(
     (revision) => revision.id === selectedRevisionId,
   );
+  const activeSemanticDiffPixelIds = semanticRevisionDiff
+    ? semanticRevisionDiffPixelIds(
+        semanticRevisionDiff,
+        semanticCanvasViewMode,
+      )
+    : [];
+  const completionCatalogContext = useMemo(
+    () => findCompletionCatalogContext(analyzedSkins, selectedRevisionId),
+    [analyzedSkins, selectedRevisionId],
+  );
+  const activePlayerCompletionResult =
+    playerCompletionResult !== null &&
+    historyProject !== null &&
+    playerCompletionResult.detail.proposal.projectId === historyProject.id &&
+    completionResultAppliesToRevision(
+      playerCompletionResult.detail,
+      playerCompletionResult.catalogContext,
+      selectedRevisionId,
+    )
+      ? playerCompletionResult
+      : null;
   const activeComponent = segmentation?.components.find(
     (component) => component.instanceId === activeComponentId,
   );
@@ -1119,6 +1411,25 @@ export function App() {
   useEffect(() => {
     setRemoveComponentArmedId(null);
   }, [selectedRevisionId, activeComponentId]);
+  useEffect(() => {
+    const componentIds = new Set(
+      segmentation?.components.map((component) => component.instanceId) ?? [],
+    );
+    setHiddenSemanticComponentIds((current) =>
+      current.filter((componentId) => componentIds.has(componentId)));
+    setSoloSemanticComponentId((current) =>
+      current && componentIds.has(current) ? current : null);
+    setSemanticSelectionPreview(null);
+  }, [segmentation?.revisionId]);
+  useEffect(() => {
+    if (!activeComponent || componentTargetMode !== "selected") return;
+    setSemanticRelationDraft({
+      attachedTo: activeComponent.relations.attachedTo,
+      pairedWith: activeComponent.relations.pairedWith,
+      sameOutfitGroup: activeComponent.relations.sameOutfitGroup ?? "",
+      conflictsWith: activeComponent.relations.conflictsWith ?? [],
+    });
+  }, [activeComponent, componentTargetMode]);
   useEffect(() => {
     setCompositionPartId((current) =>
       filteredCompositionParts.some((part) => part.id === current)
@@ -1562,14 +1873,23 @@ export function App() {
     }
   };
 
-  const semanticTarget = () => {
+  const semanticTarget = (forceHostGenerated = false) => {
     const instanceId = componentId.trim();
     const displayName = componentName.trim();
-    if (!instanceId || !displayName) {
-      throw new Error("组件 ID 与名称不能为空");
+    if (!displayName) {
+      throw new Error("组件名称不能为空");
+    }
+    if (studioMode === "advanced" && !instanceId) {
+      throw new Error("高级工作室中的组件 ID 不能为空");
     }
     return {
-      instanceId,
+      ...(studioMode === "advanced"
+        ? { instanceId }
+        : !forceHostGenerated &&
+            componentTargetMode === "selected" &&
+            activeComponent
+          ? { instanceId: activeComponent.instanceId }
+          : {}),
       displayName,
       category: componentCategory,
       ...(componentSubtype.trim()
@@ -1579,7 +1899,7 @@ export function App() {
   };
 
   const commitSemanticOperation = async (
-    operation: ManualSemanticOperation,
+    operation: ApiManualSemanticOperation,
     successMessage: string,
   ) => {
     if (!selectedRevision) {
@@ -1593,9 +1913,14 @@ export function App() {
         operation,
         { branchId: selectedRevision.branchId, summary: successMessage },
       );
-      setDraftPixelIds([]);
+      clearDraftSelection();
       setCheckedComponentIds([]);
       await refreshHistory(result.project.id, result.revision.id);
+      if (result.generatedComponentId) {
+        setActiveComponentId(result.generatedComponentId);
+        setComponentId(result.generatedComponentId);
+        setComponentTargetMode("selected");
+      }
       setNotice(
         `${successMessage} · 已创建 ${result.branch.name} #${result.revision.sequence}`,
       );
@@ -1613,12 +1938,16 @@ export function App() {
       setNotice("先在语义 Atlas 上选择至少 1 个有效像素");
       return;
     }
+    if (!segmentation) {
+      setNotice("当前版本的语义布局尚未载入");
+      return;
+    }
     try {
       void commitSemanticOperation(
         {
           type: "assign_pixels",
           target: semanticTarget(),
-          spans: pixelIdsToSpans(draftPixelIds, layout),
+          spans: semanticSelectionSpans(draftPixelIds, segmentation.source.armType),
         },
         `分类 ${draftPixelIds.length} 个像素`,
       );
@@ -1629,15 +1958,19 @@ export function App() {
 
   const unassignDraftPixels = () => {
     if (draftPixelIds.length === 0) {
-      setNotice("先选择要退回 unknown 的已分类像素");
+      setNotice("先选择要退回未分类的已分类像素");
+      return;
+    }
+    if (!segmentation) {
+      setNotice("当前版本的语义布局尚未载入");
       return;
     }
     void commitSemanticOperation(
       {
         type: "unassign_pixels",
-        spans: pixelIdsToSpans(draftPixelIds, layout),
+        spans: semanticSelectionSpans(draftPixelIds, segmentation.source.armType),
       },
-      `标记 ${draftPixelIds.length} 个像素为 unknown`,
+      `标记 ${draftPixelIds.length} 个像素为未分类`,
     );
   };
 
@@ -1646,13 +1979,17 @@ export function App() {
       setNotice("拆分需要先选中来源组件，并在 Atlas 选择其部分像素");
       return;
     }
+    if (!segmentation) {
+      setNotice("当前版本的语义布局尚未载入");
+      return;
+    }
     try {
       void commitSemanticOperation(
         {
           type: "split_component",
           sourceComponentId: activeComponent.instanceId,
-          target: semanticTarget(),
-          spans: pixelIdsToSpans(draftPixelIds, layout),
+          target: semanticTarget(true),
+          spans: semanticSelectionSpans(draftPixelIds, segmentation.source.armType),
         },
         `从 ${activeComponent.displayName} 拆分新组件`,
       );
@@ -1671,7 +2008,7 @@ export function App() {
         {
           type: "merge_components",
           componentIds: checkedComponentIds,
-          target: semanticTarget(),
+          target: semanticTarget(true),
         },
         `合并 ${checkedComponentIds.length} 个组件`,
       );
@@ -1706,7 +2043,7 @@ export function App() {
     if (removeComponentArmedId !== activeComponent.instanceId) {
       setRemoveComponentArmedId(activeComponent.instanceId);
       setNotice(
-        `再次确认后，${activeComponent.displayName} 的全部像素将退回 unknown；旧 Revision 不会被改写`,
+        `再次确认后，${activeComponent.displayName} 的全部像素将退回未分类；旧版本不会被改写`,
       );
       return;
     }
@@ -1732,7 +2069,81 @@ export function App() {
     setComponentName(component.displayName);
     setComponentCategory(component.category);
     setComponentSubtype(component.subtype ?? "");
+    setComponentTargetMode("selected");
+    setSemanticRelationDraft({
+      attachedTo: component.relations.attachedTo,
+      pairedWith: component.relations.pairedWith,
+      sameOutfitGroup: component.relations.sameOutfitGroup ?? "",
+      conflictsWith: component.relations.conflictsWith ?? [],
+    });
     setRemoveComponentArmedId(null);
+  };
+
+  const beginNewComponent = () => {
+    setComponentTargetMode("new");
+    setActiveComponentId(null);
+    setSoloSemanticComponentId(null);
+    setComponentId("");
+    setComponentName("新组件");
+    setComponentSubtype("");
+    setSemanticRelationDraft(emptySemanticRelationDraft());
+    setNotice("新组件模式：圈选像素并确认分类，组件编号由系统生成");
+  };
+
+  const previewSemanticExpansion = (kind: "mirror" | "seam") => {
+    if (!activeSkin || !segmentation || draftPixelIds.length === 0) {
+      setNotice("先在 2D 画布圈选至少 1 个像素，再预览扩展范围");
+      return;
+    }
+    const candidates = kind === "mirror"
+      ? mirroredSelectionPixelIds(
+          activeSkin.image,
+          segmentation.source.armType,
+          draftPixelIds,
+        )
+      : seamExpansionPixelIds(
+          activeSkin.image,
+          segmentation.source.armType,
+          draftPixelIds,
+        );
+    const selected = new Set(draftPixelIds);
+    const additions = candidates.filter((pixelId) => !selected.has(pixelId));
+    setSemanticSelectionPreview({ kind, pixelIds: additions });
+    setNotice(
+      additions.length > 0
+        ? `橙色预览包含 ${additions.length} 个${kind === "mirror" ? "镜像" : "跨 UV 接缝"}像素；确认前不会修改草稿`
+        : `当前选择没有可加入的${kind === "mirror" ? "可见镜像" : "可见接缝邻接"}像素`,
+    );
+  };
+
+  const confirmSemanticExpansion = () => {
+    if (!semanticSelectionPreview) return;
+    updateDraftSelection(applySelectionPixels(
+      draftPixelIds,
+      semanticSelectionPreview.pixelIds,
+      "add",
+    ));
+    setNotice(`已把 ${semanticSelectionPreview.pixelIds.length} 个预览像素加入本地草稿`);
+  };
+
+  const saveActiveComponentRelations = () => {
+    if (!activeComponent) {
+      setNotice("先选择要编辑关系的组件");
+      return;
+    }
+    void commitSemanticOperation(
+      {
+        type: "set_component_relations",
+        componentId: activeComponent.instanceId,
+        relations: {
+          attachedTo: semanticRelationDraft.attachedTo,
+          pairedWith: semanticRelationDraft.pairedWith,
+          sameOutfitGroup: semanticRelationDraft.sameOutfitGroup.trim() || null,
+          conflictsWith: semanticRelationDraft.conflictsWith,
+        },
+      },
+      `更新 ${activeComponent.displayName} 的组件关系`,
+    );
   };
 
   const changePartLibraryStatus = async (
@@ -2510,6 +2921,109 @@ export function App() {
     }
   };
 
+  const openCompletionRevision = async (
+    revisionId: string,
+    destination: "source" | "result",
+  ) => {
+    if (!historyProject) return;
+    if (destination === "result" && playerCompletionResult) {
+      const acceptedRevisionId =
+        playerCompletionResult.detail.result?.revision?.id ?? null;
+      const sourceChoice = playerCompletionResult.catalogContext.choices.find(
+        (choice) => choice.revisionId === revisionId,
+      );
+      if (revisionId === acceptedRevisionId) {
+        setPlayerResultSelection("completed");
+      } else if (sourceChoice) {
+        setPlayerResultSelection(sourceChoice.kind);
+      }
+    }
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const opened = await refreshHistory(historyProject.id, revisionId);
+      if (!opened) return;
+      navigateToPlayerStep(destination === "source" ? "review" : "save");
+      setNotice(
+        destination === "source"
+          ? "已切换隐藏内容检查使用的分析版本"
+          : "已载入明确选择的结果版本",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryError(message);
+      setNotice(`结果版本载入失败：${message}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const handleCompletionDecision = async (
+    detail: ApiCompletionProposalDetail,
+    catalogContext: CompletionCatalogContext,
+    navigateToResult: boolean,
+  ) => {
+    setPlayerCompletionResult({ detail, catalogContext });
+    setPlayerResultSelection(catalogContext.sourceKind);
+    if (navigateToResult) {
+      navigateToPlayerStep("save");
+    }
+  };
+
+  const publishLatentCompletionPart = async () => {
+    const result = activePlayerCompletionResult?.detail.result;
+    if (
+      !result ||
+      result.representation !== "latent_component" ||
+      !result.latentPart
+    ) {
+      setNotice("当前选择没有可发布的完成版组件");
+      return;
+    }
+    setCompletionPublishBusy(true);
+    try {
+      const outcome = await publishCompletionResult(result);
+      setPlayerCompletionResult((current) => {
+        if (current?.detail.result?.id !== outcome.result.id) return current;
+        return {
+          ...current,
+          detail: { ...current.detail, result: outcome.result },
+        };
+      });
+      try {
+        await refreshReusableCatalog();
+        setSelectedPartId(outcome.result.latentPart?.id ?? null);
+        setNotice(
+          outcome.changed
+            ? "完成版组件已发布到部件库"
+            : "完成版组件之前已经发布；部件库已刷新",
+        );
+      } catch (refreshError) {
+        setNotice(
+          `组件已发布，但部件库刷新失败：${refreshError instanceof Error ? refreshError.message : String(refreshError)}`,
+        );
+      }
+    } catch (error) {
+      setNotice(
+        `完成版组件发布失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setCompletionPublishBusy(false);
+    }
+  };
+
+  const selectPlayerResult = async (
+    selection: PlayerResultSelection,
+    revisionId?: string,
+  ) => {
+    setPlayerResultSelection(selection);
+    if (revisionId) {
+      await openCompletionRevision(revisionId, "result");
+    } else {
+      navigateToPlayerStep("save");
+    }
+  };
+
   const downloadActiveSkin = () => {
     if (!activeSkin) {
       return;
@@ -2533,24 +3047,49 @@ export function App() {
   };
 
   return (
-    <main className="studio-shell">
+    <main
+      className="studio-shell"
+      data-studio-mode={studioMode}
+      data-player-step={playerWorkflowStep}
+    >
       <header className="studio-header">
         <div>
-          <p className="eyebrow">VERSIONED SKIN REPAIR + RESTORATION STUDIO / M12</p>
+          <p className="eyebrow">PLAYER-FIRST VERSIONED SKIN STUDIO / M20</p>
           <h1>
             MC<span>Skin</span>Split
           </h1>
           <p className="lede">
-            Codex 辅助识别真实皮肤的语义部件，并对确定性还原候选给出受限建议；单组件修补、多图层混搭与目标残留还原均保留可追溯历史。
+            {studioMode === "player"
+              ? "导入一张皮肤，智能识别可见部件，检查需要修正的地方，再选择要保存或导出的结果。每一步都由用户确认。"
+              : "Codex 辅助识别真实皮肤的语义部件，并对确定性还原候选给出受限建议；单组件修补、多图层混搭与目标残留还原均保留可追溯历史。"}
           </p>
         </div>
-        <div className="baseline-stamp" aria-label="M12 可导航的组件治理与皮肤还原工作室">
-          <strong>M12</strong>
-          <span>NAVIGATE + CURATE</span>
+        <div className="baseline-stamp" aria-label="M20 玩家优先的皮肤拆分工作室">
+          <strong>M20</strong>
+          <span>REVIEW + CHOOSE</span>
         </div>
       </header>
 
-      <WorkflowSectionNav />
+      <PlayerWorkflowNav
+        mode={studioMode}
+        step={playerWorkflowStep}
+        onSelectStep={navigateToPlayerStep}
+        onChangeMode={(mode) => {
+          if (mode === "advanced") {
+            navigateToAdvancedStudio();
+          } else {
+            const currentAdvancedSection = resolveWorkflowSectionIdFromHash(
+              window.location.hash,
+            );
+            if (currentAdvancedSection) {
+              lastAdvancedSectionIdRef.current = currentAdvancedSection;
+            }
+            navigateToPlayerStep(playerWorkflowStep);
+          }
+        }}
+      />
+
+      {studioMode === "advanced" && <WorkflowSectionNav />}
 
       <div className="studio-content">
 
@@ -2941,7 +3480,7 @@ export function App() {
                 <SemanticAiJobProgress detail={null} />
                 <div className="ai-empty-state">
                   <strong>NO ANALYSIS JOB</strong>
-                  <p>选择任意 Revision 后即可启动识别；历史版本会自动创建新分支。运行明细保留在高级信息中。</p>
+                  <p>选择任意版本后即可启动识别；历史版本会自动创建新分支。运行明细保留在高级信息中。</p>
                 </div>
               </>
             )}
@@ -2980,7 +3519,7 @@ export function App() {
             <input type="file" accept="image/png,.png" onChange={handleFileInput} />
             <span className="drop-icon" aria-hidden="true">+</span>
             <strong>{isLoadingSkin ? "正在解码像素…" : "选择或拖入 PNG"}</strong>
-            <small>上传即创建 Import Revision · 64×64 · 最大 1 MiB</small>
+            <small>上传即创建导入版本 · 64×64 · 最大 1 MiB</small>
           </label>
 
           <div className="fixture-picker" aria-label="真实与确定性测试皮肤">
@@ -3113,7 +3652,7 @@ export function App() {
           </div>
           <p className="avatar-revision">
             {selectedRevision
-              ? `REVISION / ${selectedRevision.branchName} #${selectedRevision.sequence}`
+              ? `版本 / ${selectedRevision.branchName} #${selectedRevision.sequence}`
               : `LOCAL / ${skinName}`}
           </p>
           <SkinPreview
@@ -3131,31 +3670,94 @@ export function App() {
       <section
         id="workspace-semantic"
         className="semantic-workspace"
-        aria-label="人工语义编辑与部件库"
+        aria-label={studioMode === "player" ? "检查并修正组件分类" : "人工语义编辑与部件库"}
         data-workflow-section
         tabIndex={-1}
       >
-        <section className="semantic-panel semantic-editor-panel">
-          <div className="panel-heading">
-            <span>04</span>
-            <div>
-              <p>SEMANTIC BRUSH</p>
-              <h2>64×64 像素草稿</h2>
+        <section
+          className="semantic-panel semantic-editor-panel"
+          data-testid="semantic-canvas-column"
+        >
+          <div className="panel-heading-row semantic-canvas-heading">
+            <div className="panel-heading">
+              <span>04</span>
+              <div>
+                <p>SELECT PIXELS</p>
+                <h2>圈出要分类的像素</h2>
+              </div>
+            </div>
+            <div className="view-switch" aria-label="语义检查二维或三维视图">
+              <button
+                type="button"
+                aria-pressed={semanticMiddleView === "2d"}
+                onClick={() => setSemanticMiddleView("2d")}
+              >
+                2D
+              </button>
+              <button
+                type="button"
+                aria-pressed={semanticMiddleView === "3d"}
+                onClick={() => setSemanticMiddleView("3d")}
+              >
+                3D
+              </button>
             </div>
           </div>
+          <div
+            className="semantic-selection-tools"
+            role="toolbar"
+            aria-label="像素选择工具"
+            data-testid="semantic-selection-tools"
+          >
+            {([
+              ["brush", "画笔"],
+              ["rectangle", "矩形"],
+              ["magic", "同色魔棒"],
+              ["surface", "整面"],
+            ] as const).map(([tool, label]) => (
+              <button
+                key={tool}
+                type="button"
+                aria-pressed={semanticSelectionTool === tool}
+                disabled={!canEditSemantic || semanticBusy}
+                onClick={() => {
+                  setSemanticMiddleView("2d");
+                  setSemanticSelectionTool(tool);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="semantic-canvas-frame">
-            {activeSkin && segmentation ? (
+            {activeSkin && segmentation && semanticMiddleView === "2d" ? (
               <SemanticEditorCanvas
                 activeComponentId={activeComponentId ?? undefined}
                 armType={segmentation.source.armType}
                 components={segmentation.components}
                 disabled={!canEditSemantic || semanticBusy}
+                diffPixelIds={activeSemanticDiffPixelIds}
+                hiddenComponentIds={hiddenSemanticComponentIds}
                 image={activeSkin.image}
+                previewPixelIds={semanticSelectionPreview?.pixelIds ?? []}
                 selectedPixelIds={draftPixelIds}
-                onSelectionChange={setDraftPixelIds}
+                selectionTool={semanticSelectionTool}
+                soloComponentId={soloSemanticComponentId}
+                viewMode={semanticCanvasViewMode}
+                onSelectionChange={updateDraftSelection}
               />
+            ) : activeSkin && segmentation ? (
+              <div className="semantic-3d-preview" data-testid="semantic-3d-preview">
+                <SkinPreview
+                  armType={segmentation.source.armType}
+                  skinUrl={skinUrl}
+                  motion="idle"
+                  ariaLabel="当前版本的三维分类检查预览"
+                />
+                <p>3D 用于检查整体位置；切回 2D 后圈选精确像素。</p>
+              </div>
             ) : (
-              <p>选择一个 Revision 后启用语义画笔</p>
+              <p>选择一个版本后启用语义画笔</p>
             )}
           </div>
           <div className="semantic-draft-toolbar">
@@ -3164,8 +3766,28 @@ export function App() {
             </span>
             <button
               type="button"
+              disabled={draftSelectionHistory.past.length === 0 || semanticBusy}
+              onClick={() => {
+                setDraftSelectionHistory(undoSemanticSelection);
+                setSemanticSelectionPreview(null);
+              }}
+            >
+              撤销
+            </button>
+            <button
+              type="button"
+              disabled={draftSelectionHistory.future.length === 0 || semanticBusy}
+              onClick={() => {
+                setDraftSelectionHistory(redoSemanticSelection);
+                setSemanticSelectionPreview(null);
+              }}
+            >
+              重做
+            </button>
+            <button
+              type="button"
               disabled={draftPixelIds.length === 0 || semanticBusy}
-              onClick={() => setDraftPixelIds([])}
+              onClick={clearDraftSelection}
             >
               清空草稿
             </button>
@@ -3174,84 +3796,238 @@ export function App() {
               disabled={!canEditSemantic || draftPixelIds.length === 0 || semanticBusy}
               onClick={unassignDraftPixels}
             >
-              标记 unknown
+              标记为未分类
             </button>
           </div>
           <p className="semantic-help">
-            单击或拖动选择有效非透明 UV 像素；再次划过可擦除草稿。画笔过程不写快照，只有右侧确认操作才创建 Revision。
+            点击、拖动或使用方向键与空格选择有效像素；再次选择可移除。草稿只保存在本页，右侧确认后才创建新版本。
           </p>
-        </section>
-
-        <section className="semantic-panel component-panel">
-          <div className="panel-heading semantic-heading-split">
-            <span>05</span>
-            <div>
-              <p>COMPONENT TREE</p>
-              <h2>组件与分类</h2>
-            </div>
-            <strong>{segmentation?.components.length ?? 0}</strong>
-          </div>
-
-          <div className="component-tree" aria-label="语义组件树">
-            <div className="component-row unknown-row">
-              <span aria-hidden="true">?</span>
-              <div>
-                <strong>unknown</strong>
-                <small>{segmentation?.unknown.pixelCount ?? 0} px 待分类</small>
-              </div>
-            </div>
-            {segmentation?.components.map((component) => (
-              <div
-                key={component.instanceId}
-                className="component-row"
-                data-active={component.instanceId === activeComponentId}
+          <details className="semantic-selection-advanced">
+            <summary>更多选区与语义对照</summary>
+            <div className="semantic-expansion-tools">
+              <button
+                type="button"
+                disabled={!activeSkin || draftPixelIds.length === 0 || semanticBusy}
+                onClick={() => previewSemanticExpansion("mirror")}
               >
-                <input
-                  type="checkbox"
-                  aria-label={`合并选择 ${component.displayName}`}
-                  checked={checkedComponentIds.includes(component.instanceId)}
-                  disabled={semanticBusy}
-                  onChange={(event) =>
-                    setCheckedComponentIds((current) =>
-                      event.target.checked
-                        ? [...new Set([...current, component.instanceId])]
-                        : current.filter((id) => id !== component.instanceId),
-                    )
-                  }
-                />
+                预览镜像扩展
+              </button>
+              <button
+                type="button"
+                disabled={!activeSkin || draftPixelIds.length === 0 || semanticBusy}
+                onClick={() => previewSemanticExpansion("seam")}
+              >
+                预览 UV 接缝扩展
+              </button>
+            </div>
+            {semanticSelectionPreview && (
+              <div className="semantic-expansion-confirm" role="status">
+                <p>
+                  橙色显示 {semanticSelectionPreview.pixelIds.length} 个待加入像素；当前草稿尚未改变。
+                </p>
+                <button
+                  type="button"
+                  disabled={semanticSelectionPreview.pixelIds.length === 0 || semanticBusy}
+                  onClick={confirmSemanticExpansion}
+                >
+                  确认加入草稿
+                </button>
                 <button
                   type="button"
                   disabled={semanticBusy}
-                  onClick={() => chooseComponent(component.instanceId)}
+                  onClick={() => setSemanticSelectionPreview(null)}
                 >
-                  <strong>{component.displayName}</strong>
-                  <small>
-                    {SEMANTIC_CATEGORY_LABELS[component.category]} · {component.spans.reduce(
-                      (total, span) => total + span.x1 - span.x0 + 1,
-                      0,
-                    )} px
-                    {component.reviewState === "needs_review" ? " · 需审核" : ""}
-                  </small>
+                  取消预览
                 </button>
               </div>
-            ))}
+            )}
+            <div className="semantic-diff-modes" role="group" aria-label="纹理与语义对照模式">
+              {([
+                ["texture", "纹理 RGBA"],
+                ["ownership", "像素归属"],
+                ["category", "分类"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={semanticCanvasViewMode === mode}
+                  onClick={() => {
+                    setSemanticMiddleView("2d");
+                    setSemanticCanvasViewMode(mode);
+                  }}
+                >
+                  {label}
+                  {semanticRevisionDiffStatus === "ready" && semanticRevisionDiff
+                    ? ` · ${semanticRevisionDiffPixelIds(semanticRevisionDiff, mode).length}`
+                    : ""}
+                </button>
+              ))}
+            </div>
+            <p className="semantic-texture-diff-note">
+              {semanticRevisionDiffStatus === "loading"
+                ? "正在读取父版本并计算真实变化像素…"
+                : semanticRevisionDiffStatus === "ready" && semanticRevisionDiff
+                  ? semanticRevisionDiffLabel(semanticRevisionDiff)
+                  : semanticRevisionDiffStatus === "unavailable"
+                    ? "父版本对照读取失败；当前没有显示推测性的差异。"
+                    : selectedRevision
+                      ? "这是首个版本，没有父版本可供逐像素对照。"
+                      : "载入版本后显示真实的纹理与语义变化像素。"}
+            </p>
+          </details>
+        </section>
+
+        <section className="semantic-panel component-panel">
+          <div
+            className="semantic-component-column"
+            data-testid="semantic-component-column"
+          >
+            <div className="panel-heading semantic-heading-split">
+              <span>05</span>
+              <div>
+                <p>CHOOSE COMPONENT</p>
+                <h2>选择一个组件</h2>
+              </div>
+              <strong>{segmentation?.components.length ?? 0}</strong>
+            </div>
+
+            <div className="component-tree" aria-label="语义组件树">
+              <div className="component-row unknown-row">
+                <span aria-hidden="true">?</span>
+                <div>
+                  <strong>{studioMode === "player" ? "未分类" : "unknown"}</strong>
+                  <small>{segmentation?.unknown.pixelCount ?? 0} px 待分类</small>
+                </div>
+              </div>
+              {segmentation?.components.map((component) => (
+                <div
+                  key={component.instanceId}
+                  className="component-row"
+                  data-active={component.instanceId === activeComponentId}
+                >
+                  <input
+                    className="component-merge-choice"
+                    type="checkbox"
+                    aria-label={`合并选择 ${component.displayName}`}
+                    checked={checkedComponentIds.includes(component.instanceId)}
+                    disabled={semanticBusy}
+                    onChange={(event) =>
+                      setCheckedComponentIds((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, component.instanceId])]
+                          : current.filter((id) => id !== component.instanceId),
+                      )
+                    }
+                  />
+                  <button
+                    className="component-select-button"
+                    type="button"
+                    disabled={semanticBusy}
+                    onClick={() => chooseComponent(component.instanceId)}
+                  >
+                    <strong>{component.displayName}</strong>
+                    <small>
+                      {SEMANTIC_CATEGORY_LABELS[component.category]} · {component.spans.reduce(
+                        (total, span) => total + span.x1 - span.x0 + 1,
+                        0,
+                      )} px
+                      {component.reviewState === "needs_review" ? " · 需审核" : ""}
+                    </small>
+                  </button>
+                  <div className="component-overlay-actions">
+                    <button
+                      type="button"
+                      aria-label={`${hiddenSemanticComponentIds.includes(component.instanceId) ? "显示" : "隐藏"} ${component.displayName} 的语义覆盖层`}
+                      aria-pressed={!hiddenSemanticComponentIds.includes(component.instanceId)}
+                      disabled={semanticBusy}
+                      onClick={() => setHiddenSemanticComponentIds((current) =>
+                        current.includes(component.instanceId)
+                          ? current.filter((id) => id !== component.instanceId)
+                          : [...current, component.instanceId])}
+                    >
+                      {hiddenSemanticComponentIds.includes(component.instanceId) ? "显示" : "隐藏"}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`只看 ${component.displayName} 的语义覆盖层`}
+                      aria-pressed={soloSemanticComponentId === component.instanceId}
+                      disabled={semanticBusy}
+                      onClick={() => {
+                        setHiddenSemanticComponentIds((current) =>
+                          current.filter((id) => id !== component.instanceId));
+                        setSoloSemanticComponentId((current) =>
+                          current === component.instanceId ? null : component.instanceId);
+                      }}
+                    >
+                      Solo
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <PixelOriginSummaryPanel
+              origin={revisionOrigin}
+              activeComponentId={activeComponentId}
+            />
           </div>
 
-          <PixelOriginSummaryPanel
-            origin={revisionOrigin}
-            activeComponentId={activeComponentId}
-          />
+          <div
+            className="semantic-classification-column"
+            data-testid="semantic-classification-column"
+          >
+            <div className="panel-heading">
+              <span>06</span>
+              <div>
+                <p>CONFIRM CATEGORY</p>
+                <h2>分类并确认</h2>
+              </div>
+            </div>
+            <div
+              className="semantic-target-mode"
+              role="group"
+              aria-label="选择分类目标"
+            >
+              <button
+                type="button"
+                aria-pressed={componentTargetMode === "selected"}
+                disabled={!activeComponent || semanticBusy}
+                onClick={() => setComponentTargetMode("selected")}
+              >
+                所选组件
+              </button>
+              <button
+                type="button"
+                aria-pressed={componentTargetMode === "new"}
+                disabled={semanticBusy}
+                onClick={beginNewComponent}
+              >
+                + 新组件
+              </button>
+            </div>
+            <p className="semantic-target-note">
+              {componentTargetMode === "new"
+                ? "确认后由系统生成组件编号。"
+                : activeComponent
+                  ? `像素将归入“${activeComponent.displayName}”。`
+                  : "从左侧选择组件，或新建组件。"}
+            </p>
 
           <div className="semantic-form">
-            <label>
-              <span>INSTANCE ID</span>
-              <input
-                value={componentId}
-                maxLength={100}
-                disabled={semanticBusy}
-                onChange={(event) => setComponentId(event.target.value)}
-              />
-            </label>
+            {studioMode === "advanced" && (
+              <details className="semantic-raw-id">
+                <summary>高级信息 · 原始组件 ID</summary>
+                <label>
+                  <span>INSTANCE ID</span>
+                  <input
+                    value={componentId}
+                    maxLength={100}
+                    disabled={semanticBusy}
+                    onChange={(event) => setComponentId(event.target.value)}
+                  />
+                </label>
+              </details>
+            )}
             <label>
               <span>显示名称</span>
               <input
@@ -3288,7 +4064,7 @@ export function App() {
             </label>
           </div>
 
-          <div className="semantic-actions">
+          <div className="semantic-actions semantic-primary-action">
             <button
               type="button"
               disabled={!canEditSemantic || draftPixelIds.length === 0 || semanticBusy}
@@ -3296,50 +4072,155 @@ export function App() {
             >
               确认像素分类
             </button>
-            <button
-              type="button"
-              disabled={!canEditSemantic || !activeComponent || draftPixelIds.length === 0 || semanticBusy}
-              onClick={splitActiveComponent}
-            >
-              拆分为新组件
-            </button>
-            <button
-              type="button"
-              disabled={!canEditSemantic || !activeComponent || semanticBusy}
-              onClick={reclassifyActiveComponent}
-            >
-              修改所选组件分类
-            </button>
-            <button
-              type="button"
-              disabled={!canEditSemantic || checkedComponentIds.length < 2 || semanticBusy}
-              onClick={mergeCheckedComponents}
-            >
-              合并勾选组件
-            </button>
-            <button
-              className="semantic-remove-component"
-              type="button"
-              disabled={!canEditSemantic || !activeComponent || semanticBusy}
-              data-armed={removeComponentArmedId === activeComponent?.instanceId}
-              onClick={removeActiveComponentRecognition}
-            >
-              {removeComponentArmedId === activeComponent?.instanceId
-                ? "确认全部退回 unknown"
-                : "移除所选组件识别"}
-            </button>
           </div>
-          <p className="semantic-destructive-help">
-            移除识别会创建新 Revision：所选组件的全部像素退回 unknown，旧 Revision 和已导出部件保持不变。
-          </p>
-          <button
-            className="export-part-button"
-            type="button"
-            disabled={!activeComponent || semanticBusy}
-            onClick={() => void exportActiveComponent()}
+
+          <details
+            className="semantic-component-advanced"
+            open={studioMode === "advanced"}
           >
-            所选组件 → 保存为 64×64 部件
-          </button>
+            <summary>更多组件操作</summary>
+            <div className="semantic-actions">
+              <button
+                type="button"
+                disabled={!canEditSemantic || !activeComponent || draftPixelIds.length === 0 || semanticBusy}
+                onClick={splitActiveComponent}
+              >
+                拆分为新组件
+              </button>
+              <button
+                type="button"
+                disabled={!canEditSemantic || !activeComponent || semanticBusy}
+                onClick={reclassifyActiveComponent}
+              >
+                修改所选组件分类
+              </button>
+              <button
+                type="button"
+                disabled={!canEditSemantic || checkedComponentIds.length < 2 || semanticBusy}
+                onClick={mergeCheckedComponents}
+              >
+                合并勾选组件
+              </button>
+              <button
+                className="semantic-remove-component"
+                type="button"
+                disabled={!canEditSemantic || !activeComponent || semanticBusy}
+                data-armed={removeComponentArmedId === activeComponent?.instanceId}
+                onClick={removeActiveComponentRecognition}
+              >
+                {removeComponentArmedId === activeComponent?.instanceId
+                  ? "确认全部退回未分类"
+                  : "移除所选组件识别"}
+              </button>
+            </div>
+            <p className="semantic-destructive-help">
+              移除识别会创建新版本：所选组件的全部像素退回未分类，旧版本和已导出部件保持不变。
+            </p>
+            <button
+              className="export-part-button"
+              type="button"
+              disabled={!activeComponent || semanticBusy}
+              onClick={() => void exportActiveComponent()}
+            >
+              所选组件 → 保存为 64×64 部件
+            </button>
+          </details>
+
+          <details
+            className="semantic-relations-editor"
+            data-testid="semantic-relations-editor"
+          >
+            <summary>组件关系（可选）</summary>
+            <p>关系会在一次确认中创建一个新版本；不会改动纹理 RGBA。</p>
+            <label>
+              <span>附着到</span>
+              <select
+                value={semanticRelationDraft.attachedTo ?? ""}
+                disabled={!activeComponent || semanticBusy}
+                onChange={(event) => setSemanticRelationDraft((current) => ({
+                  ...current,
+                  attachedTo: event.target.value || null,
+                }))}
+              >
+                <option value="">无</option>
+                {segmentation?.components
+                  .filter((component) => component.instanceId !== activeComponentId)
+                  .map((component) => (
+                    <option key={component.instanceId} value={component.instanceId}>
+                      {component.displayName}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              <span>同套装分组（可选）</span>
+              <input
+                value={semanticRelationDraft.sameOutfitGroup}
+                maxLength={100}
+                disabled={!activeComponent || semanticBusy}
+                onChange={(event) => setSemanticRelationDraft((current) => ({
+                  ...current,
+                  sameOutfitGroup: event.target.value,
+                }))}
+              />
+            </label>
+            <fieldset>
+              <legend>成对组件</legend>
+              {segmentation?.components
+                .filter((component) => component.instanceId !== activeComponentId)
+                .map((component) => (
+                  <label key={component.instanceId}>
+                    <input
+                      type="checkbox"
+                      checked={semanticRelationDraft.pairedWith.includes(component.instanceId)}
+                      disabled={!activeComponent || semanticBusy}
+                      onChange={(event) => setSemanticRelationDraft((current) => ({
+                        ...current,
+                        pairedWith: event.target.checked
+                          ? [...new Set([...current.pairedWith, component.instanceId])]
+                          : current.pairedWith.filter((id) => id !== component.instanceId),
+                        conflictsWith: event.target.checked
+                          ? current.conflictsWith.filter((id) => id !== component.instanceId)
+                          : current.conflictsWith,
+                      }))}
+                    />
+                    <span>{component.displayName}</span>
+                  </label>
+                ))}
+            </fieldset>
+            <fieldset>
+              <legend>互斥组件</legend>
+              {segmentation?.components
+                .filter((component) => component.instanceId !== activeComponentId)
+                .map((component) => (
+                  <label key={component.instanceId}>
+                    <input
+                      type="checkbox"
+                      checked={semanticRelationDraft.conflictsWith.includes(component.instanceId)}
+                      disabled={!activeComponent || semanticBusy}
+                      onChange={(event) => setSemanticRelationDraft((current) => ({
+                        ...current,
+                        conflictsWith: event.target.checked
+                          ? [...new Set([...current.conflictsWith, component.instanceId])]
+                          : current.conflictsWith.filter((id) => id !== component.instanceId),
+                        pairedWith: event.target.checked
+                          ? current.pairedWith.filter((id) => id !== component.instanceId)
+                          : current.pairedWith,
+                      }))}
+                    />
+                    <span>{component.displayName}</span>
+                  </label>
+                ))}
+            </fieldset>
+            <button
+              type="button"
+              disabled={!canEditSemantic || !activeComponent || semanticBusy}
+              onClick={saveActiveComponentRelations}
+            >
+              确认组件关系
+            </button>
+          </details>
+          </div>
         </section>
 
         <section className="semantic-panel parts-panel">
@@ -3474,6 +4355,41 @@ export function App() {
           )}
         </section>
       </section>
+
+      {COMPLETION_WORKSPACE_ENABLED && (
+        <HiddenContentCompletionWorkspace
+          key={selectedRevision?.id ?? "no-completion-source"}
+          sourceRevision={selectedRevision ?? null}
+          sourceSkinUrl={activeSkin?.source === "revision" ? skinUrl : null}
+          segmentation={segmentation}
+          catalogContext={completionCatalogContext}
+          disabled={historyBusy || isLoadingSkin}
+          onOpenRevision={openCompletionRevision}
+          onDecision={handleCompletionDecision}
+        />
+      )}
+
+      <PlayerResultWorkspace
+        revision={selectedRevision ?? null}
+        projectName={historyProject?.name ?? null}
+        completion={activePlayerCompletionResult}
+        selection={activePlayerCompletionResult ? playerResultSelection : "current"}
+        components={segmentation?.components ?? []}
+        activeComponentId={activeComponentId}
+        busy={
+          historyBusy ||
+          semanticBusy ||
+          completionPublishBusy ||
+          busyCatalogGroupKey !== null
+        }
+        onSelectResult={(selection, revisionId) =>
+          void selectPlayerResult(selection, revisionId)}
+        onSelectComponent={chooseComponent}
+        onDownloadPng={downloadActiveSkin}
+        onSavePart={() => void exportActiveComponent()}
+        onSaveBundle={(kind) => void exportCurrentHeadGroup(kind)}
+        onPublishLatentPart={() => void publishLatentCompletionPart()}
+      />
 
       <ComponentRepairStudio
         parts={activePartLibrary}

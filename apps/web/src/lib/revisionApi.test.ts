@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import type {
+  ApiCompletionCandidate,
+  ApiCompletionProposal,
+  ApiCompletionResult,
+  ApiPart,
+} from "./revisionApi";
 import {
+  acceptCompletionCandidate,
   addCompositionPart,
   applyCompositionBundle,
   applyPartEditOperation,
@@ -10,9 +17,15 @@ import {
   clearCompositionRestorationPlan,
   commitRevisionPart,
   compositionPreviewUrl,
+  completionAllowedMaskUrl,
+  completionCandidateDocumentUrl,
+  completionCandidateGeneratedMaskUrl,
+  completionCandidateTextureUrl,
+  completionCandidateWriteMaskUrl,
   commitPartEdit,
   createComposition,
   dismissSemanticFollowup,
+  editCompletionCandidate,
   createPartEdit,
   exportRevisionPart,
   exportRevisionBundle,
@@ -22,9 +35,11 @@ import {
   listAnalyzedSkins,
   listAiJobs,
   listAiProviders,
+  listCompletionProposals,
   listPartBundles,
   listParts,
   loadRevisionOrigin,
+  loadCompletionCandidateDocument,
   loadRevisionSegmentation,
   loadRevisionSkin,
   partMannequinUrl,
@@ -39,6 +54,9 @@ import {
   retirePartBundle,
   restoreAnalyzedSkin,
   restorePartBundle,
+  rejectCompletionProposal,
+  publishCompletionResult,
+  revisionSkinUrl,
   revisePartBundle,
   retryAiJob,
   removeCompositionLayer,
@@ -48,6 +66,7 @@ import {
   startAiRestorationRecommendation,
   RevisionApiError,
   startAiAnalysis,
+  startCompletionProposal,
 } from "./revisionApi";
 
 describe("revisionApi", () => {
@@ -291,6 +310,72 @@ describe("revisionApi", () => {
     expect(partTextureUrl("part / 1")).toBe(
       "/api/parts/part%20%2F%201/texture.png",
     );
+  });
+
+  it("lets the Revision Host generate new component IDs at the public boundary", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        project: { id: "project_1" },
+        branch: { id: "branch_1" },
+        revision: { id: "revision_2" },
+        generatedComponentId: "component_host_1",
+      }, 201),
+    );
+
+    const result = await applySemanticOperation("revision_1", {
+      type: "assign_pixels",
+      target: {
+        displayName: "上衣",
+        category: "upper_clothing",
+      },
+      spans: [{ surface: "torso.base.front", y: 20, x0: 20, x1: 21 }],
+    }, { branchId: "branch_1" }, fetcher);
+
+    expect(result.generatedComponentId).toBe("component_host_1");
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      type: "assign_pixels",
+      target: {
+        displayName: "上衣",
+        category: "upper_clothing",
+      },
+      spans: [{ surface: "torso.base.front", y: 20, x0: 20, x1: 21 }],
+      branchId: "branch_1",
+    });
+  });
+
+  it("sends all component relations in one Revision operation", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        project: { id: "project_1" },
+        branch: { id: "branch_1" },
+        revision: { id: "revision_2" },
+      }, 201),
+    );
+
+    await applySemanticOperation("revision_1", {
+      type: "set_component_relations",
+      componentId: "shirt.main",
+      relations: {
+        attachedTo: "torso.base",
+        pairedWith: ["sleeve.left", "sleeve.right"],
+        sameOutfitGroup: "school_uniform",
+        conflictsWith: ["jacket.main"],
+      },
+    }, { branchId: "branch_1", summary: "Update component relations" }, fetcher);
+
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      type: "set_component_relations",
+      componentId: "shirt.main",
+      relations: {
+        attachedTo: "torso.base",
+        pairedWith: ["sleeve.left", "sleeve.right"],
+        sameOutfitGroup: "school_uniform",
+        conflictsWith: ["jacket.main"],
+      },
+      branchId: "branch_1",
+      summary: "Update component relations",
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("commits a part only with an explicit strategy", async () => {
@@ -733,7 +818,238 @@ describe("revisionApi", () => {
       "/api/ai-jobs?kind=restoration_recommendation&compositionId=composition%20%2F%201",
     );
   });
+
+  it("starts and filters Completion proposals with encoded M19 routes", async () => {
+    const job = { id: "job_1", kind: "completion_proposal", status: "queued" };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ job }, 202))
+      .mockResolvedValueOnce(jsonResponse({ proposals: [] }, 200));
+
+    await startCompletionProposal("revision / 1", {
+      targetComponentId: "shirt / main",
+      occludingComponentIds: ["hair / main", "hat.main"],
+      representation: "auto",
+    }, fetcher);
+    await listCompletionProposals({
+      projectId: "project / 1",
+      revisionId: "revision / 1",
+      jobId: "job / 1",
+      representation: "skin_texel",
+      status: "all",
+    }, fetcher);
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/revisions/revision%20%2F%201/completion-proposals",
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      targetComponentId: "shirt / main",
+      occludingComponentIds: ["hair / main", "hat.main"],
+      representation: "auto",
+    });
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
+      "/api/completion-proposals?projectId=project+%2F+1&revisionId=revision+%2F+1&jobId=job+%2F+1&representation=skin_texel&status=all",
+    );
+  });
+
+  it("keeps Completion texture and both mask asset URLs unambiguous", () => {
+    expect(revisionSkinUrl("revision / 1")).toBe(
+      "/api/revisions/revision%20%2F%201/skin.png",
+    );
+    expect(completionAllowedMaskUrl("proposal / 1")).toBe(
+      "/api/completion-proposals/proposal%20%2F%201/allowed-mask.png",
+    );
+    expect(completionCandidateDocumentUrl("proposal / 1", "candidate / 2"))
+      .toBe("/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/candidate.json");
+    expect(completionCandidateTextureUrl("proposal / 1", "candidate / 2"))
+      .toBe("/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/texture.png");
+    expect(completionCandidateWriteMaskUrl("proposal / 1", "candidate / 2"))
+      .toBe("/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/write-mask.png");
+    expect(completionCandidateGeneratedMaskUrl("proposal / 1", "candidate / 2"))
+      .toBe("/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/generated-mask.png");
+  });
+
+  it("binds accept and reject decisions to the exact persisted hashes", async () => {
+    const proposal = completionProposal();
+    const candidate = completionCandidate();
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ changed: true }, 201))
+      .mockResolvedValueOnce(jsonResponse({ changed: true }, 201));
+
+    await acceptCompletionCandidate(proposal, candidate, {
+      actorId: "local-player",
+      summary: "accepted after exact review",
+    }, fetcher);
+    await rejectCompletionProposal(proposal, {
+      actorId: "local-player",
+      reason: "keep original",
+    }, fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/accept",
+      "/api/completion-proposals/proposal%20%2F%201/reject",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedSourceResultHash: "source-result-hash",
+      expectedProposalHash: "proposal-hash",
+      expectedEvidenceHash: "evidence-hash",
+      expectedCandidateHash: "candidate-hash",
+      actorId: "local-player",
+      summary: "accepted after exact review",
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedSourceResultHash: "source-result-hash",
+      expectedProposalHash: "proposal-hash",
+      expectedEvidenceHash: "evidence-hash",
+      actorId: "local-player",
+      reason: "keep original",
+    });
+  });
+
+  it("binds manual candidate edits and latent publication to immutable hashes", async () => {
+    const proposal = completionProposal();
+    const candidate = completionCandidate();
+    const document = {
+      schemaVersion: "1.0",
+      candidateId: candidate.id,
+      assignments: [],
+    };
+    const result: ApiCompletionResult = {
+      id: "result / 1",
+      proposalId: proposal.id,
+      decisionId: "decision_1",
+      candidateId: candidate.id,
+      representation: "latent_component",
+      sourceRevisionId: proposal.sourceRevisionId,
+      sourceResultHash: proposal.sourceResultHash,
+      sourceSkinHash: proposal.sourceSkinHash,
+      revision: null,
+      latentPart: { id: "part / latent" } as ApiPart,
+      resultHash: "result-hash",
+      resultSkinHash: proposal.sourceSkinHash,
+      originHash: "origin-hash",
+      publishedAt: null,
+      createdAt: "2026-08-19T09:05:00.000Z",
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(document, 200))
+      .mockResolvedValueOnce(jsonResponse({
+        changed: true,
+        editedCandidateId: "candidate_manual",
+      }, 201))
+      .mockResolvedValueOnce(jsonResponse({ changed: true, result }, 201));
+
+    expect(await loadCompletionCandidateDocument(
+      proposal.id,
+      candidate.id,
+      fetcher,
+    )).toMatchObject({ candidateId: candidate.id });
+    await editCompletionCandidate(proposal, candidate, [
+      { type: "set_pixel", pixelId: 64, rgba: [12, 34, 56, 255] },
+      { type: "remove_pixel", pixelId: 65 },
+    ], {}, fetcher);
+    await publishCompletionResult(result, {}, fetcher);
+
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/candidate.json",
+      "/api/completion-proposals/proposal%20%2F%201/candidates/candidate%20%2F%202/edits",
+      "/api/completion-results/result%20%2F%201/publish",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedSourceResultHash: "source-result-hash",
+      expectedProposalHash: "proposal-hash",
+      expectedEvidenceHash: "evidence-hash",
+      expectedCandidateHash: "candidate-hash",
+      edits: [
+        { type: "set_pixel", pixelId: 64, rgba: [12, 34, 56, 255] },
+        { type: "remove_pixel", pixelId: 65 },
+      ],
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      expectedResultHash: "result-hash",
+      expectedPartId: "part / latent",
+    });
+  });
+
+  it("preserves a stale Completion decision as a 409 with no fallback request", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        error: {
+          code: "COMPLETION_STALE",
+          message: "candidate hash changed",
+        },
+      }, 409),
+    );
+
+    const error = await acceptCompletionCandidate(
+      completionProposal(),
+      completionCandidate(),
+      {},
+      fetcher,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      status: 409,
+      code: "COMPLETION_STALE",
+      message: "candidate hash changed",
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
 });
+
+function completionProposal(): ApiCompletionProposal {
+  return {
+    id: "proposal / 1",
+    jobId: "job_1",
+    projectId: "project_1",
+    sourceRevisionId: "revision_1",
+    sourceResultHash: "source-result-hash",
+    sourceSkinHash: "source-skin-hash",
+    targetComponentId: "shirt.main",
+    occludingComponentIds: ["hair.main"],
+    representation: "skin_texel",
+    allowedSpans: [],
+    allowedGeneratedPixelCount: 2,
+    evidence: {},
+    evidenceHash: "evidence-hash",
+    proposalHash: "proposal-hash",
+    document: completionStoredFile("application/json"),
+    allowedMask: completionStoredFile("image/png"),
+    createdAt: "2026-08-19T09:00:00.000Z",
+  };
+}
+
+function completionCandidate(): ApiCompletionCandidate {
+  return {
+    id: "candidate / 2",
+    proposalId: "proposal / 1",
+    representation: "skin_texel",
+    strategy: "same_surface_continuation",
+    confidence: "medium",
+    originMode: "generated_completion",
+    pixelCount: 2,
+    generatedPixelCount: 2,
+    candidateHash: "candidate-hash",
+    evidenceHash: "evidence-hash",
+    document: completionStoredFile("application/json"),
+    texture: completionStoredFile("image/png"),
+    writeMask: completionStoredFile("image/png"),
+    generatedMask: completionStoredFile("image/png"),
+    reviewRequired: true,
+    automaticAcceptanceAllowed: false,
+    createdAt: "2026-08-19T09:01:00.000Z",
+  };
+}
+
+function completionStoredFile(
+  mimeType: "application/json" | "image/png",
+) {
+  return {
+    storagePath: "asset",
+    mimeType,
+    byteSize: 1,
+    sha256: "asset-hash",
+  } as const;
+}
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {

@@ -1,6 +1,12 @@
 import type {
   AggregateKind,
   ArmType,
+  CompletionCandidateStrategy,
+  CompletionCandidateDocument,
+  CompletionConfidence,
+  CompletionPixelOriginMode,
+  CompletionRequestedRepresentation,
+  CompletionTargetRepresentation,
   ManualSemanticOperation,
   PartRepairCopyMapping,
   PartRepairOverwriteMode,
@@ -53,6 +59,23 @@ export interface ApiMutationResult {
   readonly branch: ApiBranch;
   readonly revision: ApiRevision;
 }
+
+export interface ApiRevisionMutationResult extends ApiMutationResult {
+  readonly generatedComponentId?: string;
+}
+
+type OptionalSemanticTargetId<Operation> =
+  Operation extends { readonly target: infer Target extends { readonly instanceId: string } }
+    ? Omit<Operation, "target"> & {
+        readonly target: Omit<Target, "instanceId"> & {
+          readonly instanceId?: string;
+        };
+      }
+    : Operation;
+
+/** Public Revision API carrier; the Host materializes omitted target IDs before core validation. */
+export type ApiManualSemanticOperation =
+  OptionalSemanticTargetId<ManualSemanticOperation>;
 
 export interface ApiImportResult {
   readonly projectId: string;
@@ -429,6 +452,185 @@ export interface ApiCompositionCommit extends ApiMutationResult {
   readonly report: ApiCompositionReport;
 }
 
+export type ApiCompletionProposalStatus =
+  | "awaiting_decision"
+  | "accepted"
+  | "rejected";
+
+export interface ApiCompletionStoredFile {
+  readonly storagePath: string;
+  readonly mimeType: "application/json" | "image/png";
+  readonly byteSize: number;
+  readonly sha256: string;
+}
+
+export interface ApiCompletionProposal {
+  readonly id: string;
+  readonly jobId: string;
+  readonly projectId: string;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly targetComponentId: string;
+  readonly occludingComponentIds: readonly string[];
+  readonly representation: CompletionTargetRepresentation;
+  readonly allowedSpans: readonly SemanticPixelSpan[];
+  readonly allowedGeneratedPixelCount: number;
+  readonly evidence: Readonly<Record<string, unknown>>;
+  readonly evidenceHash: string;
+  readonly proposalHash: string;
+  readonly document: ApiCompletionStoredFile;
+  readonly allowedMask: ApiCompletionStoredFile;
+  readonly createdAt: string;
+}
+
+export interface ApiCompletionCandidate {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly representation: CompletionTargetRepresentation;
+  readonly strategy: CompletionCandidateStrategy;
+  /** Added by the M20 edit carrier; older immutable M19 candidates omit it. */
+  readonly baseCandidateId?: string | null;
+  readonly confidence: CompletionConfidence;
+  readonly originMode: CompletionPixelOriginMode | "mixed";
+  readonly pixelCount: number;
+  readonly generatedPixelCount: number;
+  readonly candidateHash: string;
+  readonly evidenceHash: string;
+  readonly document: ApiCompletionStoredFile;
+  readonly texture: ApiCompletionStoredFile;
+  readonly writeMask: ApiCompletionStoredFile;
+  readonly generatedMask: ApiCompletionStoredFile;
+  readonly reviewRequired: true;
+  readonly automaticAcceptanceAllowed: false;
+  readonly createdAt: string;
+}
+
+export interface ApiCompletionRankingRecommendation {
+  readonly status: "recommend" | "defer";
+  readonly candidateId: string | null;
+  readonly confidence: number;
+  readonly explanation: string;
+}
+
+export interface ApiCompletionProposalRanking {
+  readonly proposalId: string;
+  readonly jobId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: ApiAiReasoningEffort;
+  readonly document: {
+    readonly schemaVersion: "1.0";
+    readonly jobId: string;
+    readonly proposalId: string;
+    readonly proposalHash: string;
+    readonly sourceRevisionId: string;
+    readonly sourceResultHash: string;
+    readonly sourceSkinHash: string;
+    readonly rankings: readonly {
+      readonly candidateId: string;
+      readonly confidence: number;
+      readonly explanation: string;
+    }[];
+    readonly recommendation: ApiCompletionRankingRecommendation;
+  };
+  readonly orderedCandidateIds: readonly string[];
+  readonly recommendation: ApiCompletionRankingRecommendation;
+  readonly rankingHash: string;
+  readonly createdAt: string;
+}
+
+export interface ApiCompletionDecision {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly candidateId: string | null;
+  readonly action: "accept" | "reject";
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string | null;
+  readonly actorType: "user";
+  readonly actorId: string | null;
+  readonly reason: string | null;
+  readonly decisionHash: string;
+  readonly createdAt: string;
+}
+
+export interface ApiCompletionResult {
+  readonly id: string;
+  readonly proposalId: string;
+  readonly decisionId: string;
+  readonly candidateId: string;
+  readonly representation: CompletionTargetRepresentation;
+  readonly sourceRevisionId: string;
+  readonly sourceResultHash: string;
+  readonly sourceSkinHash: string;
+  readonly revision: ApiRevision | null;
+  readonly latentPart: ApiPart | null;
+  readonly resultHash: string;
+  readonly resultSkinHash: string;
+  readonly originHash: string;
+  readonly publishedAt: string | null;
+  readonly createdAt: string;
+}
+
+export interface ApiCompletionProposalSummary {
+  readonly proposal: ApiCompletionProposal;
+  readonly jobStatus: ApiAiJobStatus;
+  readonly visible: boolean;
+  readonly status: ApiCompletionProposalStatus;
+  readonly candidateCount: number;
+  readonly ranking: ApiCompletionProposalRanking | null;
+  readonly decision: ApiCompletionDecision | null;
+  readonly result: ApiCompletionResult | null;
+}
+
+export interface ApiCompletionProposalDetail
+  extends ApiCompletionProposalSummary {
+  readonly candidates: readonly ApiCompletionCandidate[];
+}
+
+export interface ApiCompletionProposalListFilters {
+  readonly projectId?: string;
+  readonly revisionId?: string;
+  readonly jobId?: string;
+  readonly representation?: CompletionTargetRepresentation;
+  readonly status?: ApiCompletionProposalStatus | "all";
+}
+
+export interface StartCompletionProposalInput {
+  readonly targetComponentId: string;
+  readonly occludingComponentIds: readonly string[];
+  readonly representation?: CompletionRequestedRepresentation;
+}
+
+export interface ApiCompletionDecisionOutcome
+  extends ApiCompletionProposalDetail {
+  readonly changed: boolean;
+}
+
+export type ApiCompletionCandidateEdit =
+  | {
+      readonly type: "set_pixel";
+      readonly pixelId: number;
+      readonly rgba: Rgba;
+    }
+  | {
+      readonly type: "remove_pixel";
+      readonly pixelId: number;
+    };
+
+export interface ApiCompletionCandidateEditOutcome
+  extends ApiCompletionProposalDetail {
+  readonly changed: boolean;
+  readonly editedCandidateId: string;
+}
+
+export interface ApiCompletionPublishOutcome {
+  readonly changed: boolean;
+  readonly result: ApiCompletionResult;
+}
+
 export type ApiAiJobStatus =
   | "queued"
   | "preparing"
@@ -477,9 +679,21 @@ export interface ApiAiRestorationRecommendationOptions {
   readonly manualRgba?: Rgba;
 }
 
+export interface ApiAiCompletionProposalOptions {
+  readonly mode: "completion_proposal";
+  readonly provider: string;
+  readonly model: string;
+  readonly targetComponentId: string;
+  readonly occludingComponentIds: readonly string[];
+  readonly representation: CompletionRequestedRepresentation;
+  readonly rankingMode: "host_only" | "ai";
+  readonly reasoningEffort?: ApiAiReasoningEffort;
+}
+
 export type ApiAiJobOptions =
   | ApiAiAnalysisOptions
-  | ApiAiRestorationRecommendationOptions;
+  | ApiAiRestorationRecommendationOptions
+  | ApiAiCompletionProposalOptions;
 
 export interface ApiAiRestorationRecommendationDecision {
   readonly targetGroupId: string;
@@ -506,7 +720,10 @@ export interface ApiAiJobError {
 
 export interface ApiAiJob {
   readonly id: string;
-  readonly kind: "semantic_analysis" | "restoration_recommendation";
+  readonly kind:
+    | "semantic_analysis"
+    | "restoration_recommendation"
+    | "completion_proposal";
   readonly projectId: string;
   readonly inputRevisionId: string;
   readonly resultRevisionId: string | null;
@@ -795,13 +1012,14 @@ export async function branchRevision(
 
 export async function applySemanticOperation(
   revisionId: string,
-  operation: ManualSemanticOperation,
+  operation: ApiManualSemanticOperation,
   options: {
     readonly branchId?: string;
+    readonly actorId?: string;
     readonly summary?: string;
   } = {},
   fetcher: Fetcher = fetch,
-): Promise<ApiMutationResult> {
+): Promise<ApiRevisionMutationResult> {
   return requestJson(
     `/api/revisions/${encodeURIComponent(revisionId)}/operations`,
     {
@@ -1438,6 +1656,206 @@ export function compositionPreviewUrl(
   return `/api/compositions/${encodeURIComponent(compositionId)}/preview.png${cacheBuster}`;
 }
 
+export function revisionSkinUrl(revisionId: string): string {
+  return `/api/revisions/${encodeURIComponent(revisionId)}/skin.png`;
+}
+
+export async function startCompletionProposal(
+  revisionId: string,
+  input: StartCompletionProposalInput,
+  fetcher: Fetcher = fetch,
+): Promise<ApiAiJob> {
+  const body = await requestJson<{ job: ApiAiJob }>(
+    `/api/revisions/${encodeURIComponent(revisionId)}/completion-proposals`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    fetcher,
+  );
+  return body.job;
+}
+
+export async function listCompletionProposals(
+  filters: ApiCompletionProposalListFilters = {},
+  fetcher: Fetcher = fetch,
+): Promise<readonly ApiCompletionProposalSummary[]> {
+  const query = new URLSearchParams();
+  if (filters.projectId) query.set("projectId", filters.projectId);
+  if (filters.revisionId) query.set("revisionId", filters.revisionId);
+  if (filters.jobId) query.set("jobId", filters.jobId);
+  if (filters.representation) {
+    query.set("representation", filters.representation);
+  }
+  if (filters.status) query.set("status", filters.status);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const body = await requestJson<{
+    readonly proposals: readonly ApiCompletionProposalSummary[];
+  }>(`/api/completion-proposals${suffix}`, undefined, fetcher);
+  return body.proposals;
+}
+
+export function loadCompletionProposal(
+  proposalId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompletionProposalDetail> {
+  return requestJson(
+    `/api/completion-proposals/${encodeURIComponent(proposalId)}`,
+    undefined,
+    fetcher,
+  );
+}
+
+export function completionAllowedMaskUrl(proposalId: string): string {
+  return `/api/completion-proposals/${encodeURIComponent(proposalId)}/allowed-mask.png`;
+}
+
+export function completionCandidateDocumentUrl(
+  proposalId: string,
+  candidateId: string,
+): string {
+  return completionCandidateAssetUrl(proposalId, candidateId, "candidate.json");
+}
+
+export function loadCompletionCandidateDocument(
+  proposalId: string,
+  candidateId: string,
+  fetcher: Fetcher = fetch,
+): Promise<CompletionCandidateDocument> {
+  return requestJson(
+    completionCandidateDocumentUrl(proposalId, candidateId),
+    undefined,
+    fetcher,
+  );
+}
+
+export function completionCandidateTextureUrl(
+  proposalId: string,
+  candidateId: string,
+): string {
+  return completionCandidateAssetUrl(proposalId, candidateId, "texture.png");
+}
+
+export function completionCandidateWriteMaskUrl(
+  proposalId: string,
+  candidateId: string,
+): string {
+  return completionCandidateAssetUrl(proposalId, candidateId, "write-mask.png");
+}
+
+export function completionCandidateGeneratedMaskUrl(
+  proposalId: string,
+  candidateId: string,
+): string {
+  return completionCandidateAssetUrl(
+    proposalId,
+    candidateId,
+    "generated-mask.png",
+  );
+}
+
+export function acceptCompletionCandidate(
+  proposal: ApiCompletionProposal,
+  candidate: ApiCompletionCandidate,
+  input: {
+    readonly actorId?: string;
+    readonly summary?: string;
+  } = {},
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompletionDecisionOutcome> {
+  return requestJson(
+    `/api/completion-proposals/${encodeURIComponent(proposal.id)}/candidates/${encodeURIComponent(candidate.id)}/accept`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedSourceResultHash: proposal.sourceResultHash,
+        expectedProposalHash: proposal.proposalHash,
+        expectedEvidenceHash: proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        ...input,
+      }),
+    },
+    fetcher,
+  );
+}
+
+export function editCompletionCandidate(
+  proposal: ApiCompletionProposal,
+  candidate: ApiCompletionCandidate,
+  edits: readonly ApiCompletionCandidateEdit[],
+  input: { readonly actorId?: string } = {},
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompletionCandidateEditOutcome> {
+  if (edits.length < 1 || edits.length > 256) {
+    throw new RangeError("Completion candidate edits must contain 1-256 pixels");
+  }
+  return requestJson(
+    `/api/completion-proposals/${encodeURIComponent(proposal.id)}/candidates/${encodeURIComponent(candidate.id)}/edits`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedSourceResultHash: proposal.sourceResultHash,
+        expectedProposalHash: proposal.proposalHash,
+        expectedEvidenceHash: proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        ...input,
+        edits,
+      }),
+    },
+    fetcher,
+  );
+}
+
+export function publishCompletionResult(
+  result: ApiCompletionResult,
+  input: { readonly actorId?: string } = {},
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompletionPublishOutcome> {
+  if (result.representation !== "latent_component" || !result.latentPart) {
+    throw new TypeError("Only latent Completion Parts can be published");
+  }
+  return requestJson(
+    `/api/completion-results/${encodeURIComponent(result.id)}/publish`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedResultHash: result.resultHash,
+        expectedPartId: result.latentPart.id,
+        ...input,
+      }),
+    },
+    fetcher,
+  );
+}
+
+export function rejectCompletionProposal(
+  proposal: ApiCompletionProposal,
+  input: {
+    readonly actorId?: string;
+    readonly reason?: string;
+  } = {},
+  fetcher: Fetcher = fetch,
+): Promise<ApiCompletionDecisionOutcome> {
+  return requestJson(
+    `/api/completion-proposals/${encodeURIComponent(proposal.id)}/reject`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedSourceResultHash: proposal.sourceResultHash,
+        expectedProposalHash: proposal.proposalHash,
+        expectedEvidenceHash: proposal.evidenceHash,
+        ...input,
+      }),
+    },
+    fetcher,
+  );
+}
+
 export async function listAiProviders(
   fetcher: Fetcher = fetch,
 ): Promise<{
@@ -1626,4 +2044,16 @@ function copyArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function completionCandidateAssetUrl(
+  proposalId: string,
+  candidateId: string,
+  fileName:
+    | "candidate.json"
+    | "texture.png"
+    | "write-mask.png"
+    | "generated-mask.png",
+): string {
+  return `/api/completion-proposals/${encodeURIComponent(proposalId)}/candidates/${encodeURIComponent(candidateId)}/${fileName}`;
 }

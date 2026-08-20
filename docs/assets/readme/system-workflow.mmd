@@ -1,0 +1,25 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Segoe UI, Microsoft YaHei, sans-serif","primaryColor":"#f6f0df","primaryTextColor":"#13242a","primaryBorderColor":"#13242a","lineColor":"#167f88","secondaryColor":"#dceeea","tertiaryColor":"#f06a36","clusterBkg":"#fbf7eb","clusterBorder":"#13242a"},"flowchart":{"curve":"basis","htmlLabels":true}}}%%
+flowchart LR
+    A["<b>源皮肤 PNG</b><br/>Source skin"]
+    B["<b>确定性 Host</b><br/>PNG 解码 · UV 映射<br/>候选区域与证据"]
+    C["<b>可选 AI</b><br/>只分类或排序<br/>Host 给出的 ID"]
+    D["<b>严格校验</b><br/>Schema · 像素归属<br/>范围 · Hash · 来源"]
+    E["<b>用户检查确认</b><br/>修正草稿<br/>接受或保留原结果"]
+    F["<b>不可变新版本</b><br/>Revision · Branch<br/>逐像素 Origin"]
+    G["<b>可验证输出</b><br/>PNG · Part · Bundle<br/>修补与混搭"]
+
+    A --> B --> D --> E --> F --> G
+    B -. "可选 / optional" .-> C
+    C --> D
+    B -. "有界候选 / bounded" .-> H["<b>Completion 候选</b><br/>推测像素单独标记<br/>不改源版本"]
+    H --> E
+
+    X["<b>模型没有直接写入权</b><br/>No direct model write authority"]
+    C -.-> X
+
+    classDef host fill:#dceeea,stroke:#167f88,stroke-width:2px,color:#13242a;
+    classDef review fill:#f6f0df,stroke:#13242a,stroke-width:2px,color:#13242a;
+    classDef optional fill:#fff1e8,stroke:#f06a36,stroke-width:2px,stroke-dasharray:6 4,color:#522514;
+    class A,B,D,F,G host;
+    class E review;
+    class C,H,X optional;

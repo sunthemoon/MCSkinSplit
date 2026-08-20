@@ -19,13 +19,14 @@ import {
 import {
   AGGREGATE_KINDS,
   MAX_COMPLETION_OCCLUDING_COMPONENTS,
+  MAX_COMPLETION_PIXEL_EDITS,
   SEMANTIC_CATEGORIES,
   SkinPngError,
   summarizePixelOrigins,
   summarizePixelOriginsForMask,
   type AggregateKind,
   type ArmType,
-  type ManualSemanticOperation,
+  type CompletionCandidateEdit,
   type PixelOriginDocument,
   type PixelOriginSummary,
   type SemanticCategory,
@@ -38,6 +39,7 @@ import {
   type CompletionProposalDetail,
   type CompletionProposalSummary,
   type StoredCompletionCandidate,
+  type ManualRevisionSemanticOperation,
   type PartBundle,
   type RevertRevisionInput,
   type SerializedPartRepairOperation,
@@ -132,6 +134,10 @@ interface CompletionCandidateParams extends CompletionProposalParams {
   readonly candidateId: string;
 }
 
+interface CompletionResultParams {
+  readonly resultId: string;
+}
+
 interface CreateProjectBody {
   readonly name: string;
 }
@@ -149,7 +155,7 @@ interface BranchBody extends BranchFromRevisionInput {
   readonly revisionId?: string;
 }
 
-type ManualOperationBody = ManualSemanticOperation & {
+type ManualOperationBody = ManualRevisionSemanticOperation & {
   readonly branchId?: string;
   readonly actorId?: string;
   readonly summary?: string;
@@ -335,6 +341,21 @@ interface AcceptCompletionCandidateBody {
   readonly expectedCandidateHash: string;
   readonly actorId?: string;
   readonly summary?: string;
+}
+
+interface EditCompletionCandidateBody {
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string;
+  readonly actorId?: string;
+  readonly edits: readonly CompletionCandidateEdit[];
+}
+
+interface PublishCompletionResultBody {
+  readonly expectedResultHash: string;
+  readonly expectedPartId: string;
+  readonly actorId?: string;
 }
 
 interface RejectCompletionProposalBody {
@@ -759,7 +780,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
       const result = await store.applyManualOperation(
         request.params.revisionId,
         {
-          operation: operation as ManualSemanticOperation,
+          operation: operation as ManualRevisionSemanticOperation,
           ...(branchId ? { branchId } : {}),
           ...(actorId ? { actorId } : {}),
           ...(summary ? { summary } : {}),
@@ -1349,6 +1370,26 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
       ),
   );
 
+  app.post<{
+    Params: CompletionCandidateParams;
+    Body: EditCompletionCandidateBody;
+  }>(
+    "/api/completion-proposals/:proposalId/candidates/:candidateId/edits",
+    { schema: { body: editCompletionCandidateSchema } },
+    async (request, reply) => {
+      const outcome = await store.editCompletionCandidate(
+        request.params.proposalId,
+        request.params.candidateId,
+        request.body,
+      );
+      return reply.status(outcome.changed ? 201 : 200).send({
+        changed: outcome.changed,
+        editedCandidateId: outcome.editedCandidateId,
+        ...publicCompletionProposalDetail(outcome.detail),
+      });
+    },
+  );
+
   app.get<{ Params: CompletionCandidateParams }>(
     "/api/completion-proposals/:proposalId/candidates/:candidateId/texture.png",
     async (request, reply) =>
@@ -1411,6 +1452,21 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
         changed: outcome.changed,
         ...publicCompletionProposalDetail(outcome.detail),
       });
+    },
+  );
+
+  app.post<{
+    Params: CompletionResultParams;
+    Body: PublishCompletionResultBody;
+  }>(
+    "/api/completion-results/:resultId/publish",
+    { schema: { body: publishCompletionResultSchema } },
+    async (request, reply) => {
+      const outcome = await store.publishCompletionResultOutcome(
+        request.params.resultId,
+        request.body,
+      );
+      return reply.status(outcome.changed ? 201 : 200).send(outcome);
     },
   );
 
@@ -1542,7 +1598,7 @@ const spanSchema = {
 const componentInputSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["instanceId", "displayName", "category"],
+  required: ["displayName", "category"],
   properties: {
     instanceId: {
       type: "string",
@@ -1556,6 +1612,40 @@ const componentInputSchema = {
   },
 } as const;
 
+const componentRelationIdSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 100,
+  pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+} as const;
+
+const componentRelationsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["attachedTo", "pairedWith", "sameOutfitGroup", "conflictsWith"],
+  properties: {
+    attachedTo: { anyOf: [componentRelationIdSchema, { type: "null" }] },
+    pairedWith: {
+      type: "array",
+      uniqueItems: true,
+      maxItems: 256,
+      items: componentRelationIdSchema,
+    },
+    sameOutfitGroup: {
+      anyOf: [
+        { type: "string", minLength: 1, maxLength: 100 },
+        { type: "null" },
+      ],
+    },
+    conflictsWith: {
+      type: "array",
+      uniqueItems: true,
+      maxItems: 256,
+      items: componentRelationIdSchema,
+    },
+  },
+} as const;
+
 const operationMetadataProperties = {
   branchId: { type: "string", minLength: 1 },
   actorId: { type: "string", minLength: 1, maxLength: 120 },
@@ -1563,63 +1653,77 @@ const operationMetadataProperties = {
 } as const;
 
 const manualOperationSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["type"],
-  properties: {
-    type: {
-      type: "string",
-      enum: [
-        "assign_pixels",
-        "unassign_pixels",
-        "merge_components",
-        "split_component",
-        "reclassify_component",
-      ],
-    },
-    target: componentInputSchema,
-    spans: { type: "array", minItems: 1, items: spanSchema },
-    componentIds: {
-      type: "array",
-      minItems: 2,
-      uniqueItems: true,
-      items: { type: "string", minLength: 1, maxLength: 100 },
-    },
-    sourceComponentId: { type: "string", minLength: 1, maxLength: 100 },
-    componentId: { type: "string", minLength: 1, maxLength: 100 },
-    category: { type: "string", enum: SEMANTIC_CATEGORIES },
-    subtype: { type: "string", minLength: 1, maxLength: 80 },
-    ...operationMetadataProperties,
-  },
   oneOf: [
     {
+      type: "object",
+      additionalProperties: false,
       required: ["type", "target", "spans"],
       properties: {
         type: { const: "assign_pixels" },
+        target: componentInputSchema,
+        spans: { type: "array", minItems: 1, items: spanSchema },
+        ...operationMetadataProperties,
       },
     },
     {
+      type: "object",
+      additionalProperties: false,
       required: ["type", "spans"],
       properties: {
         type: { const: "unassign_pixels" },
+        spans: { type: "array", minItems: 1, items: spanSchema },
+        ...operationMetadataProperties,
       },
     },
     {
+      type: "object",
+      additionalProperties: false,
       required: ["type", "componentIds", "target"],
       properties: {
         type: { const: "merge_components" },
+        componentIds: {
+          type: "array",
+          minItems: 2,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1, maxLength: 100 },
+        },
+        target: componentInputSchema,
+        ...operationMetadataProperties,
       },
     },
     {
+      type: "object",
+      additionalProperties: false,
       required: ["type", "sourceComponentId", "target", "spans"],
       properties: {
         type: { const: "split_component" },
+        sourceComponentId: { type: "string", minLength: 1, maxLength: 100 },
+        target: componentInputSchema,
+        spans: { type: "array", minItems: 1, items: spanSchema },
+        ...operationMetadataProperties,
       },
     },
     {
+      type: "object",
+      additionalProperties: false,
       required: ["type", "componentId", "category"],
       properties: {
         type: { const: "reclassify_component" },
+        componentId: { type: "string", minLength: 1, maxLength: 100 },
+        category: { type: "string", enum: SEMANTIC_CATEGORIES },
+        subtype: { type: "string", minLength: 1, maxLength: 80 },
+        ...operationMetadataProperties,
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "componentId", "relations"],
+      properties: {
+        type: { const: "set_component_relations" },
+        componentId: { type: "string", minLength: 1, maxLength: 100 },
+        relations: componentRelationsSchema,
+        ...operationMetadataProperties,
       },
     },
   ],
@@ -2177,6 +2281,63 @@ const acceptCompletionCandidateSchema = {
     ...completionDecisionCommonProperties,
     expectedCandidateHash: candidateSetHashSchema,
     summary: { type: "string", minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+const completionCandidateEditSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "pixelId", "rgba"],
+      properties: {
+        type: { const: "set_pixel" },
+        pixelId: { type: "integer", minimum: 0, maximum: 4095 },
+        rgba: opaqueRgbaSchema,
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "pixelId"],
+      properties: {
+        type: { const: "remove_pixel" },
+        pixelId: { type: "integer", minimum: 0, maximum: 4095 },
+      },
+    },
+  ],
+} as const;
+
+const editCompletionCandidateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "expectedSourceResultHash",
+    "expectedProposalHash",
+    "expectedEvidenceHash",
+    "expectedCandidateHash",
+    "edits",
+  ],
+  properties: {
+    ...completionDecisionCommonProperties,
+    expectedCandidateHash: candidateSetHashSchema,
+    edits: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_COMPLETION_PIXEL_EDITS,
+      items: completionCandidateEditSchema,
+    },
+  },
+} as const;
+
+const publishCompletionResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["expectedResultHash", "expectedPartId"],
+  properties: {
+    expectedResultHash: candidateSetHashSchema,
+    expectedPartId: { type: "string", minLength: 1, maxLength: 120 },
+    actorId: { type: "string", minLength: 1, maxLength: 120 },
   },
 } as const;
 

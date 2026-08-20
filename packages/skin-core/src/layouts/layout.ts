@@ -1,5 +1,5 @@
-import slimLayoutJson from "./slim-64.json";
-import wideLayoutJson from "./wide-64.json";
+import slimLayoutJson from "./slim-64.json" with { type: "json" };
+import wideLayoutJson from "./wide-64.json" with { type: "json" };
 import {
   BODY_PARTS,
   FACES,

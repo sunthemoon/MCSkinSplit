@@ -6,6 +6,8 @@ import {
   MAX_COMPLETION_OCCLUDING_COMPONENTS,
   MAX_COMPLETION_PIXEL_EDITS,
   MAX_COMPLETION_PROPOSAL_CANDIDATES,
+  COMPLETION_CANDIDATE_ALGORITHM_V1,
+  COMPLETION_CANDIDATE_ALGORITHM_V2,
   applyCompletionDecision,
   applyCompletionSemanticDelta,
   applyManualSemanticOperation,
@@ -18,6 +20,8 @@ import {
   createSourceVisiblePixelOriginDocument,
   editCompletionCandidate,
   generateCompletionProposalCandidates,
+  generateCompletionProposalCandidatesV1,
+  generateCompletionProposalCandidatesV2,
   getPixel,
   getPixelOrigin,
   getSkinLayout,
@@ -132,6 +136,124 @@ describe("hidden-content Completion domain", () => {
     expect(maskToPixelIds(semanticState.masks["hair.long"]!)).toEqual(
       fixture.occluders.map((item) => item.pixelId).sort(numberCompare),
     );
+  });
+
+  it("keeps v1 replay behavior while v2 rejects a one-sided transparent boundary", () => {
+    const image = createRgbaImage(64, 64);
+    const visibleTarget = texel("slim", "torso.base.front", 1, 2);
+    const hidden = texel("slim", "torso.base.front", 2, 2);
+    const occluder = texel("slim", "torso.outer.front", 2, 2);
+    paint(image, [visibleTarget], [31, 61, 91, 255]);
+    paint(image, [occluder], [8, 18, 28, 255]);
+    const source = semanticSource("rev_versioned_boundary", image, [
+      component("outfit.main", "upper_clothing", [visibleTarget]),
+      component("hair.long", "hair", [occluder]),
+    ]);
+    const common = {
+      ...source,
+      targetComponentId: "outfit.main",
+      occludingComponentIds: ["hair.long"],
+      representation: "skin_texel" as const,
+      hashCanonical,
+    };
+    const defaultV1 = generateCompletionProposalCandidates({
+      ...common,
+      proposalId: "completionproposal_boundary",
+    });
+    const explicitV1 = generateCompletionProposalCandidatesV1({
+      ...common,
+      proposalId: "completionproposal_boundary",
+    });
+    const v2 = generateCompletionProposalCandidatesV2({
+      ...common,
+      proposalId: "completionproposal_boundary",
+    });
+
+    expect(explicitV1).toEqual(defaultV1);
+    expect(explicitV1.algorithmVersion).toBe(COMPLETION_CANDIDATE_ALGORITHM_V1);
+    expect(explicitV1.allowedGeneratedPixelIds).toEqual([hidden.pixelId]);
+    expect(explicitV1.candidates.map((candidate) => candidate.strategy)).toEqual([
+      "same_surface_continuation",
+      "neighbor_reference",
+    ]);
+    expect({
+      evidenceHash: explicitV1.evidenceHash,
+      proposalHash: explicitV1.proposalHash,
+      candidateHashes: explicitV1.candidates.map((candidate) => candidate.candidateHash),
+      candidateIds: explicitV1.candidates.map((candidate) => candidate.candidateId),
+    }).toEqual({
+      evidenceHash:
+        "sha256:4743ebf79795fcffe7f66676f7d5e946809ee7723a63af06257a69081e599f19",
+      proposalHash:
+        "sha256:38806edad2728731bbb4afb2dbf607a75872c08c49c19da135339de6e86e91a2",
+      candidateHashes: [
+        "sha256:a8666e6ef03f6589592b383499059535ce7df7c0f418fe853569f6290b5ef680",
+        "sha256:4cbede1316572c3121537bb664447a250c18bd9cca9e9b36c4ab0dd8ad129c53",
+      ],
+      candidateIds: [
+        "completioncandidate_5a5dab578c48f09de985f231c03273fba442a03ee326cf816e7232c5d1b706be",
+        "completioncandidate_1c64f59cdb22c018bd818813f109000b126ad395f4db93effb666d0734ef0c2c",
+      ],
+    });
+    expect(v2.algorithmVersion).toBe(COMPLETION_CANDIDATE_ALGORITHM_V2);
+    expect(v2.allowedGeneratedPixelIds).toEqual([hidden.pixelId]);
+    expect(v2.candidates).toEqual([]);
+    expect(v2.evidenceHash).not.toBe(explicitV1.evidenceHash);
+    expect(v2.proposalHash).not.toBe(explicitV1.proposalHash);
+    validateCompletionProposalSource(explicitV1, source);
+    validateCompletionProposalHashes(explicitV1, hashCanonical);
+    validateCompletionProposalSource(v2, source);
+    validateCompletionProposalHashes(v2, hashCanonical);
+  });
+
+  it("keeps a v2 same-surface candidate when visible target evidence bounds the gap", () => {
+    const image = createRgbaImage(64, 64);
+    const visibleTargets = [
+      texel("slim", "torso.base.front", 1, 3),
+      texel("slim", "torso.base.front", 3, 3),
+    ];
+    const hidden = texel("slim", "torso.base.front", 2, 3);
+    const occluder = texel("slim", "torso.outer.front", 2, 3);
+    paint(image, visibleTargets, [31, 61, 91, 255]);
+    paint(image, [occluder], [8, 18, 28, 255]);
+    const source = semanticSource("rev_versioned_bounded_gap", image, [
+      component("outfit.main", "upper_clothing", visibleTargets),
+      component("hair.long", "hair", [occluder]),
+    ]);
+    const request = {
+      ...source,
+      proposalId: "completionproposal_bounded_v2",
+      targetComponentId: "outfit.main",
+      occludingComponentIds: ["hair.long"],
+      representation: "skin_texel" as const,
+      hashCanonical,
+    };
+    const v1Proposal = generateCompletionProposalCandidates(request);
+    const proposal = generateCompletionProposalCandidatesV2(request);
+
+    const candidate = findCandidate(proposal, "same_surface_continuation");
+    const v1Candidate = findCandidate(v1Proposal, "same_surface_continuation");
+    expect(candidate.pixelIds).toEqual([hidden.pixelId]);
+    expect(candidate.assignments[0]!.rgba).toEqual([31, 61, 91, 255]);
+    expect(candidate.candidateHash).not.toBe(v1Candidate.candidateHash);
+    expect(candidate.candidateId).not.toBe(v1Candidate.candidateId);
+    expect(proposal.candidates.some(
+      (item) => item.strategy === "neighbor_reference",
+    )).toBe(false);
+    const edited = editCompletionCandidate({
+      proposal,
+      candidateId: candidate.candidateId,
+      edits: [{ type: "set_pixel", pixelId: hidden.pixelId, rgba: [9, 8, 7, 255] }],
+      actor: { type: "user", id: "player" },
+      operationId: "op_completion_v2_edit",
+      hashCanonical,
+    });
+    expect(edited.algorithmVersion).toBe(COMPLETION_CANDIDATE_ALGORITHM_V2);
+    expect(edited.evidence.algorithmVersion).toBe(
+      COMPLETION_CANDIDATE_ALGORITHM_V2,
+    );
+    validateCompletionCandidate(proposal, edited, source);
+    validateCompletionCandidateHashes(proposal, edited, hashCanonical);
   });
 
   it("limits latent pixels to target-supported body/layer groups and keeps the full target variant", () => {
@@ -262,6 +384,21 @@ describe("hidden-content Completion domain", () => {
       .toMatchObject({ intrinsicOrigin: "manual_authored" });
     expect(getPixelOrigin(transformed.result.originDocument, unchangedPixelId!))
       .toMatchObject({ intrinsicOrigin: "generated_completion" });
+
+    expect(() => editCompletionCandidate({
+      proposal,
+      candidateId: base.candidateId,
+      edits: [{
+        type: "set_pixel",
+        pixelId: unchangedPixelId!,
+        rgba: base.assignments.find(
+          (item) => item.targetPixelId === unchangedPixelId,
+        )!.rgba,
+      }],
+      actor: { type: "user", id: "player" },
+      operationId: "op_completion_noop",
+      hashCanonical,
+    })).toThrow(/do not change/u);
   });
 
   it("keeps sampled hidden texels generated while recording immediate copy lineage", () => {

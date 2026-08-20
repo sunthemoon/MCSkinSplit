@@ -312,6 +312,145 @@ describe("revision API", () => {
     });
   });
 
+  it("generates component IDs and applies directional and symmetric relations", async () => {
+    const { app, store } = await createApi();
+    const project = await createProject(app, "Generated component API");
+    const imported = await importSkin(app, project.projectId);
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${imported.revisionId}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: { displayName: "Generated hair", category: "hair" },
+        spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+      },
+    });
+    expect(firstResponse.statusCode).toBe(201);
+    const first = firstResponse.json<MutationResponse>();
+    expect(first.generatedComponentId).toMatch(/^component_/u);
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${first.revision.id}/operations`,
+      payload: {
+        type: "assign_pixels",
+        target: { displayName: "Generated accessory", category: "head_accessory" },
+        spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+      },
+    });
+    expect(secondResponse.statusCode).toBe(201);
+    const second = secondResponse.json<MutationResponse>();
+    expect(second.generatedComponentId).toMatch(/^component_/u);
+    expect(second.generatedComponentId).not.toBe(first.generatedComponentId);
+
+    const related = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${second.revision.id}/operations`,
+      payload: {
+        type: "set_component_relations",
+        componentId: first.generatedComponentId,
+        relations: {
+          attachedTo: second.generatedComponentId,
+          pairedWith: [second.generatedComponentId],
+          sameOutfitGroup: "generated.outfit",
+          conflictsWith: [second.generatedComponentId],
+        },
+      },
+    });
+    expect(related.statusCode).toBe(201);
+    const state = await store.readRevisionSemanticState(
+      related.json<MutationResponse>().revision.id,
+    );
+    const byId = new Map(
+      state.document.components.map((component) => [component.instanceId, component]),
+    );
+    expect(byId.get(first.generatedComponentId!)!.relations).toEqual({
+      attachedTo: second.generatedComponentId,
+      pairedWith: [second.generatedComponentId],
+      sameOutfitGroup: "generated.outfit",
+      conflictsWith: [second.generatedComponentId],
+    });
+    expect(byId.get(second.generatedComponentId!)!.relations).toMatchObject({
+      attachedTo: null,
+      pairedWith: [first.generatedComponentId],
+      conflictsWith: [first.generatedComponentId],
+    });
+
+    const selfRelation = await app.inject({
+      method: "POST",
+      url: `/api/revisions/${related.json<MutationResponse>().revision.id}/operations`,
+      payload: {
+        type: "set_component_relations",
+        componentId: first.generatedComponentId,
+        relations: {
+          attachedTo: first.generatedComponentId,
+          pairedWith: [],
+          sameOutfitGroup: null,
+          conflictsWith: [],
+        },
+      },
+    });
+    expect(selfRelation.statusCode).toBe(400);
+    expect(selfRelation.json()).toMatchObject({
+      error: { code: "INVALID_INPUT" },
+    });
+  });
+
+  it("rejects known fields from a different manual-operation branch", async () => {
+    const { app } = await createApi();
+    const project = await createProject(app, "Strict manual operation API");
+    const imported = await importSkin(app, project.projectId);
+    const span = { surface: "head.base.front", y: 8, x0: 8, x1: 8 };
+    const target = { displayName: "Strict target", category: "hair" };
+    const relations = {
+      attachedTo: null,
+      pairedWith: [],
+      sameOutfitGroup: null,
+      conflictsWith: [],
+    };
+    const invalidPayloads = [
+      { type: "assign_pixels", target, spans: [span], relations },
+      { type: "unassign_pixels", spans: [span], target },
+      {
+        type: "merge_components",
+        componentIds: ["hair.one", "hair.two"],
+        target,
+        relations,
+      },
+      {
+        type: "split_component",
+        sourceComponentId: "hair.one",
+        target,
+        spans: [span],
+        componentIds: ["hair.one", "hair.two"],
+      },
+      {
+        type: "reclassify_component",
+        componentId: "hair.one",
+        category: "hair",
+        spans: [span],
+      },
+      {
+        type: "set_component_relations",
+        componentId: "hair.one",
+        relations,
+        spans: [span],
+      },
+    ];
+
+    for (const payload of invalidPayloads) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/revisions/${imported.revisionId}/operations`,
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        error: { code: "INVALID_REQUEST" },
+      });
+    }
+  });
+
   it("supports semantic edit, part export, conflict preview, and explicit apply", async () => {
     const { app } = await createApi();
     const sourceProject = await createProject(app, "Semantic API source");
@@ -1849,6 +1988,7 @@ describe("revision API", () => {
       candidateCount: number;
       candidates: readonly {
         id: string;
+        baseCandidateId: string | null;
         candidateHash: string;
         reviewRequired: boolean;
         automaticAcceptanceAllowed: boolean;
@@ -1867,6 +2007,7 @@ describe("revision API", () => {
     expect(detail.candidates.length).toBeGreaterThan(0);
     const candidate = detail.candidates[0]!;
     expect(candidate).toMatchObject({
+      baseCandidateId: null,
       reviewRequired: true,
       automaticAcceptanceAllowed: false,
     });
@@ -1917,17 +2058,94 @@ describe("revision API", () => {
       error: { code: "COMPLETION_CANDIDATE_NOT_FOUND" },
     });
 
+    const candidateDocument = (await app.inject({
+      method: "GET",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/candidate.json`,
+    })).json<{
+      assignments: readonly { targetPixelId: number; rgba: readonly number[] }[];
+    }>();
+    const transparentEdit = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/edits`,
+      payload: {
+        expectedSourceResultHash: detail.proposal.sourceResultHash,
+        expectedProposalHash: detail.proposal.proposalHash,
+        expectedEvidenceHash: detail.proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        actorId: "api-reviewer",
+        edits: [{
+          type: "set_pixel",
+          pixelId: candidateDocument.assignments[0]!.targetPixelId,
+          rgba: [12, 34, 56, 0],
+        }],
+      },
+    });
+    expect(transparentEdit.statusCode).toBe(400);
+    expect(transparentEdit.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+    const edited = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/edits`,
+      payload: {
+        expectedSourceResultHash: detail.proposal.sourceResultHash,
+        expectedProposalHash: detail.proposal.proposalHash,
+        expectedEvidenceHash: detail.proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        actorId: "api-reviewer",
+        edits: [{
+          type: "set_pixel",
+          pixelId: candidateDocument.assignments[0]!.targetPixelId,
+          rgba: [12, 34, 56, 128],
+        }],
+      },
+    });
+    expect(edited.statusCode).toBe(201);
+    const editedBody = edited.json<{
+      editedCandidateId: string;
+      candidates: readonly {
+        id: string;
+        baseCandidateId: string | null;
+        candidateHash: string;
+      }[];
+    }>();
+    const editedCandidate = editedBody.candidates.find(
+      (item) => item.id === editedBody.editedCandidateId,
+    )!;
+    expect(editedCandidate).toMatchObject({ baseCandidateId: candidate.id });
+    const editedReplay = await app.inject({
+      method: "POST",
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/edits`,
+      payload: {
+        expectedSourceResultHash: detail.proposal.sourceResultHash,
+        expectedProposalHash: detail.proposal.proposalHash,
+        expectedEvidenceHash: detail.proposal.evidenceHash,
+        expectedCandidateHash: candidate.candidateHash,
+        actorId: "api-reviewer",
+        edits: [{
+          type: "set_pixel",
+          pixelId: candidateDocument.assignments[0]!.targetPixelId,
+          rgba: [12, 34, 56, 128],
+        }],
+      },
+    });
+    expect(editedReplay.statusCode).toBe(200);
+    expect(editedReplay.json()).toMatchObject({
+      changed: false,
+      editedCandidateId: editedCandidate.id,
+    });
+
     const acceptPayload = {
       expectedSourceResultHash: detail.proposal.sourceResultHash,
       expectedProposalHash: detail.proposal.proposalHash,
       expectedEvidenceHash: detail.proposal.evidenceHash,
-      expectedCandidateHash: candidate.candidateHash,
+      expectedCandidateHash: editedCandidate.candidateHash,
       actorId: "api-reviewer",
       summary: "接受隐藏内容候选",
     };
     const staleAccept = await app.inject({
       method: "POST",
-      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${editedCandidate.id}/accept`,
       payload: {
         ...acceptPayload,
         expectedProposalHash: `sha256:${"0".repeat(64)}`,
@@ -1939,17 +2157,21 @@ describe("revision API", () => {
     });
     const accepted = await app.inject({
       method: "POST",
-      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${editedCandidate.id}/accept`,
       payload: acceptPayload,
     });
     expect(accepted.statusCode).toBe(201);
     const acceptedBody = accepted.json<{
-      result: { latentPart: { id: string } };
+      result: {
+        id: string;
+        resultHash: string;
+        latentPart: { id: string };
+      };
     }>();
     expect(acceptedBody).toMatchObject({
       changed: true,
       status: "accepted",
-      decision: { action: "accept", candidateId: candidate.id },
+      decision: { action: "accept", candidateId: editedCandidate.id },
       result: {
         representation: "latent_component",
         revision: null,
@@ -1969,11 +2191,55 @@ describe("revision API", () => {
     ).not.toContain(acceptedBody.result.latentPart.id);
     const repeatedAccept = await app.inject({
       method: "POST",
-      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${candidate.id}/accept`,
+      url: `/api/completion-proposals/${detail.proposal.id}/candidates/${editedCandidate.id}/accept`,
       payload: acceptPayload,
     });
     expect(repeatedAccept.statusCode).toBe(200);
     expect(repeatedAccept.json()).toMatchObject({ changed: false });
+
+    const stalePublish = await app.inject({
+      method: "POST",
+      url: `/api/completion-results/${acceptedBody.result.id}/publish`,
+      payload: {
+        expectedResultHash: `sha256:${"0".repeat(64)}`,
+        expectedPartId: acceptedBody.result.latentPart.id,
+      },
+    });
+    expect(stalePublish.statusCode).toBe(409);
+    const published = await app.inject({
+      method: "POST",
+      url: `/api/completion-results/${acceptedBody.result.id}/publish`,
+      payload: {
+        expectedResultHash: acceptedBody.result.resultHash,
+        expectedPartId: acceptedBody.result.latentPart.id,
+        actorId: "api-reviewer",
+      },
+    });
+    expect(published.statusCode).toBe(201);
+    expect(published.json()).toMatchObject({
+      changed: true,
+      result: {
+        id: acceptedBody.result.id,
+        latentPart: { id: acceptedBody.result.latentPart.id },
+        publishedAt: expect.any(String),
+      },
+    });
+    const replayedPublish = await app.inject({
+      method: "POST",
+      url: `/api/completion-results/${acceptedBody.result.id}/publish`,
+      payload: {
+        expectedResultHash: acceptedBody.result.resultHash,
+        expectedPartId: acceptedBody.result.latentPart.id,
+        actorId: "api-reviewer",
+      },
+    });
+    expect(replayedPublish.statusCode).toBe(200);
+    expect(replayedPublish.json()).toMatchObject({ changed: false });
+    expect((await app.inject({
+      method: "GET",
+      url: `/api/parts?projectId=${project.projectId}`,
+    })).json<{ parts: readonly { id: string }[] }>().parts.map((part) => part.id))
+      .toContain(acceptedBody.result.latentPart.id);
 
     const conflictingReject = await app.inject({
       method: "POST",
@@ -2358,6 +2624,7 @@ interface ImportResponse {
 }
 
 interface MutationResponse {
+  readonly generatedComponentId?: string;
   readonly revision: {
     readonly id: string;
     readonly parentRevisionId: string | null;

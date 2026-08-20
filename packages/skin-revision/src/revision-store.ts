@@ -32,6 +32,7 @@ import {
   decodeSkinPng,
   deriveGeneratedPixelMask,
   derivePartWriteMask,
+  editCompletionCandidate as editCoreCompletionCandidate,
   encodeSkinPng,
   exportSemanticPart,
   getSkinLayout,
@@ -57,6 +58,7 @@ import {
   validateCompletionProposalHashes,
   validateCompletionProposalSource,
   validateSemanticState,
+  MAX_COMPLETION_PIXEL_EDITS,
   canonicalRestorationJson,
   generateRestorationCandidates as generateCoreRestorationCandidates,
   createRestorationPlanFromCandidates as createCoreRestorationPlanFromCandidates,
@@ -73,6 +75,7 @@ import {
   type RestorationCandidateSet as CoreRestorationCandidateSet,
   type RestorationSemanticRevision as CoreRestorationSemanticRevision,
   type CompletionCandidate,
+  type CompletionCandidateEdit,
   type CompletionCandidateDocument,
   type CompletionDecision,
   type CompletionProposal,
@@ -135,6 +138,7 @@ import {
   type CompositionRestorationCandidates,
   type CompositionRestorationEvent,
   type CompletionDecisionOutcome,
+  type CompletionCandidateEditOutcome,
   type CompletionProposalDetail,
   type CompletionProposalListQuery,
   type CompletionProposalSummary,
@@ -144,7 +148,10 @@ import {
   type AcceptCompletionCandidateInput,
   type RejectCompletionProposalInput,
   type DecideCompletionProposalInput,
+  type EditCompletionCandidateInput,
   type PublishCompletionResultInput,
+  type PublishCompletionResultRequest,
+  type CompletionResultPublicationOutcome,
   type StoredCompletionCandidate,
   type StoredCompletionDecision,
   type StoredCompletionProposal,
@@ -481,6 +488,23 @@ interface CompletionCandidateRow {
   readonly generated_mask_storage_path: string;
   readonly generated_mask_byte_size: number;
   readonly generated_mask_sha256: string;
+  readonly created_at: string;
+  readonly base_candidate_id: string | null;
+}
+
+interface CompletionCandidateEditRow {
+  readonly candidate_id: string;
+  readonly proposal_id: string;
+  readonly base_candidate_id: string;
+  readonly expected_source_result_hash: string;
+  readonly expected_proposal_hash: string;
+  readonly expected_evidence_hash: string;
+  readonly expected_candidate_hash: string;
+  readonly actor_type: string;
+  readonly actor_id: string | null;
+  readonly operation_id: string;
+  readonly edits_json: string;
+  readonly edit_hash: string;
   readonly created_at: string;
 }
 
@@ -1306,7 +1330,8 @@ export class RevisionStore {
     );
     const document = await this.verifyCompletionProposalFiles(
       row,
-      candidateRows,
+      candidateRows.filter((candidate) => candidate.base_candidate_id === null),
+      candidateRows.filter((candidate) => candidate.base_candidate_id !== null),
       stored,
     );
     return {
@@ -1332,6 +1357,16 @@ export class RevisionStore {
   ): Promise<CompletionProposalDetail> {
     return await this.withWriteLock(() =>
       this.createCompletionProposalUnlocked(input)
+    );
+  }
+
+  async editCompletionCandidate(
+    proposalId: string,
+    candidateId: string,
+    input: EditCompletionCandidateInput,
+  ): Promise<CompletionCandidateEditOutcome> {
+    return await this.withWriteLock(() =>
+      this.editCompletionCandidateUnlocked(proposalId, candidateId, input)
     );
   }
 
@@ -1373,6 +1408,9 @@ export class RevisionStore {
       row.id,
     );
     this.verifyCompletionCandidateFiles(row, stored);
+    if (row.base_candidate_id !== null) {
+      await this.getCompletionProposalDetail(row.proposal_id);
+    }
     return stored;
   }
 
@@ -1383,7 +1421,12 @@ export class RevisionStore {
       row.id,
       candidateRows.map((candidate) => candidate.id),
     );
-    await this.verifyCompletionProposalFiles(row, candidateRows, stored);
+    await this.verifyCompletionProposalFiles(
+      row,
+      candidateRows.filter((candidate) => candidate.base_candidate_id === null),
+      candidateRows.filter((candidate) => candidate.base_candidate_id !== null),
+      stored,
+    );
     return stored.files["allowed-mask.png"].bytes.slice();
   }
 
@@ -1391,8 +1434,17 @@ export class RevisionStore {
     resultId: string,
     input: PublishCompletionResultInput = {},
   ): Promise<CompletionResult> {
+    return await this.withWriteLock(async () =>
+      (await this.publishCompletionResultOutcomeUnlocked(resultId, input)).result
+    );
+  }
+
+  async publishCompletionResultOutcome(
+    resultId: string,
+    input: PublishCompletionResultRequest,
+  ): Promise<CompletionResultPublicationOutcome> {
     return await this.withWriteLock(() =>
-      this.publishCompletionResultUnlocked(resultId, input)
+      this.publishCompletionResultOutcomeUnlocked(resultId, input)
     );
   }
 
@@ -2982,9 +3034,12 @@ export class RevisionStore {
   ): CompletionCandidateRow[] {
     return this.database
       .prepare(`
-        SELECT * FROM completion_candidate
-        WHERE proposal_id = ?
-        ORDER BY created_at, id
+        SELECT candidate.*, edit.base_candidate_id
+        FROM completion_candidate AS candidate
+        LEFT JOIN completion_candidate_edit AS edit
+          ON edit.candidate_id = candidate.id
+        WHERE candidate.proposal_id = ?
+        ORDER BY candidate.created_at, candidate.id
       `)
       .all(proposalId) as CompletionCandidateRow[];
   }
@@ -2993,11 +3048,32 @@ export class RevisionStore {
     candidateId: string,
   ): CompletionCandidateRow {
     const row = this.database
-      .prepare("SELECT * FROM completion_candidate WHERE id = ?")
+      .prepare(`
+        SELECT candidate.*, edit.base_candidate_id
+        FROM completion_candidate AS candidate
+        LEFT JOIN completion_candidate_edit AS edit
+          ON edit.candidate_id = candidate.id
+        WHERE candidate.id = ?
+      `)
       .get(validateText("candidateId", candidateId, 120)) as
       | CompletionCandidateRow
       | undefined;
     if (!row) throw notFound("Completion Candidate", candidateId);
+    return row;
+  }
+
+  private getCompletionCandidateEditRow(
+    candidateId: string,
+  ): CompletionCandidateEditRow {
+    const row = this.database
+      .prepare("SELECT * FROM completion_candidate_edit WHERE candidate_id = ?")
+      .get(candidateId) as CompletionCandidateEditRow | undefined;
+    if (!row) {
+      throw completionCorrupt(
+        candidateId,
+        `派生 Candidate ${candidateId} 缺少编辑证据`,
+      );
+    }
     return row;
   }
 
@@ -3057,7 +3133,9 @@ export class RevisionStore {
         ? mapCompletionRanking(
             rankingRow,
             mapCompletionProposal(row),
-            this.completionCandidateRows(row.id).map((candidate) => candidate.id),
+            this.completionCandidateRows(row.id)
+              .filter((candidate) => candidate.base_candidate_id === null)
+              .map((candidate) => candidate.id),
           )
         : null,
       decision,
@@ -3255,6 +3333,7 @@ export class RevisionStore {
   private async verifyCompletionProposalFiles(
     row: CompletionProposalRow,
     candidateRows: readonly CompletionCandidateRow[],
+    derivedCandidateRows: readonly CompletionCandidateRow[],
     stored: VerifiedCompletionProposalStorage,
   ): Promise<CompletionProposal> {
     assertCompletionStoredFile(
@@ -3340,7 +3419,88 @@ export class RevisionStore {
     } catch (error) {
       throw completionCorrupt(row.id, "Proposal 来源校验失败", error);
     }
+    for (const candidateRow of derivedCandidateRows) {
+      const candidateStored = stored.candidates[candidateRow.id];
+      if (!candidateStored) {
+        throw completionCorrupt(row.id, `缺少派生 Candidate ${candidateRow.id} 文件`);
+      }
+      this.verifyDerivedCompletionCandidate(
+        proposal,
+        source,
+        candidateRow,
+        candidateStored,
+      );
+    }
     return proposal;
+  }
+
+  private verifyDerivedCompletionCandidate(
+    proposal: CompletionProposal,
+    source: CompletionSourceSnapshot,
+    row: CompletionCandidateRow,
+    stored: VerifiedCompletionCandidateStorage,
+  ): CompletionCandidate {
+    const edit = this.getCompletionCandidateEditRow(row.id);
+    const candidate = this.verifyCompletionCandidateFiles(row, stored);
+    try {
+      const edits = normalizeCompletionCandidateEdits(
+        JSON.parse(edit.edits_json) as readonly CompletionCandidateEdit[],
+      );
+      const actor = {
+        type: "user" as const,
+        ...(edit.actor_id ? { id: edit.actor_id } : {}),
+      };
+      const fingerprint = completionCandidateEditFingerprint({
+        proposalId: proposal.proposalId,
+        baseCandidateId: edit.base_candidate_id,
+        expectedSourceResultHash: edit.expected_source_result_hash,
+        expectedProposalHash: edit.expected_proposal_hash,
+        expectedEvidenceHash: edit.expected_evidence_hash,
+        expectedCandidateHash: edit.expected_candidate_hash,
+        actorId: edit.actor_id,
+        edits,
+      });
+      const base = proposal.candidates.find(
+        (item) => item.candidateId === edit.base_candidate_id,
+      );
+      if (
+        edit.actor_type !== "user" ||
+        row.base_candidate_id !== edit.base_candidate_id ||
+        edit.proposal_id !== proposal.proposalId ||
+        edit.expected_source_result_hash !== proposal.sourceResultHash ||
+        edit.expected_proposal_hash !== proposal.proposalHash ||
+        edit.expected_evidence_hash !== proposal.evidenceHash ||
+        !base ||
+        edit.expected_candidate_hash !== base.candidateHash ||
+        canonicalCompletionJson(edits) !== edit.edits_json ||
+        sha256(canonicalCompletionJson(fingerprint)) !== edit.edit_hash
+      ) {
+        throw new TypeError("Derived Completion edit evidence is not bound");
+      }
+      const replay = editCoreCompletionCandidate({
+        proposal,
+        candidateId: edit.base_candidate_id,
+        edits,
+        actor,
+        operationId: edit.operation_id,
+        hashCanonical: sha256,
+      });
+      if (
+        canonicalCompletionJson(completionCandidateDocument(replay)) !==
+          canonicalCompletionJson(completionCandidateDocument(candidate))
+      ) {
+        throw new TypeError("Derived Completion candidate replay differs");
+      }
+      validateCompletionCandidateHashes(proposal, candidate, sha256);
+      validateCompletionCandidate(proposal, candidate, source.core);
+      return candidate;
+    } catch (error) {
+      throw completionCorrupt(
+        proposal.proposalId,
+        `派生 Candidate ${row.id} 无法确定性复验`,
+        error,
+      );
+    }
   }
 
   private verifyCompletionCandidateFiles(
@@ -3395,6 +3555,209 @@ export class RevisionStore {
       throw completionCorrupt(row.proposal_id, `Candidate ${row.id} 资产不一致`);
     }
     return candidate;
+  }
+
+  private async editCompletionCandidateUnlocked(
+    proposalId: string,
+    candidateId: string,
+    input: EditCompletionCandidateInput,
+  ): Promise<CompletionCandidateEditOutcome> {
+    assertSha256(input.expectedSourceResultHash, "expectedSourceResultHash");
+    assertSha256(input.expectedProposalHash, "expectedProposalHash");
+    assertSha256(input.expectedEvidenceHash, "expectedEvidenceHash");
+    assertSha256(input.expectedCandidateHash, "expectedCandidateHash");
+    const normalizedProposalId = validateText("proposalId", proposalId, 120);
+    const normalizedCandidateId = validateText("candidateId", candidateId, 120);
+    const actorId = validateOptionalText("actorId", input.actorId, 120);
+    const edits = normalizeCompletionCandidateEdits(input.edits);
+    const fingerprint = completionCandidateEditFingerprint({
+      proposalId: normalizedProposalId,
+      baseCandidateId: normalizedCandidateId,
+      expectedSourceResultHash: input.expectedSourceResultHash,
+      expectedProposalHash: input.expectedProposalHash,
+      expectedEvidenceHash: input.expectedEvidenceHash,
+      expectedCandidateHash: input.expectedCandidateHash,
+      actorId: actorId ?? null,
+      edits,
+    });
+    const editHash = sha256(canonicalCompletionJson(fingerprint));
+    const replay = this.database.prepare(`
+      SELECT candidate_id FROM completion_candidate_edit
+      WHERE proposal_id = ? AND edit_hash = ?
+    `).get(normalizedProposalId, editHash) as
+      | { readonly candidate_id: string }
+      | undefined;
+    if (replay) {
+      return {
+        detail: await this.getCompletionProposalDetail(normalizedProposalId),
+        changed: false,
+        editedCandidateId: replay.candidate_id,
+      };
+    }
+
+    const detail = await this.getCompletionProposalDetail(normalizedProposalId);
+    if (
+      !detail.visible ||
+      detail.jobStatus !== "succeeded" ||
+      detail.status !== "awaiting_decision"
+    ) {
+      throw conflict("Completion Proposal 当前不可编辑", {
+        proposalId: normalizedProposalId,
+        jobStatus: detail.jobStatus,
+        status: detail.status,
+      });
+    }
+    if (
+      detail.proposal.sourceResultHash !== input.expectedSourceResultHash ||
+      detail.proposal.proposalHash !== input.expectedProposalHash ||
+      detail.proposal.evidenceHash !== input.expectedEvidenceHash
+    ) {
+      throw conflict("Completion Proposal 来源或证据已过期", {
+        proposalId: normalizedProposalId,
+      });
+    }
+    const storedBase = detail.candidates.find(
+      (item) => item.id === normalizedCandidateId,
+    );
+    const base = detail.document.candidates.find(
+      (item) => item.candidateId === normalizedCandidateId,
+    );
+    if (!storedBase || storedBase.baseCandidateId !== null || !base) {
+      throw invalidInput("手工候选必须直接派生自原始 Proposal Candidate", {
+        proposalId: normalizedProposalId,
+        candidateId: normalizedCandidateId,
+      });
+    }
+    if (
+      storedBase.candidateHash !== input.expectedCandidateHash ||
+      base.candidateHash !== input.expectedCandidateHash
+    ) {
+      throw conflict("Completion Candidate 已过期", {
+        proposalId: normalizedProposalId,
+        candidateId: normalizedCandidateId,
+      });
+    }
+    const source = await this.completionSourceSnapshot(
+      detail.proposal.sourceRevisionId,
+    );
+    if (
+      !source.revision.isBranchHead ||
+      source.revision.resultHash !== input.expectedSourceResultHash ||
+      source.core.sourceSkinHash !== detail.proposal.sourceSkinHash
+    ) {
+      throw conflict("Completion Proposal 来源已不是精确 Branch HEAD", {
+        proposalId: normalizedProposalId,
+        sourceRevisionId: source.revision.id,
+      });
+    }
+    const operationId = `completionedit_${editHash.slice("sha256:".length)}`;
+    const actor = {
+      type: "user" as const,
+      ...(actorId ? { id: actorId } : {}),
+    };
+    let candidate: CompletionCandidate;
+    try {
+      candidate = editCoreCompletionCandidate({
+        proposal: detail.document,
+        candidateId: normalizedCandidateId,
+        edits,
+        actor,
+        operationId,
+        hashCanonical: sha256,
+      });
+      validateCompletionCandidateHashes(detail.document, candidate, sha256);
+      validateCompletionCandidate(detail.document, candidate, source.core);
+    } catch (error) {
+      throw invalidInput("Completion Candidate 编辑无效", {
+        proposalId: normalizedProposalId,
+        candidateId: normalizedCandidateId,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const document = completionCandidateDocument(candidate);
+    const written = await this.completionStorage.writeCandidate(
+      normalizedProposalId,
+      {
+        candidateId: candidate.candidateId,
+        files: {
+          "candidate.json": Buffer.from(
+            canonicalCompletionJson(document),
+            "utf8",
+          ),
+          "texture.png": encodeSkinPng(candidate.texture),
+          "write-mask.png": encodeSkinPng(maskToRgbaImage(candidate.writeMask)),
+          "generated-mask.png": encodeSkinPng(
+            maskToRgbaImage(candidate.generatedMask),
+          ),
+        },
+      },
+    );
+    const createdAt = this.now();
+    try {
+      const commit = this.database.transaction(() => {
+        this.assertCompletionDecisionTransaction(detail.proposal, true);
+        const decided = this.database.prepare(`
+          SELECT 1 FROM completion_decision WHERE proposal_id = ?
+        `).get(normalizedProposalId);
+        if (decided) {
+          throw conflict("Completion Proposal 已有决定", {
+            proposalId: normalizedProposalId,
+          });
+        }
+        this.database.prepare(`
+          INSERT INTO completion_candidate_edit (
+            candidate_id, proposal_id, base_candidate_id,
+            expected_source_result_hash, expected_proposal_hash,
+            expected_evidence_hash, expected_candidate_hash, actor_type,
+            actor_id, operation_id, edits_json, edit_hash, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?)
+        `).run(
+          candidate.candidateId,
+          normalizedProposalId,
+          normalizedCandidateId,
+          input.expectedSourceResultHash,
+          input.expectedProposalHash,
+          input.expectedEvidenceHash,
+          input.expectedCandidateHash,
+          actorId ?? null,
+          operationId,
+          canonicalCompletionJson(edits),
+          editHash,
+          createdAt,
+        );
+        this.insertCompletionCandidate(
+          normalizedProposalId,
+          candidate,
+          document,
+          written.storage,
+          createdAt,
+        );
+      });
+      commit.immediate();
+    } catch (error) {
+      const existing = this.database.prepare(`
+        SELECT candidate_id FROM completion_candidate_edit
+        WHERE proposal_id = ? AND edit_hash = ?
+      `).get(normalizedProposalId, editHash) as
+        | { readonly candidate_id: string }
+        | undefined;
+      // The directory is content-addressed by the deterministic candidate ID.
+      // Keep a newly written orphan on failure: another process may already
+      // have observed the exact directory and be about to commit its row.
+      if (existing) {
+        return {
+          detail: await this.getCompletionProposalDetail(normalizedProposalId),
+          changed: false,
+          editedCandidateId: existing.candidate_id,
+        };
+      }
+      throw error;
+    }
+    return {
+      detail: await this.getCompletionProposalDetail(normalizedProposalId),
+      changed: true,
+      editedCandidateId: candidate.candidateId,
+    };
   }
 
   private async decideCompletionProposalUnlocked(
@@ -3507,9 +3870,27 @@ export class RevisionStore {
           hashCanonical: sha256,
         });
       } else {
-        candidate = detail.document.candidates.find(
-          (item) => item.candidateId === input.candidateId,
+        const storedCandidate = detail.candidates.find(
+          (item) => item.id === input.candidateId,
         );
+        if (!storedCandidate) throw new RangeError("Unknown Completion candidate");
+        if (storedCandidate.baseCandidateId === null) {
+          candidate = detail.document.candidates.find(
+            (item) => item.candidateId === input.candidateId,
+          );
+        } else {
+          const candidateRow = this.getCompletionCandidateRow(input.candidateId);
+          const candidateStored = await this.completionStorage.readCandidate(
+            detail.proposal.id,
+            input.candidateId,
+          );
+          candidate = this.verifyDerivedCompletionCandidate(
+            detail.document,
+            source,
+            candidateRow,
+            candidateStored,
+          );
+        }
         if (!candidate) throw new RangeError("Unknown Completion candidate");
         validateCompletionCandidateHashes(detail.document, candidate, sha256);
         validateCompletionCandidate(detail.document, candidate, source.core);
@@ -4223,21 +4604,36 @@ export class RevisionStore {
     throw error;
   }
 
-  private async publishCompletionResultUnlocked(
+  private async publishCompletionResultOutcomeUnlocked(
     resultId: string,
-    input: PublishCompletionResultInput,
-  ): Promise<CompletionResult> {
+    input: PublishCompletionResultInput | PublishCompletionResultRequest,
+  ): Promise<CompletionResultPublicationOutcome> {
     const normalizedResultId = validateText("Completion Result ID", resultId, 120);
     const actorId = validateOptionalText("actorId", input.actorId, 120);
     const row = this.getCompletionResultRow(normalizedResultId);
+    if ("expectedResultHash" in input) {
+      assertSha256(input.expectedResultHash, "expectedResultHash");
+      const expectedPartId = validateText("expectedPartId", input.expectedPartId, 120);
+      if (
+        row.result_hash !== input.expectedResultHash ||
+        row.latent_part_id !== expectedPartId
+      ) {
+        throw conflict("Completion Result 或 latent Part 已过期", {
+          resultId: normalizedResultId,
+        });
+      }
+    }
     if (row.representation !== "latent_component" || !row.latent_part_id) {
       throw conflict("只有 latent_component Completion Result 可发布", {
         resultId: normalizedResultId,
       });
     }
     await this.verifyPartStorage(row.latent_part_id);
-    if (row.published_at !== null) return this.mapCompletionResult(row);
+    if (row.published_at !== null) {
+      return { changed: false, result: this.mapCompletionResult(row) };
+    }
     const createdAt = this.now();
+    let changed = false;
     try {
       const publish = this.database.transaction(() => {
         const fresh = this.getCompletionResultRow(normalizedResultId);
@@ -4247,6 +4643,15 @@ export class RevisionStore {
           });
         }
         if (fresh.published_at !== null) return;
+        if (
+          "expectedResultHash" in input &&
+          (fresh.result_hash !== input.expectedResultHash ||
+            fresh.latent_part_id !== input.expectedPartId)
+        ) {
+          throw conflict("Completion Result 或 latent Part 已过期", {
+            resultId: normalizedResultId,
+          });
+        }
         this.database
           .prepare(`
             INSERT INTO completion_result_publication (
@@ -4254,12 +4659,17 @@ export class RevisionStore {
             ) VALUES (?, ?, ?, ?)
           `)
           .run(normalizedResultId, fresh.latent_part_id, actorId ?? null, createdAt);
+        changed = true;
       });
       publish.immediate();
     } catch (error) {
       if (!isUniqueConstraint(error)) throw error;
+      changed = false;
     }
-    return this.mapCompletionResult(this.getCompletionResultRow(normalizedResultId));
+    return {
+      changed,
+      result: this.mapCompletionResult(this.getCompletionResultRow(normalizedResultId)),
+    };
   }
 
   private getCompletionResultRow(resultId: string): CompletionResultRow {
@@ -7267,19 +7677,6 @@ export class RevisionStore {
     const semanticFollowup = input.semanticFollowup
       ? validateSemanticFollowupRevisionContext(input.semanticFollowup)
       : null;
-    if (
-      semanticFollowup &&
-      (
-        actorId !== "semantic-followup" ||
-        input.operation.type !== "assign_pixels" ||
-        input.operation.target.category !== "hair"
-      )
-    ) {
-      throw invalidInput("语义分类修复必须使用专用 actor 将像素分配给头发组件");
-    }
-    if (semanticFollowup && input.operation.type === "assign_pixels") {
-      this.assertSemanticFollowupOperation(semanticFollowup, input.operation);
-    }
 
     const sourceSnapshot = await this.verifyRevisionSnapshot(sourceRevision.id);
     const sourceSegmentation = parseSegmentation(
@@ -7291,6 +7688,24 @@ export class RevisionStore {
       sourceSegmentation,
       sourceRevision.id,
     );
+    const materialized = this.materializeManualOperation(
+      input.operation,
+      sourceState,
+    );
+    const resolvedOperation = materialized.operation;
+    if (
+      semanticFollowup &&
+      (
+        actorId !== "semantic-followup" ||
+        resolvedOperation.type !== "assign_pixels" ||
+        resolvedOperation.target.category !== "hair"
+      )
+    ) {
+      throw invalidInput("语义分类修复必须使用专用 actor 将像素分配给头发组件");
+    }
+    if (semanticFollowup && resolvedOperation.type === "assign_pixels") {
+      this.assertSemanticFollowupOperation(semanticFollowup, resolvedOperation);
+    }
     const image = decodeSkinPng(sourceSnapshot.files["skin.png"].bytes);
     const sourceOrigin = await this.originForDerivation(
       sourceRevision,
@@ -7300,7 +7715,7 @@ export class RevisionStore {
     try {
       editedState = applyManualSemanticOperation(
         sourceState,
-        input.operation,
+        resolvedOperation,
         image,
       );
     } catch (error) {
@@ -7316,10 +7731,10 @@ export class RevisionStore {
 
     const ids = this.revisionIds();
     const createdAt = this.now();
-    const operationType = manualRevisionOperationType(input.operation.type);
+    const operationType = manualRevisionOperationType(resolvedOperation.type);
     const summary = validateText(
       "Revision 摘要",
-      input.summary ?? manualOperationSummary(input.operation.type),
+      input.summary ?? manualOperationSummary(resolvedOperation.type),
       300,
     );
     const revisionState: SemanticState = {
@@ -7340,11 +7755,15 @@ export class RevisionStore {
     const segmentation = state.document;
     const skinPng = sourceSnapshot.files["skin.png"].bytes;
     const resultHash = computeResultHash(skinPng, segmentation, origin);
-    const affectedComponents = manualAffectedComponents(input.operation);
+    const affectedComponents = manualAffectedComponents(
+      resolvedOperation,
+      sourceState,
+      editedState,
+    );
     const affectedSpans =
-      "spans" in input.operation ? input.operation.spans : [];
+      "spans" in resolvedOperation ? resolvedOperation.spans : [];
     const metadata = {
-      operation: input.operation,
+      operation: resolvedOperation,
       ...(semanticFollowup ? { semanticFollowup } : {}),
     };
     const operation = createOperation({
@@ -7454,6 +7873,55 @@ export class RevisionStore {
       project: this.getProject(project.id),
       branch: this.getBranch(branch.id),
       revision: this.getRevision(ids.revisionId),
+      ...(materialized.generatedComponentId
+        ? { generatedComponentId: materialized.generatedComponentId }
+        : {}),
+    };
+  }
+
+  private materializeManualOperation(
+    operation: ManualRevisionOperationInput["operation"],
+    state: SemanticState,
+  ): {
+    readonly operation: ManualSemanticOperation;
+    readonly generatedComponentId?: string;
+  } {
+    if (
+      operation.type !== "assign_pixels" &&
+      operation.type !== "merge_components" &&
+      operation.type !== "split_component"
+    ) {
+      return { operation };
+    }
+    const suppliedId = operation.target.instanceId;
+    if (suppliedId !== undefined) {
+      return {
+        operation: {
+          ...operation,
+          target: { ...operation.target, instanceId: suppliedId },
+        } as ManualSemanticOperation,
+      };
+    }
+    const existing = new Set(
+      state.document.components.map((component) => component.instanceId),
+    );
+    let generatedComponentId: string | null = null;
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      const candidate = this.id("component");
+      if (candidate !== "unknown" && !existing.has(candidate)) {
+        generatedComponentId = candidate;
+        break;
+      }
+    }
+    if (!generatedComponentId) {
+      throw conflict("无法生成不冲突的语义组件 ID");
+    }
+    return {
+      operation: {
+        ...operation,
+        target: { ...operation.target, instanceId: generatedComponentId },
+      } as ManualSemanticOperation,
+      generatedComponentId,
     };
   }
 
@@ -8225,7 +8693,8 @@ function mapCompletionCandidate(
     !isNonNegativeInteger(row.pixel_count) ||
     row.pixel_count === 0 ||
     !isNonNegativeInteger(row.generated_pixel_count) ||
-    row.generated_pixel_count > row.pixel_count
+    row.generated_pixel_count > row.pixel_count ||
+    (row.strategy === "manual_edit") !== (row.base_candidate_id !== null)
   ) {
     throw completionCorrupt(row.proposal_id, `Candidate ${row.id} 元数据无效`);
   }
@@ -8234,6 +8703,7 @@ function mapCompletionCandidate(
     proposalId: row.proposal_id,
     representation: row.representation,
     strategy: row.strategy,
+    baseCandidateId: row.base_candidate_id,
     confidence: row.confidence,
     originMode: row.origin_mode,
     pixelCount: row.pixel_count,
@@ -10504,6 +10974,8 @@ function manualRevisionOperationType(
       return "split_component";
     case "reclassify_component":
       return "reclassify_component";
+    case "set_component_relations":
+      return "manual_edit";
   }
 }
 
@@ -10542,11 +11014,15 @@ function manualOperationSummary(
       return "拆分语义组件";
     case "reclassify_component":
       return "修改组件分类";
+    case "set_component_relations":
+      return "修改组件关系";
   }
 }
 
 function manualAffectedComponents(
   operation: ManualSemanticOperation,
+  beforeState: SemanticState,
+  afterState: SemanticState,
 ): readonly string[] {
   switch (operation.type) {
     case "assign_pixels":
@@ -10559,7 +11035,28 @@ function manualAffectedComponents(
       return [operation.sourceComponentId, operation.target.instanceId];
     case "reclassify_component":
       return [operation.componentId];
+    case "set_component_relations":
+      return [...new Set([
+        operation.componentId,
+        ...manualRelationPeerIds(beforeState, operation.componentId),
+        ...manualRelationPeerIds(afterState, operation.componentId),
+      ])].sort();
   }
+}
+
+function manualRelationPeerIds(
+  state: SemanticState,
+  componentId: string,
+): readonly string[] {
+  const component = state.document.components.find(
+    (item) => item.instanceId === componentId,
+  );
+  return component
+    ? [
+        ...component.relations.pairedWith,
+        ...(component.relations.conflictsWith ?? []),
+      ]
+    : [];
 }
 
 function appliedPartComponentId(partId: string): string {
@@ -11025,6 +11522,76 @@ function validateUniqueSemanticComponentIds(
   return [...values];
 }
 
+function normalizeCompletionCandidateEdits(
+  values: readonly CompletionCandidateEdit[],
+): CompletionCandidateEdit[] {
+  if (
+    !Array.isArray(values) ||
+    values.length === 0 ||
+    values.length > MAX_COMPLETION_PIXEL_EDITS
+  ) {
+    throw invalidInput(
+      `Completion Candidate 编辑必须包含 1-${MAX_COMPLETION_PIXEL_EDITS} 项`,
+    );
+  }
+  const pixelIds = new Set<number>();
+  const normalized = values.map((value): CompletionCandidateEdit => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !Number.isInteger(value.pixelId) ||
+      value.pixelId < 0 ||
+      value.pixelId >= 64 * 64 ||
+      pixelIds.has(value.pixelId)
+    ) {
+      throw invalidInput("Completion Candidate 编辑像素必须唯一且位于 64x64 纹理内");
+    }
+    pixelIds.add(value.pixelId);
+    if (value.type === "remove_pixel") {
+      if (Object.keys(value).sort().join(",") !== "pixelId,type") {
+        throw invalidInput("remove_pixel 编辑字段无效");
+      }
+      return { type: "remove_pixel", pixelId: value.pixelId };
+    }
+    if (
+      value.type !== "set_pixel" ||
+      Object.keys(value).sort().join(",") !== "pixelId,rgba,type"
+    ) {
+      throw invalidInput("Completion Candidate 编辑类型或字段无效");
+    }
+    const rgba = validateVisibleRgba("Completion edit rgba", value.rgba);
+    return {
+      type: "set_pixel",
+      pixelId: value.pixelId,
+      rgba: [rgba[0], rgba[1], rgba[2], rgba[3]],
+    };
+  });
+  return normalized.sort((left, right) => left.pixelId - right.pixelId);
+}
+
+function completionCandidateEditFingerprint(input: {
+  readonly proposalId: string;
+  readonly baseCandidateId: string;
+  readonly expectedSourceResultHash: string;
+  readonly expectedProposalHash: string;
+  readonly expectedEvidenceHash: string;
+  readonly expectedCandidateHash: string;
+  readonly actorId: string | null;
+  readonly edits: readonly CompletionCandidateEdit[];
+}) {
+  return {
+    schemaVersion: "1.0" as const,
+    proposalId: input.proposalId,
+    baseCandidateId: input.baseCandidateId,
+    expectedSourceResultHash: input.expectedSourceResultHash,
+    expectedProposalHash: input.expectedProposalHash,
+    expectedEvidenceHash: input.expectedEvidenceHash,
+    expectedCandidateHash: input.expectedCandidateHash,
+    actor: { type: "user" as const, id: input.actorId },
+    edits: input.edits,
+  };
+}
+
 function validateOpaqueRgba(
   label: string,
   value: readonly number[],
@@ -11035,6 +11602,20 @@ function validateOpaqueRgba(
     value[3] !== 255
   ) {
     throw invalidInput(`${label} 必须是 alpha=255 的 RGBA 字节`);
+  }
+  return [value[0]!, value[1]!, value[2]!, value[3]!];
+}
+
+function validateVisibleRgba(
+  label: string,
+  value: readonly number[],
+): readonly [number, number, number, number] {
+  if (
+    value.length !== 4 ||
+    value.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255) ||
+    value[3] === 0
+  ) {
+    throw invalidInput(`${label} 必须是 alpha>0 的 RGBA 字节`);
   }
   return [value[0]!, value[1]!, value[2]!, value[3]!];
 }
@@ -11063,6 +11644,7 @@ function defaultId(kind: RevisionIdKind): string {
     composition: "composition",
     composition_layer: "complayer",
     completion_result: "completionresult",
+    component: "component",
   };
   return `${prefix[kind]}_${randomUUID().replaceAll("-", "")}`;
 }

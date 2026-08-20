@@ -1,5 +1,16 @@
 # MCSkinSplit Agent Guide
 
+<!-- idea-to-product:product-docs:start -->
+## Product and project-entry documentation
+
+- `PRODUCT.md` is the product-direction entry point: it explains who the product is for, the core experience, the first-version boundary, and key unknowns. Selected directions or plans are not evidence that a capability is implemented.
+- `README.md` is the repository and run entry point: introduce the product and verified current abilities in plain language before setup, configuration, technology, and deeper documentation links.
+- Describe current capabilities from repository, UI, and runnable configuration evidence, and distinguish implemented, experimental, and planned work. Do not turn TODOs, design ideas, or installed dependencies into completed features.
+- When product positioning, the primary user flow, or the first-version boundary changes, review `PRODUCT.md`. When commands, configuration, deployment, or verified capabilities change, review `README.md`.
+- Keep architecture, APIs, database details, and module inventories in `docs/`; README should summarize and link rather than replace those documents.
+- Check for an existing document before adding another one; update and link the established entry point instead of creating overlapping product descriptions.
+<!-- idea-to-product:product-docs:end -->
+
 Read these files before changing implementation code:
 
 1. `docs/mc-skin-ai-assisted-segmentation-versioned-studio-plan.md`

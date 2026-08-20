@@ -44,8 +44,27 @@ import type {
 } from "./types";
 
 export const COMPLETION_PROPOSAL_SCHEMA_VERSION = "1.0" as const;
-export const COMPLETION_CANDIDATE_ALGORITHM_VERSION =
+export const COMPLETION_CANDIDATE_ALGORITHM_V1 =
   "completion-candidates-v1" as const;
+export const COMPLETION_CANDIDATE_ALGORITHM_V2 =
+  "completion-candidates-v2" as const;
+export const COMPLETION_CANDIDATE_ALGORITHM_VERSIONS = [
+  COMPLETION_CANDIDATE_ALGORITHM_V1,
+  COMPLETION_CANDIDATE_ALGORITHM_V2,
+] as const;
+export type CompletionCandidateAlgorithmVersion =
+  (typeof COMPLETION_CANDIDATE_ALGORITHM_VERSIONS)[number];
+/** Compatibility default for the committed M19 generator and persisted v1 data. */
+export const COMPLETION_CANDIDATE_ALGORITHM_VERSION =
+  COMPLETION_CANDIDATE_ALGORITHM_V1;
+
+export function isCompletionCandidateAlgorithmVersion(
+  value: unknown,
+): value is CompletionCandidateAlgorithmVersion {
+  return COMPLETION_CANDIDATE_ALGORITHM_VERSIONS.includes(
+    value as CompletionCandidateAlgorithmVersion,
+  );
+}
 
 /** Public, explicit limits for untrusted proposal and edit material. */
 export const MAX_COMPLETION_OCCLUDING_COMPONENTS = 32;
@@ -110,7 +129,7 @@ export interface CompletionPixelAssignmentDescriptor {
 
 export interface CompletionCandidateEvidence {
   readonly schemaVersion: "1.0";
-  readonly algorithmVersion: typeof COMPLETION_CANDIDATE_ALGORITHM_VERSION;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly proposalEvidenceHash: string;
   readonly sourceRevisionId: string;
   readonly sourceResultHash: string;
@@ -125,7 +144,7 @@ export interface CompletionCandidateEvidence {
 
 export interface CompletionCandidateDocument {
   readonly schemaVersion: "1.0";
-  readonly algorithmVersion: typeof COMPLETION_CANDIDATE_ALGORITHM_VERSION;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly candidateId: string;
   readonly representation: CompletionTargetRepresentation;
   readonly strategy: CompletionCandidateStrategy;
@@ -157,7 +176,7 @@ export interface CompletionCandidate extends CompletionCandidateDocument {
 
 export interface CompletionProposalEvidence {
   readonly schemaVersion: "1.0";
-  readonly algorithmVersion: typeof COMPLETION_CANDIDATE_ALGORITHM_VERSION;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly sourceRevisionId: string;
   readonly sourceResultHash: string;
   readonly sourceSkinHash: string;
@@ -172,7 +191,7 @@ export interface CompletionProposalEvidence {
 
 export interface CompletionProposalDocument {
   readonly schemaVersion: "1.0";
-  readonly algorithmVersion: typeof COMPLETION_CANDIDATE_ALGORITHM_VERSION;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly proposalId: string;
   readonly sourceRevisionId: string;
   readonly sourceResultHash: string;
@@ -311,6 +330,8 @@ type AssignmentFactory = (
   target: SurfaceTexel,
   context: CompletionContext,
   input: GenerateCompletionProposalCandidatesInput,
+  allowedPixelIds: ReadonlySet<number>,
+  algorithmVersion: CompletionCandidateAlgorithmVersion,
 ) => CompletionPixelAssignmentDescriptor | null;
 
 const HASH_PATTERN = /^sha256:([0-9a-f]{64})$/u;
@@ -329,6 +350,33 @@ const STRATEGY_ORDER: readonly Exclude<
 
 export function generateCompletionProposalCandidates(
   input: GenerateCompletionProposalCandidatesInput,
+): CompletionProposal {
+  return generateCompletionProposalCandidatesV1(input);
+}
+
+/** Explicit committed M19 generator for deterministic replay and validation. */
+export function generateCompletionProposalCandidatesV1(
+  input: GenerateCompletionProposalCandidatesInput,
+): CompletionProposal {
+  return generateCompletionProposalCandidatesForVersion(
+    input,
+    COMPLETION_CANDIDATE_ALGORITHM_V1,
+  );
+}
+
+/** Side-by-side conservative generator used by M21 evaluation before rollout. */
+export function generateCompletionProposalCandidatesV2(
+  input: GenerateCompletionProposalCandidatesInput,
+): CompletionProposal {
+  return generateCompletionProposalCandidatesForVersion(
+    input,
+    COMPLETION_CANDIDATE_ALGORITHM_V2,
+  );
+}
+
+function generateCompletionProposalCandidatesForVersion(
+  input: GenerateCompletionProposalCandidatesInput,
+  algorithmVersion: CompletionCandidateAlgorithmVersion,
 ): CompletionProposal {
   const proposalId = checkedId(input.proposalId, "Completion proposal id");
   const context = buildContext(input);
@@ -360,7 +408,7 @@ export function generateCompletionProposalCandidates(
   );
   const evidence: CompletionProposalEvidence = {
     schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-    algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+    algorithmVersion,
     sourceRevisionId: input.sourceRevisionId,
     sourceResultHash: input.sourceResultHash,
     sourceSkinHash: input.sourceSkinHash,
@@ -380,6 +428,7 @@ export function generateCompletionProposalCandidates(
       allowedPixelIds: allowedGeneratedPixelIds,
       context,
       input: { ...input, occludingComponentIds },
+      algorithmVersion,
     });
     return candidate ? [candidate] : [];
   });
@@ -391,13 +440,14 @@ export function generateCompletionProposalCandidates(
   const proposalHash = runHash(
     input.hashCanonical,
     proposalFingerprint(
+      algorithmVersion,
       evidenceHash,
       candidates.map((candidate) => candidate.candidateHash),
     ),
   );
   const proposal: CompletionProposal = {
     schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-    algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+    algorithmVersion,
     proposalId,
     sourceRevisionId: input.sourceRevisionId,
     sourceResultHash: input.sourceResultHash,
@@ -526,6 +576,7 @@ export function validateCompletionProposalHashes(
   const proposalHash = runHash(
     hashCanonical,
     proposalFingerprint(
+      proposal.algorithmVersion,
       evidenceHash,
       proposal.candidates.map((candidate) => candidate.candidateHash),
     ),
@@ -682,6 +733,7 @@ export function editCompletionCandidate(input: {
     ]),
   );
   const edited = new Set<number>();
+  let effectiveEditCount = 0;
   for (const edit of input.edits) {
     assertPixelId(edit.pixelId, "Completion edit pixel");
     if (!allowed.has(edit.pixelId)) {
@@ -694,7 +746,7 @@ export function editCompletionCandidate(input: {
     }
     edited.add(edit.pixelId);
     if (edit.type === "remove_pixel") {
-      assignments.delete(edit.pixelId);
+      if (assignments.delete(edit.pixelId)) effectiveEditCount += 1;
       continue;
     }
     assertVisibleRgba(edit.rgba, "Completion edit RGBA");
@@ -702,6 +754,7 @@ export function editCompletionCandidate(input: {
     if (previous && rgbaEqual(previous.rgba, edit.rgba)) {
       continue;
     }
+    effectiveEditCount += 1;
     assignments.set(edit.pixelId, {
       targetPixelId: edit.pixelId,
       rgba: cloneRgba(edit.rgba),
@@ -713,12 +766,16 @@ export function editCompletionCandidate(input: {
       manualOperationId: operationId,
     });
   }
+  if (effectiveEditCount === 0) {
+    throw new RangeError("Completion candidate edits do not change the candidate");
+  }
   const resultAssignments = [...assignments.values()].sort(compareAssignment);
   if (resultAssignments.length === 0) {
     throw new RangeError("Completion candidate cannot be empty after editing");
   }
   return buildCandidate({
     strategy: "manual_edit",
+    algorithmVersion: input.proposal.algorithmVersion,
     proposalEvidenceHash: input.proposal.evidenceHash,
     sourceRevisionId: input.proposal.sourceRevisionId,
     sourceResultHash: input.proposal.sourceResultHash,
@@ -1262,19 +1319,27 @@ function resolveRepresentation(
 
 function createStrategyCandidate(input: {
   readonly strategy: Exclude<CompletionCandidateStrategy, "manual_edit">;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly proposalEvidenceHash: string;
   readonly allowedPixelIds: readonly number[];
   readonly context: CompletionContext;
   readonly input: GenerateCompletionProposalCandidatesInput;
 }): CompletionCandidate | null {
   const factory = assignmentFactory(input.strategy);
+  const allowedPixelIds = new Set(input.allowedPixelIds);
   const assignments = input.allowedPixelIds
     .map((pixelId) => {
       const target = input.context.texelByPixel.get(pixelId);
       if (!target) {
         throw new RangeError(`Completion target pixel ${pixelId} is outside used UV`);
       }
-      return factory(target, input.context, input.input);
+      return factory(
+        target,
+        input.context,
+        input.input,
+        allowedPixelIds,
+        input.algorithmVersion,
+      );
     })
     .filter(
       (assignment): assignment is CompletionPixelAssignmentDescriptor =>
@@ -1284,6 +1349,7 @@ function createStrategyCandidate(input: {
   if (assignments.length === 0) return null;
   return buildCandidate({
     strategy: input.strategy,
+    algorithmVersion: input.algorithmVersion,
     proposalEvidenceHash: input.proposalEvidenceHash,
     sourceRevisionId: input.input.sourceRevisionId,
     sourceResultHash: input.input.sourceResultHash,
@@ -1308,6 +1374,7 @@ function createStrategyCandidate(input: {
 
 function buildCandidate(input: {
   readonly strategy: CompletionCandidateStrategy;
+  readonly algorithmVersion: CompletionCandidateAlgorithmVersion;
   readonly proposalEvidenceHash: string;
   readonly sourceRevisionId: string;
   readonly sourceResultHash: string;
@@ -1351,7 +1418,7 @@ function buildCandidate(input: {
     .sort((left, right) => left - right);
   const evidence: CompletionCandidateEvidence = {
     schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-    algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+    algorithmVersion: input.algorithmVersion,
     proposalEvidenceHash: input.proposalEvidenceHash,
     sourceRevisionId: input.sourceRevisionId,
     sourceResultHash: input.sourceResultHash,
@@ -1372,7 +1439,7 @@ function buildCandidate(input: {
     candidateFingerprint(
       {
         schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-        algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+        algorithmVersion: input.algorithmVersion,
         candidateId: "unused_during_hashing",
         representation: input.representation,
         strategy: input.strategy,
@@ -1404,7 +1471,7 @@ function buildCandidate(input: {
   const materialized = materializeAssignments(assignments);
   return {
     schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-    algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+    algorithmVersion: input.algorithmVersion,
     candidateId: `completioncandidate_${hashToken(candidateIdentityHash)}`,
     representation: input.representation,
     strategy: input.strategy,
@@ -1485,12 +1552,27 @@ function mirroredCounterpartAssignment(
 function sameSurfaceContinuationAssignment(
   target: SurfaceTexel,
   context: CompletionContext,
+  _input: GenerateCompletionProposalCandidatesInput,
+  allowedPixelIds: ReadonlySet<number>,
+  algorithmVersion: CompletionCandidateAlgorithmVersion,
 ): CompletionPixelAssignmentDescriptor | null {
   const sample = nearestTargetTexel(
     target,
     context.targetTexels.filter((item) => item.surface === target.surface),
     context,
   );
+  if (
+    algorithmVersion === COMPLETION_CANDIDATE_ALGORITHM_V2 &&
+    sample &&
+    hasVisibleTransparentBoundaryBeyond(
+      target,
+      sample,
+      context,
+      allowedPixelIds,
+    )
+  ) {
+    return null;
+  }
   return sample
     ? generatedAssignment(target.pixelId, sample.rgba, [sample.pixelId])
     : null;
@@ -1516,18 +1598,68 @@ function oppositeSurfaceReferenceAssignment(
 function neighborReferenceAssignment(
   target: SurfaceTexel,
   context: CompletionContext,
+  _input: GenerateCompletionProposalCandidatesInput,
+  _allowedPixelIds: ReadonlySet<number>,
+  algorithmVersion: CompletionCandidateAlgorithmVersion,
 ): CompletionPixelAssignmentDescriptor | null {
+  const oppositeSurface = surfaceKey(
+    target.bodyPart,
+    target.layer,
+    oppositeFace(target.face),
+  );
   const sample = nearestTargetTexel(
     target,
     context.targetTexels.filter(
       (item) =>
-        item.bodyPart === target.bodyPart && item.layer === target.layer,
+        item.bodyPart === target.bodyPart &&
+        item.layer === target.layer &&
+        (algorithmVersion === COMPLETION_CANDIDATE_ALGORITHM_V1 ||
+          (item.surface !== target.surface &&
+            item.surface !== oppositeSurface)),
     ),
     context,
   );
   return sample
     ? generatedAssignment(target.pixelId, sample.rgba, [sample.pixelId])
     : null;
+}
+
+/**
+ * Rejects one-sided continuation when the next observable texel in that same
+ * direction is explicit empty space. Pixels still inside the allowed hidden
+ * run are unknown, not negative evidence.
+ */
+function hasVisibleTransparentBoundaryBeyond(
+  target: SurfaceTexel,
+  sample: SurfaceTexel,
+  context: CompletionContext,
+  allowedPixelIds: ReadonlySet<number>,
+): boolean {
+  if (sample.surface !== target.surface) return false;
+  const deltaU = target.localU - sample.localU;
+  const deltaV = target.localV - sample.localV;
+  let stepU = 0;
+  let stepV = 0;
+  if (deltaV === 0 && deltaU !== 0) {
+    stepU = Math.sign(deltaU);
+  } else if (deltaU === 0 && deltaV !== 0) {
+    stepV = Math.sign(deltaV);
+  } else {
+    return false;
+  }
+  const boundary = context.texelByCoordinate.get(
+    coordinateKey(
+      target.surface,
+      target.localU + stepU,
+      target.localV + stepV,
+    ),
+  );
+  return Boolean(
+    boundary &&
+      !allowedPixelIds.has(boundary.pixelId) &&
+      boundary.rgba[3] === 0 &&
+      !context.ownerByPixel.has(boundary.pixelId),
+  );
 }
 
 function patternContinuationAssignment(
@@ -1690,7 +1822,9 @@ function validateCompletionCandidateWithContext(
 ): void {
   if (
     candidate.schemaVersion !== COMPLETION_PROPOSAL_SCHEMA_VERSION ||
-    candidate.algorithmVersion !== COMPLETION_CANDIDATE_ALGORITHM_VERSION ||
+    !isCompletionCandidateAlgorithmVersion(candidate.algorithmVersion) ||
+    candidate.algorithmVersion !== proposal.algorithmVersion ||
+    candidate.evidence.algorithmVersion !== candidate.algorithmVersion ||
     candidate.representation !== proposal.representation ||
     candidate.targetComponentId !== proposal.targetComponentId ||
     !stringArraysEqual(
@@ -1844,7 +1978,8 @@ function assertProposalIdentity(
 ): void {
   if (
     proposal.schemaVersion !== COMPLETION_PROPOSAL_SCHEMA_VERSION ||
-    proposal.algorithmVersion !== COMPLETION_CANDIDATE_ALGORITHM_VERSION ||
+    !isCompletionCandidateAlgorithmVersion(proposal.algorithmVersion) ||
+    proposal.evidence.algorithmVersion !== proposal.algorithmVersion ||
     proposal.sourceRevisionId !== source.sourceRevisionId ||
     proposal.sourceResultHash !== source.sourceResultHash ||
     proposal.sourceSkinHash !== source.sourceSkinHash ||
@@ -2074,12 +2209,13 @@ function canonicalValue(value: unknown): unknown {
 }
 
 function proposalFingerprint(
+  algorithmVersion: CompletionCandidateAlgorithmVersion,
   evidenceHash: string,
   candidateHashes: readonly string[],
 ): unknown {
   return {
     schemaVersion: COMPLETION_PROPOSAL_SCHEMA_VERSION,
-    algorithmVersion: COMPLETION_CANDIDATE_ALGORITHM_VERSION,
+    algorithmVersion,
     evidenceHash,
     candidateHashes,
   };

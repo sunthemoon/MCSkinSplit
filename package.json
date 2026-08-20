@@ -12,14 +12,24 @@
     "dev": "pnpm --parallel --filter @mc-skin-split/api --filter @mc-skin-split/web dev",
     "dev:api": "pnpm --filter @mc-skin-split/api dev",
     "dev:web": "pnpm --filter @mc-skin-split/web dev",
+    "browser:install": "playwright install chromium",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
+    "typecheck:browser": "tsc -p tests/e2e/tsconfig.json --pretty false",
     "test": "pnpm -r --if-present test",
+    "test:browser": "node scripts/run-browser-e2e.mjs",
+    "test:browser:real": "node scripts/run-browser-e2e.mjs --real",
+    "test:browser:real-provider": "node scripts/run-browser-e2e.mjs --real-provider",
+    "test:e2e": "pnpm test:browser",
+    "verify:browser": "pnpm typecheck:browser && pnpm test:browser",
     "fixtures:generate": "node scripts/generate-fixtures.mjs",
     "fixtures:check": "node scripts/generate-fixtures.mjs --check",
     "verify": "pnpm fixtures:check && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
-    "pngjs": "7.0.0"
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3",
+    "pngjs": "7.0.0",
+    "typescript": "7.0.2"
   }
 }

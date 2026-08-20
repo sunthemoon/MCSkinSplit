@@ -56,6 +56,10 @@ const SEMANTIC_FOLLOWUP_HARDENING_SQL = readFileSync(
   new URL("../src/migrations/012_semantic_followup_hardening.sql", import.meta.url),
   "utf8",
 );
+const COMPLETION_PROPOSALS_V15_SQL = readFileSync(
+  new URL("../src/migrations/015_completion_proposals.sql", import.meta.url),
+  "utf8",
+);
 const IMMUTABLE_HISTORY_TRIGGER_NAMES = [
   "skin_revision_immutable_update",
   "skin_revision_immutable_delete",
@@ -1286,6 +1290,132 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("materializes host component IDs before persistence and commits symmetric relations once", async () => {
+    const { store } = await createStore();
+    try {
+      const imported = await importRealSkin(store);
+      const first = await store.applyManualOperation(imported.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { displayName: "Host hair", category: "hair" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 8, x1: 8 }],
+        },
+      });
+      expect(first.generatedComponentId).toMatch(/^component_/u);
+      const firstOperation = await store.readRevisionOperation(first.revision.id);
+      expect(firstOperation.metadata).toMatchObject({
+        operation: {
+          type: "assign_pixels",
+          target: { instanceId: first.generatedComponentId },
+        },
+      });
+      const second = await store.applyManualOperation(first.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { displayName: "Host accessory", category: "head_accessory" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 9, x1: 9 }],
+        },
+      });
+      expect(second.generatedComponentId).not.toBe(first.generatedComponentId);
+      const third = await store.applyManualOperation(second.revision.id, {
+        operation: {
+          type: "assign_pixels",
+          target: { displayName: "Host third", category: "head_accessory" },
+          spans: [{ surface: "head.base.front", y: 8, x0: 10, x1: 10 }],
+        },
+      });
+      expect(third.generatedComponentId).toMatch(/^component_/u);
+
+      const related = await store.applyManualOperation(third.revision.id, {
+        operation: {
+          type: "set_component_relations",
+          componentId: first.generatedComponentId!,
+          relations: {
+            attachedTo: second.generatedComponentId!,
+            pairedWith: [second.generatedComponentId!],
+            sameOutfitGroup: "outfit.host",
+            conflictsWith: [second.generatedComponentId!],
+          },
+        },
+      });
+      const state = await store.readRevisionSemanticState(related.revision.id);
+      const byId = new Map(
+        state.document.components.map((component) => [component.instanceId, component]),
+      );
+      expect(byId.get(first.generatedComponentId!)!.relations).toEqual({
+        attachedTo: second.generatedComponentId,
+        pairedWith: [second.generatedComponentId],
+        sameOutfitGroup: "outfit.host",
+        conflictsWith: [second.generatedComponentId],
+      });
+      expect(byId.get(second.generatedComponentId!)!.relations).toMatchObject({
+        attachedTo: null,
+        pairedWith: [first.generatedComponentId],
+        conflictsWith: [first.generatedComponentId],
+      });
+      expect((await store.readRevisionOperation(related.revision.id)).affectedComponents)
+        .toEqual([
+          first.generatedComponentId!,
+          second.generatedComponentId!,
+        ].sort());
+
+      const replaced = await store.applyManualOperation(related.revision.id, {
+        operation: {
+          type: "set_component_relations",
+          componentId: first.generatedComponentId!,
+          relations: {
+            attachedTo: third.generatedComponentId!,
+            pairedWith: [third.generatedComponentId!],
+            sameOutfitGroup: "outfit.replaced",
+            conflictsWith: [third.generatedComponentId!],
+          },
+        },
+      });
+      const replacedState = await store.readRevisionSemanticState(
+        replaced.revision.id,
+      );
+      const replacedById = new Map(
+        replacedState.document.components.map((component) => [
+          component.instanceId,
+          component,
+        ]),
+      );
+      expect(replacedById.get(second.generatedComponentId!)!.relations)
+        .toMatchObject({ pairedWith: [], conflictsWith: [] });
+      expect(replacedById.get(third.generatedComponentId!)!.relations)
+        .toMatchObject({
+          pairedWith: [first.generatedComponentId],
+          conflictsWith: [first.generatedComponentId],
+        });
+      const replacedOperation = await store.readRevisionOperation(
+        replaced.revision.id,
+      );
+      expect(replacedOperation.affectedComponents).toEqual([
+        first.generatedComponentId!,
+        second.generatedComponentId!,
+        third.generatedComponentId!,
+      ].sort());
+      expect(new Set(replacedOperation.affectedComponents).size).toBe(
+        replacedOperation.affectedComponents.length,
+      );
+
+      await expect(store.applyManualOperation(replaced.revision.id, {
+        operation: {
+          type: "set_component_relations",
+          componentId: first.generatedComponentId!,
+          relations: {
+            attachedTo: third.generatedComponentId!,
+            pairedWith: [third.generatedComponentId!],
+            sameOutfitGroup: "outfit.replaced",
+            conflictsWith: [third.generatedComponentId!],
+          },
+        },
+      })).rejects.toMatchObject({ code: "INVALID_INPUT", statusCode: 400 });
+    } finally {
+      store.close();
+    }
+  });
+
   it("exports and reloads a reusable 64x64 semantic part", async () => {
     const { directory, store } = await createStore();
 
@@ -1571,7 +1701,7 @@ describe("RevisionStore", () => {
       const database = new Database(join(directory, "mcskinsplit.sqlite"));
       try {
         expect(database.prepare("SELECT MAX(version) AS version FROM schema_migration").get())
-          .toEqual({ version: 15 });
+          .toEqual({ version: 16 });
         expect(database.prepare("SELECT library_status, retired_at, retired_reason FROM part_asset WHERE id = ?").get(part.id))
           .toEqual({ library_status: "active", retired_at: null, retired_reason: null });
         expect(() => database.prepare(
@@ -1741,6 +1871,101 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("upgrades populated v15 Completion proposals without rewriting their candidate set", async () => {
+    const fixture = await createPopulatedV15CompletionFixture();
+    const legacy = new Database(join(fixture.directory, "mcskinsplit.sqlite"));
+    try {
+      expect(legacy.prepare(
+        "SELECT MAX(version) AS version FROM schema_migration",
+      ).get()).toEqual({ version: 15 });
+      expect(legacy.prepare(`
+        SELECT count(*) AS count FROM completion_candidate
+        WHERE proposal_id = ?
+      `).get(fixture.proposal.proposalId)).toEqual({
+        count: fixture.proposal.candidates.length,
+      });
+      expect(legacy.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'completion_candidate_edit'
+      `).get()).toBeUndefined();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = new RevisionStore({ dataDirectory: fixture.directory });
+    try {
+      const detail = await upgraded.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      );
+      expect(detail).toMatchObject({
+        status: "awaiting_decision",
+        candidateCount: fixture.proposal.candidates.length,
+      });
+      expect(detail.candidates.every(
+        (candidate) => candidate.baseCandidateId === null,
+      )).toBe(true);
+      const database = new Database(upgraded.databasePath);
+      try {
+        expect(database.prepare(
+          "SELECT MAX(version) AS version FROM schema_migration",
+        ).get()).toEqual({ version: 16 });
+        expect(database.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name = 'completion_candidate_edit'
+        `).get()).toEqual({ name: "completion_candidate_edit" });
+        const candidateGuard = database.prepare(`
+          SELECT sql FROM sqlite_master
+          WHERE type = 'trigger' AND name = 'completion_candidate_insert_guard'
+        `).get() as { readonly sql: string };
+        expect(candidateGuard.sql).toContain("NEW.strategy <> 'manual_edit'");
+        expect(candidateGuard.sql).toContain(
+          "json_type(NEW.candidate_json, '$.baseCandidateId') = 'null'",
+        );
+        expect(database.pragma("foreign_key_check")).toEqual([]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("rolls migration 16 back atomically when a populated v15 candidate set is incomplete", async () => {
+    const fixture = await createPopulatedV15CompletionFixture();
+    const databasePath = join(fixture.directory, "mcskinsplit.sqlite");
+    const corrupt = new Database(databasePath);
+    try {
+      corrupt.exec("DROP TRIGGER completion_candidate_immutable_delete");
+      expect(corrupt.prepare(
+        "DELETE FROM completion_candidate WHERE id = ?",
+      ).run(fixture.proposal.candidates[0]!.candidateId).changes).toBe(1);
+    } finally {
+      corrupt.close();
+    }
+
+    expect(() => new RevisionStore({ dataDirectory: fixture.directory }))
+      .toThrow(/CHECK constraint failed/u);
+
+    const rolledBack = new Database(databasePath);
+    try {
+      expect(rolledBack.prepare(
+        "SELECT MAX(version) AS version FROM schema_migration",
+      ).get()).toEqual({ version: 15 });
+      expect(rolledBack.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'completion_candidate_edit'
+      `).get()).toBeUndefined();
+      const candidateGuard = rolledBack.prepare(`
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'completion_candidate_insert_guard'
+      `).get() as { readonly sql: string };
+      expect(candidateGuard.sql).toContain("job.status = 'validating'");
+      expect(candidateGuard.sql).not.toContain("completion_candidate_edit");
+    } finally {
+      rolledBack.close();
+    }
+  });
+
   it("upgrades populated v13 Revisions and Part 1.0/1.1 rows without inventing origin", async () => {
     const fixture = await createPopulatedV13Fixture();
     const store = new RevisionStore({ dataDirectory: fixture.directory });
@@ -1750,7 +1975,7 @@ describe("RevisionStore", () => {
       try {
         expect(database.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 15 });
+        ).get()).toEqual({ version: 16 });
         expect(database.prepare(
           "SELECT origin_asset_id FROM skin_revision WHERE id = ?",
         ).get(fixture.revisionId)).toEqual({ origin_asset_id: null });
@@ -1775,6 +2000,7 @@ describe("RevisionStore", () => {
           ORDER BY name
         `).all()).toEqual([
           { name: "completion_candidate" },
+          { name: "completion_candidate_edit" },
           { name: "completion_decision" },
           { name: "completion_proposal" },
           { name: "completion_proposal_ranking" },
@@ -2051,7 +2277,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 15 });
+          ).get()).toEqual({ version: 16 });
           const triggers = upgraded.prepare(`
             SELECT name
             FROM sqlite_master
@@ -2144,7 +2370,7 @@ describe("RevisionStore", () => {
         downgradeSemanticFollowupToEarlyV11(legacy);
         expect(legacy.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 15 });
+        ).get()).toEqual({ version: 16 });
         const legacyInsertSql = legacy.prepare(
           "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'semantic_analysis_followup_insert_guard'",
         ).get() as { readonly sql: string };
@@ -2160,7 +2386,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 15 });
+          ).get()).toEqual({ version: 16 });
           expect(upgraded.prepare(`
             SELECT job_id, result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -2360,7 +2586,7 @@ describe("RevisionStore", () => {
         try {
           expect(upgraded.prepare(
             "SELECT MAX(version) AS version FROM schema_migration",
-          ).get()).toEqual({ version: 15 });
+          ).get()).toEqual({ version: 16 });
           expect(upgraded.prepare(`
             SELECT result_revision_id, status, assessment_json,
                    evidence_hash, applied_revision_id
@@ -2433,7 +2659,7 @@ describe("RevisionStore", () => {
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 15 });
+        ).get()).toEqual({ version: 16 });
         expect(afterFailure.prepare(
           "SELECT COUNT(*) AS count FROM semantic_analysis_followup WHERE job_id = ?",
         ).get("aijob_v11_invalid")).toEqual({ count: 1 });
@@ -2524,7 +2750,7 @@ describe("RevisionStore", () => {
       try {
         expect(afterFailure.prepare(
           "SELECT MAX(version) AS version FROM schema_migration",
-        ).get()).toEqual({ version: 15 });
+        ).get()).toEqual({ version: 16 });
         expect(afterFailure.prepare(`
           SELECT status, applied_revision_id
           FROM semantic_analysis_followup
@@ -4246,6 +4472,391 @@ describe("RevisionStore", () => {
     }
   });
 
+  it("persists and deterministically replays a bounded manual Completion candidate", async () => {
+    const created = await createStore();
+    let activeStore: RevisionStore = created.store;
+    try {
+      const fixture = await createCompletionFixture(activeStore, "skin_texel");
+      await activeStore.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(activeStore, fixture.jobId, fixture.proposal.proposalHash);
+      const base = fixture.proposal.candidates[0]!;
+      const pixelId = base.pixelIds[0]!;
+      const input = {
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        expectedCandidateHash: base.candidateHash,
+        actorId: "manual-candidate-editor",
+        edits: [{
+          type: "set_pixel" as const,
+          pixelId,
+          rgba: [9, 8, 7, 128] as [number, number, number, number],
+        }],
+      };
+
+      const edited = await activeStore.editCompletionCandidate(
+        fixture.proposal.proposalId,
+        base.candidateId,
+        input,
+      );
+      expect(edited.changed).toBe(true);
+      expect(edited.detail.document.candidates).toHaveLength(
+        fixture.proposal.candidates.length,
+      );
+      expect(edited.detail.candidateCount).toBe(fixture.proposal.candidates.length + 1);
+      const storedCandidate = edited.detail.candidates.find(
+        (candidate) => candidate.id === edited.editedCandidateId,
+      )!;
+      expect(storedCandidate).toMatchObject({
+        strategy: "manual_edit",
+        confidence: "manual",
+        baseCandidateId: base.candidateId,
+      });
+      await expect(activeStore.editCompletionCandidate(
+        fixture.proposal.proposalId,
+        base.candidateId,
+        input,
+      )).resolves.toMatchObject({
+        changed: false,
+        editedCandidateId: edited.editedCandidateId,
+      });
+      await expect(activeStore.editCompletionCandidate(
+        fixture.proposal.proposalId,
+        base.candidateId,
+        { ...input, edits: [{ type: "remove_pixel", pixelId: 0 }] },
+      )).rejects.toMatchObject({ code: "INVALID_INPUT", statusCode: 400 });
+
+      activeStore.close();
+      activeStore = new RevisionStore({ dataDirectory: created.directory });
+      const roundTrip = await activeStore.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      );
+      expect(roundTrip.candidates.find(
+        (candidate) => candidate.id === edited.editedCandidateId,
+      )).toMatchObject({ baseCandidateId: base.candidateId });
+      await expect(activeStore.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        {
+          candidateId: edited.editedCandidateId,
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: base.candidateHash,
+          actorId: "manual-candidate-editor",
+        },
+      )).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      const accepted = await activeStore.acceptCompletionCandidate(
+        fixture.proposal.proposalId,
+        {
+          candidateId: edited.editedCandidateId,
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: storedCandidate.candidateHash,
+          actorId: "manual-candidate-editor",
+        },
+      );
+      const origin = await activeStore.readRevisionOrigin(
+        accepted.detail.result!.revision!.id,
+      );
+      expect(getPixelOrigin(origin!, pixelId)).toMatchObject({
+        intrinsicOrigin: "manual_authored",
+        evidence: {
+          actor: { type: "user", id: "manual-candidate-editor" },
+        },
+      });
+    } finally {
+      activeStore.close();
+    }
+  });
+
+  it("rejects tampered derived Completion assignments and freezes edit evidence", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+      const base = fixture.proposal.candidates[0]!;
+      const requestedPixelId = base.pixelIds[0]!;
+      const edited = await store.editCompletionCandidate(
+        fixture.proposal.proposalId,
+        base.candidateId,
+        {
+          expectedSourceResultHash: fixture.proposal.sourceResultHash,
+          expectedProposalHash: fixture.proposal.proposalHash,
+          expectedEvidenceHash: fixture.proposal.evidenceHash,
+          expectedCandidateHash: base.candidateHash,
+          actorId: "tamper-test-editor",
+          edits: [{
+            type: "set_pixel",
+            pixelId: requestedPixelId,
+            rgba: [10, 20, 30, 64],
+          }],
+        },
+      );
+
+      const database = new Database(store.databasePath);
+      try {
+        expect(() => database.prepare(`
+          UPDATE completion_candidate_edit
+          SET actor_id = 'tampered'
+          WHERE candidate_id = ?
+        `).run(edited.editedCandidateId)).toThrow(
+          /completion_candidate_edit is immutable/u,
+        );
+        expect(() => database.prepare(`
+          DELETE FROM completion_candidate_edit WHERE candidate_id = ?
+        `).run(edited.editedCandidateId)).toThrow(
+          /completion_candidate_edit is immutable/u,
+        );
+
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "extra",
+          (document) => {
+            const unedited = document.assignments.find(
+              (assignment) => assignment.targetPixelId !== requestedPixelId,
+            );
+            if (!unedited) throw new Error("Expected one unedited assignment");
+            document.assignments.push({ ...unedited, targetPixelId: 0 });
+          },
+        )).toThrow(/invalid completion candidate binding/u);
+
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "missing",
+          (document) => {
+            document.assignments = document.assignments.filter(
+              (assignment) => assignment.targetPixelId === requestedPixelId,
+            );
+          },
+        )).toThrow(/invalid completion candidate binding/u);
+
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "empty",
+          (document) => {
+            document.assignments = [];
+          },
+          {
+            edits: base.assignments.map((assignment) => ({
+              type: "remove_pixel",
+              pixelId: assignment.targetPixelId,
+            })),
+            hashCharacter: "5",
+          },
+        )).toThrow(/invalid completion candidate binding/u);
+
+        const baseAssignment = base.assignments.find(
+          (assignment) => assignment.targetPixelId === requestedPixelId,
+        )!;
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "same_rgba",
+          (document) => {
+            const assignment = document.assignments.find(
+              (item) => item.targetPixelId === requestedPixelId,
+            )!;
+            assignment.rgba = [...baseAssignment.rgba];
+          },
+          {
+            edits: [{
+              type: "set_pixel",
+              pixelId: requestedPixelId,
+              rgba: [...baseAssignment.rgba],
+            }],
+            hashCharacter: "6",
+          },
+        )).toThrow(/invalid completion candidate binding/u);
+
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "extra_assignment_key",
+          (document) => {
+            const assignment = document.assignments.find(
+              (item) => item.targetPixelId === requestedPixelId,
+            )!;
+            assignment.unexpected = true;
+          },
+          { hashCharacter: "7" },
+        )).toThrow(/invalid completion candidate binding/u);
+
+        expect(() => insertTamperedDerivedCompletionCandidate(
+          database,
+          edited.editedCandidateId,
+          "extra_actor_key",
+          (document) => {
+            const assignment = document.assignments.find(
+              (item) => item.targetPixelId === requestedPixelId,
+            )!;
+            assignment.manualActor = {
+              type: "user",
+              id: "tamper-test-editor",
+              unexpected: true,
+            };
+          },
+          { hashCharacter: "8" },
+        )).toThrow(/invalid completion candidate binding/u);
+        expect(database.prepare(`
+          SELECT count(*) AS count FROM completion_candidate_edit
+          WHERE proposal_id = ?
+        `).get(fixture.proposal.proposalId)).toEqual({ count: 1 });
+      } finally {
+        database.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("fails closed for malformed or self-referential Completion edit rows", async () => {
+    const { store } = await createStore();
+    try {
+      const fixture = await createCompletionFixture(store, "skin_texel");
+      await store.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+      const base = fixture.proposal.candidates[0]!;
+      const database = new Database(store.databasePath);
+      try {
+        const insertEdit = database.prepare(`
+          INSERT INTO completion_candidate_edit (
+            candidate_id,
+            proposal_id,
+            base_candidate_id,
+            expected_source_result_hash,
+            expected_proposal_hash,
+            expected_evidence_hash,
+            expected_candidate_hash,
+            actor_type,
+            actor_id,
+            operation_id,
+            edits_json,
+            edit_hash,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'user', 'sql-guard-test', ?, ?, ?, ?)
+        `);
+        const attempt = (
+          suffix: string,
+          edits: readonly unknown[],
+          hashCharacter: string,
+          candidateId = `candidate_sql_guard_${suffix}`,
+        ) => insertEdit.run(
+          candidateId,
+          fixture.proposal.proposalId,
+          base.candidateId,
+          fixture.proposal.sourceResultHash,
+          fixture.proposal.proposalHash,
+          fixture.proposal.evidenceHash,
+          base.candidateHash,
+          `edit_sql_guard_${suffix}`,
+          JSON.stringify(edits),
+          `sha256:${hashCharacter.repeat(64)}`,
+          "2026-08-19T12:00:00.000Z",
+        );
+
+        expect(() => attempt(
+          "missing_type",
+          [{ pixelId: base.pixelIds[0]! }],
+          "1",
+        )).toThrow(/invalid completion candidate edit binding/u);
+        expect(() => attempt(
+          "missing_rgba",
+          [{ type: "set_pixel", pixelId: base.pixelIds[0]! }],
+          "2",
+        )).toThrow(/invalid completion candidate edit binding/u);
+        expect(() => attempt(
+          "extra_field",
+          [{
+            type: "remove_pixel",
+            pixelId: base.pixelIds[0]!,
+            unexpected: true,
+          }],
+          "3",
+        )).toThrow(/invalid completion candidate edit binding/u);
+        expect(() => attempt(
+          "self_reference",
+          [{ type: "remove_pixel", pixelId: base.pixelIds[0]! }],
+          "4",
+          base.candidateId,
+        )).toThrow(/CHECK constraint failed|invalid completion candidate edit binding/u);
+
+        expect(database.prepare(`
+          SELECT count(*) AS count FROM completion_candidate_edit
+          WHERE proposal_id = ?
+        `).get(fixture.proposal.proposalId)).toEqual({ count: 0 });
+      } finally {
+        database.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it("deduplicates the same manual Completion edit across two stores without deleting files", async () => {
+    const created = await createStore();
+    const primary = created.store;
+    let secondary: RevisionStore | null = null;
+    try {
+      const fixture = await createCompletionFixture(primary, "skin_texel");
+      await primary.createCompletionProposal({
+        jobId: fixture.jobId,
+        proposal: fixture.proposal,
+      });
+      finishCompletionJob(primary, fixture.jobId, fixture.proposal.proposalHash);
+      secondary = new RevisionStore({ dataDirectory: created.directory });
+      const base = fixture.proposal.candidates[0]!;
+      const input = {
+        expectedSourceResultHash: fixture.proposal.sourceResultHash,
+        expectedProposalHash: fixture.proposal.proposalHash,
+        expectedEvidenceHash: fixture.proposal.evidenceHash,
+        expectedCandidateHash: base.candidateHash,
+        actorId: "concurrent-editor",
+        edits: [{
+          type: "set_pixel" as const,
+          pixelId: base.pixelIds[0]!,
+          rgba: [70, 80, 90, 200] as [number, number, number, number],
+        }],
+      };
+      const outcomes = await Promise.all([
+        primary.editCompletionCandidate(
+          fixture.proposal.proposalId,
+          base.candidateId,
+          input,
+        ),
+        secondary.editCompletionCandidate(
+          fixture.proposal.proposalId,
+          base.candidateId,
+          input,
+        ),
+      ]);
+      expect(outcomes.map((outcome) => outcome.changed).sort()).toEqual([false, true]);
+      expect(new Set(outcomes.map((outcome) => outcome.editedCandidateId)).size).toBe(1);
+      const candidateId = outcomes[0]!.editedCandidateId;
+      await expect(primary.verifyCompletionCandidateStorage(candidateId)).resolves
+        .toMatchObject({ candidateId });
+      expect((await primary.getCompletionProposalDetail(
+        fixture.proposal.proposalId,
+      )).candidates.filter((candidate) => candidate.id === candidateId)).toHaveLength(1);
+    } finally {
+      secondary?.close();
+      primary.close();
+    }
+  });
+
   it("persists a latent Completion as an unpublished immutable Part without moving HEAD", async () => {
     const created = await createStore();
     let activeStore: RevisionStore = created.store;
@@ -4843,6 +5454,62 @@ interface CompletionFixture {
   readonly proposal: CompletionProposal;
 }
 
+async function createPopulatedV15CompletionFixture(): Promise<{
+  readonly directory: string;
+  readonly proposal: CompletionProposal;
+}> {
+  const { directory, store } = await createStore();
+  let fixture: CompletionFixture;
+  try {
+    fixture = await createCompletionFixture(store, "skin_texel");
+    await store.createCompletionProposal({
+      jobId: fixture.jobId,
+      proposal: fixture.proposal,
+    });
+    finishCompletionJob(store, fixture.jobId, fixture.proposal.proposalHash);
+  } finally {
+    store.close();
+  }
+
+  const database = new Database(join(directory, "mcskinsplit.sqlite"));
+  try {
+    downgradePlayerCompletionWorkflowsToV15(database);
+  } finally {
+    database.close();
+  }
+  return { directory, proposal: fixture!.proposal };
+}
+
+function downgradePlayerCompletionWorkflowsToV15(
+  database: Database.Database,
+): void {
+  const start = COMPLETION_PROPOSALS_V15_SQL.indexOf(
+    "CREATE TRIGGER completion_candidate_insert_guard",
+  );
+  const end = COMPLETION_PROPOSALS_V15_SQL.indexOf(
+    "CREATE TRIGGER completion_proposal_ranking_insert_guard",
+    start,
+  );
+  if (start < 0 || end < 0) {
+    throw new Error("Unable to recover the v15 Completion candidate guard");
+  }
+  const v15CandidateGuard = COMPLETION_PROPOSALS_V15_SQL.slice(start, end);
+  const downgrade = database.transaction(() => {
+    database.exec(`
+      DROP TRIGGER completion_candidate_edit_immutable_delete;
+      DROP TRIGGER completion_candidate_edit_immutable_update;
+      DROP TRIGGER completion_candidate_edit_insert_guard;
+      DROP TRIGGER completion_candidate_insert_guard;
+      DROP TABLE completion_candidate_edit;
+    `);
+    database.exec(v15CandidateGuard);
+    database.prepare(
+      "DELETE FROM schema_migration WHERE version = 16",
+    ).run();
+  });
+  downgrade.immediate();
+}
+
 async function createCompletionFixture(
   store: RevisionStore,
   representation: "skin_texel" | "latent_component",
@@ -5048,6 +5715,124 @@ function finishCompletionJob(
   } finally {
     database.close();
   }
+}
+
+interface MutableCompletionAssignment {
+  targetPixelId: number;
+  originMode: string;
+  manualOperationId?: string;
+  rgba?: number[];
+  manualActor?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+interface MutableCompletionCandidateDocument {
+  candidateId: string;
+  assignments: MutableCompletionAssignment[];
+  readonly [key: string]: unknown;
+}
+
+function insertTamperedDerivedCompletionCandidate(
+  database: Database.Database,
+  sourceCandidateId: string,
+  suffix: string,
+  mutate: (document: MutableCompletionCandidateDocument) => void,
+  options: {
+    readonly edits?: readonly unknown[];
+    readonly hashCharacter?: string;
+  } = {},
+): void {
+  const candidate = database.prepare(`
+    SELECT candidate_json FROM completion_candidate WHERE id = ?
+  `).get(sourceCandidateId) as { readonly candidate_json: string };
+  const edit = database.prepare(`
+    SELECT proposal_id, base_candidate_id,
+           expected_source_result_hash, expected_proposal_hash,
+           expected_evidence_hash, expected_candidate_hash,
+           actor_type, actor_id, edits_json, created_at
+    FROM completion_candidate_edit WHERE candidate_id = ?
+  `).get(sourceCandidateId) as {
+    readonly proposal_id: string;
+    readonly base_candidate_id: string;
+    readonly expected_source_result_hash: string;
+    readonly expected_proposal_hash: string;
+    readonly expected_evidence_hash: string;
+    readonly expected_candidate_hash: string;
+    readonly actor_type: "user";
+    readonly actor_id: string | null;
+    readonly edits_json: string;
+    readonly created_at: string;
+  };
+  const document = JSON.parse(
+    candidate.candidate_json,
+  ) as MutableCompletionCandidateDocument;
+  const candidateId = `completioncandidate_tampered_${suffix}`;
+  const operationId = `completionedit_tampered_${suffix}`;
+  const hashCharacter = options.hashCharacter ??
+    (suffix === "extra" ? "a" : suffix === "missing" ? "b" : "c");
+  const editHash = `sha256:${hashCharacter.repeat(64)}`;
+  document.candidateId = candidateId;
+  for (const assignment of document.assignments) {
+    if (assignment.originMode === "manual_authored") {
+      assignment.manualOperationId = operationId;
+    }
+  }
+  mutate(document);
+
+  const insert = database.transaction(() => {
+    database.prepare(`
+      INSERT INTO completion_candidate_edit (
+        candidate_id, proposal_id, base_candidate_id,
+        expected_source_result_hash, expected_proposal_hash,
+        expected_evidence_hash, expected_candidate_hash,
+        actor_type, actor_id, operation_id, edits_json, edit_hash, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      candidateId,
+      edit.proposal_id,
+      edit.base_candidate_id,
+      edit.expected_source_result_hash,
+      edit.expected_proposal_hash,
+      edit.expected_evidence_hash,
+      edit.expected_candidate_hash,
+      edit.actor_type,
+      edit.actor_id,
+      operationId,
+      options.edits === undefined
+        ? edit.edits_json
+        : JSON.stringify(options.edits),
+      editHash,
+      edit.created_at,
+    );
+    database.prepare(`
+      INSERT INTO completion_candidate (
+        id, proposal_id, representation, strategy, confidence, origin_mode,
+        pixel_count, generated_pixel_count, candidate_json, candidate_hash,
+        evidence_hash, document_storage_path, document_byte_size,
+        document_sha256, texture_storage_path, texture_byte_size,
+        texture_sha256, write_mask_storage_path, write_mask_byte_size,
+        write_mask_sha256, generated_mask_storage_path,
+        generated_mask_byte_size, generated_mask_sha256, created_at
+      )
+      SELECT ?, proposal_id, representation, strategy, confidence, origin_mode,
+        pixel_count, generated_pixel_count, ?, candidate_hash,
+        evidence_hash, document_storage_path || ?, document_byte_size,
+        document_sha256, texture_storage_path || ?, texture_byte_size,
+        texture_sha256, write_mask_storage_path || ?, write_mask_byte_size,
+        write_mask_sha256, generated_mask_storage_path || ?,
+        generated_mask_byte_size, generated_mask_sha256, created_at
+      FROM completion_candidate WHERE id = ?
+    `).run(
+      candidateId,
+      JSON.stringify(document),
+      `-${suffix}`,
+      `-${suffix}`,
+      `-${suffix}`,
+      `-${suffix}`,
+      sourceCandidateId,
+    );
+  });
+  insert.immediate();
 }
 
 interface SemanticFollowupSuggestionFixture {

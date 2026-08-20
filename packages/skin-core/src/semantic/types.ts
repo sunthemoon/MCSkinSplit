@@ -215,6 +215,16 @@ export type ManualSemanticOperation =
       readonly componentId: string;
       readonly category: SemanticCategory;
       readonly subtype?: string;
+    }
+  | {
+      readonly type: "set_component_relations";
+      readonly componentId: string;
+      readonly relations: {
+        readonly attachedTo: string | null;
+        readonly pairedWith: readonly string[];
+        readonly sameOutfitGroup: string | null;
+        readonly conflictsWith: readonly string[];
+      };
     };
 
 export interface PartRepairDerivation {
